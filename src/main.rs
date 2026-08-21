@@ -4,8 +4,11 @@
 //! the tail assistant block live → usage lands in the turn trailer. Esc
 //! aborts the in-flight request; history is in-memory until sessions land.
 
-use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal;
+use crossterm::event::{
+    Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers,
+    EnableBracketedPaste, DisableBracketedPaste,
+};
+use crossterm::{execute, terminal};
 use futures::StreamExt;
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -31,6 +34,8 @@ struct ActiveTurn {
     error: Option<String>,
     /// tool id → transcript block index, so ToolEnd updates the right row.
     tool_blocks: std::collections::HashMap<u64, usize>,
+    /// The live reasoning block, shown dimmed while the model thinks.
+    reasoning: Option<usize>,
 }
 
 struct App {
@@ -92,6 +97,7 @@ impl App {
             MenuItem::new("/model", "switch the model", "/model"),
             MenuItem::new("/resume", "resume a saved session", "/resume"),
             MenuItem::new("/new", "start a fresh session", "/new"),
+            MenuItem::new("/copy", "copy the last reply", "/copy"),
             MenuItem::new("/help", "show commands", "/help"),
             MenuItem::new("/version", "show the version", "/version"),
             MenuItem::new("/quit", "exit", "/quit"),
@@ -192,6 +198,19 @@ impl App {
         }
     }
 
+    fn open_skills_menu(&mut self, query: &str) {
+        let items: Vec<MenuItem> = e::core::skills::list()
+            .into_iter()
+            .map(|s| MenuItem::new(&s.name, &s.description, &s.name))
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let mut menu = Menu::new(MenuKind::Skills, "Skills", HINT_USE, items);
+        menu.set_query(query);
+        self.menu = Some(menu);
+    }
+
     fn open_file_menu(&mut self, query: &str) {
         let cwd = std::env::current_dir().unwrap_or_default();
         let items = e::core::workspace::list_files(&cwd)
@@ -223,7 +242,7 @@ impl App {
             }
             return;
         }
-        // File picker: the last whitespace-delimited token starts with '@'.
+        // File picker: the last token starts with '@'.
         if let Some(token) = text.split_whitespace().last().filter(|t| t.starts_with('@')) {
             let query = token[1..].to_string();
             match &mut self.menu {
@@ -232,10 +251,19 @@ impl App {
             }
             return;
         }
+        // Skills picker: the last token starts with '$'.
+        if let Some(token) = text.split_whitespace().last().filter(|t| t.starts_with('$')) {
+            let query = token[1..].to_string();
+            match &mut self.menu {
+                Some(m) if m.kind == MenuKind::Skills => m.set_query(&query),
+                _ => self.open_skills_menu(&query),
+            }
+            return;
+        }
         // Auto pickers close when their trigger text is gone.
         if matches!(
             self.menu.as_ref().map(|m| m.kind),
-            Some(MenuKind::Commands) | Some(MenuKind::Files)
+            Some(MenuKind::Commands) | Some(MenuKind::Files) | Some(MenuKind::Skills)
         ) {
             self.menu = None;
         }
@@ -267,6 +295,23 @@ impl App {
             MenuKind::Sessions => {
                 self.resume_path(std::path::PathBuf::from(item.value));
             }
+            MenuKind::Skills => {
+                // Replace the $token, then send the skill body as context.
+                let text = self.editor.text();
+                let rest = match text.rfind('$') {
+                    Some(at) => text[..at].trim_end().to_string(),
+                    None => String::new(),
+                };
+                self.editor.set_text("");
+                if let Some(skill) = e::core::skills::get(&item.value) {
+                    let combined = if rest.is_empty() {
+                        skill.body
+                    } else {
+                        format!("{}\n\n{rest}", skill.body)
+                    };
+                    self.prompt(combined);
+                }
+            }
             MenuKind::Models => {
                 if let Some(found) = model::resolve(&item.value) {
                     persist_model(&found);
@@ -284,6 +329,7 @@ impl App {
             "/login" => self.open_login_menu(),
             "/model" => self.open_model_menu(),
             "/resume" => self.open_resume_menu(),
+            "/copy" => self.copy_last(),
             other => self.submit(other.to_string()),
         }
     }
@@ -343,6 +389,7 @@ impl App {
                 self.transcript.push(Block::new(Kind::Banner, e::VERSION));
             }
             "/resume" => self.open_resume_menu(),
+            "/copy" => self.copy_last(),
             _ if trimmed.starts_with('/') => {
                 self.notice(format!("unknown command {trimmed}"));
             }
@@ -391,6 +438,7 @@ impl App {
                     started: Instant::now(),
                     error: None,
                     tool_blocks: std::collections::HashMap::new(),
+                    reasoning: None,
                 });
             }
             SessionEvent::Steered(text) => {
@@ -404,6 +452,7 @@ impl App {
             }
             SessionEvent::TextDelta(delta) => {
                 if let Some(s) = &mut self.active {
+                    s.reasoning = None;
                     s.text.push_str(&delta);
                     let idx = match s.block {
                         Some(idx) => idx,
@@ -420,14 +469,28 @@ impl App {
                     }
                 }
             }
-            SessionEvent::ReasoningDelta(_) => {
-                // Reasoning stays out of the transcript; the indicator says Thinking.
+            SessionEvent::ReasoningDelta(delta) => {
+                if let Some(s) = &mut self.active {
+                    let idx = match s.reasoning {
+                        Some(idx) => idx,
+                        None => {
+                            let idx = self.transcript.push(Block::new(Kind::Reasoning, ""));
+                            s.reasoning = Some(idx);
+                            idx
+                        }
+                    };
+                    if let Some(b) = self.transcript.blocks.get_mut(idx) {
+                        b.text.push_str(&delta);
+                        b.touch();
+                    }
+                }
             }
             SessionEvent::ToolStart { id, verb, target } => {
                 if let Some(s) = &mut self.active {
                     // A new tool ends the current text block; text after tools
                     // opens a fresh one.
                     s.block = None;
+                    s.reasoning = None;
                     s.text.clear();
                     s.turn.note_tool_verb(&verb);
                     let mut block = Block::new(Kind::Tool, verb);
@@ -458,6 +521,9 @@ impl App {
                     s.turn.output += output;
                 }
             }
+            SessionEvent::Retry { attempt, message } => {
+                self.notice(format!("retrying ({attempt}/2): {message}"));
+            }
             SessionEvent::Error(message) => {
                 if let Some(s) = &mut self.active {
                     s.error = Some(message);
@@ -482,6 +548,31 @@ impl App {
                     self.notice(format!("error: {message}"));
                 }
             }
+        }
+    }
+
+    fn copy_last(&mut self) {
+        let last = self
+            .agent
+            .history_snapshot()
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant" && !m.content.trim().is_empty())
+            .map(|m| m.content.clone());
+        match last {
+            Some(text) => {
+                let ok = std::process::Command::new("pbcopy")
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .and_then(|mut c| {
+                        use std::io::Write;
+                        c.stdin.take().unwrap().write_all(text.as_bytes())?;
+                        c.wait()
+                    })
+                    .is_ok();
+                self.notice(if ok { "copied the last reply".into() } else { "copy failed (no pbcopy)".into() });
+            }
+            None => self.notice("nothing to copy yet".into()),
         }
     }
 
@@ -511,11 +602,8 @@ fn ago(ms: u64) -> String {
 }
 
 fn system_prompt() -> String {
-    let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
-    format!(
-        "You are e, a fast, concise coding agent in a terminal. Answer in markdown. \
-         Be direct; prefer short answers unless asked for depth.\nWorking directory: {cwd}"
-    )
+    let cwd = std::env::current_dir().unwrap_or_default();
+    e::core::context::system_prompt(&cwd)
 }
 
 fn persist_model(m: &Model) {
@@ -575,6 +663,7 @@ async fn main() -> std::io::Result<()> {
     // Raw mode first: background detection needs the reply un-line-buffered.
     terminal::enable_raw_mode()?;
     let _guard = RawGuard;
+    execute!(std::io::stdout(), EnableBracketedPaste)?;
     let light = e::tui::background::detect_light().unwrap_or(false);
     let theme = load_bundled(light).map_err(std::io::Error::other)?;
 
@@ -625,6 +714,12 @@ async fn main() -> std::io::Result<()> {
             maybe = events.next() => {
                 let Some(Ok(event)) = maybe else { break };
                 match event {
+                    TermEvent::Paste(text) => {
+                        // A paste is one unit: insert literally, never triggering
+                        // a picker or submit mid-block.
+                        app.editor.insert_str(&text.replace('\r', "\n"));
+                        app.sync_menu();
+                    }
                     TermEvent::Resize(c, r) => screen.resize(c, r),
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -726,6 +821,7 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     drop(_guard);
     let mut out = std::io::stdout();
     write!(out, "\r\n\x1b[?25h")?;

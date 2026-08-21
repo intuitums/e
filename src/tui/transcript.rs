@@ -13,6 +13,7 @@ pub enum Kind {
     Banner,
     User,
     Assistant,
+    Reasoning,
     Tool,
     Summary,
     Notice,
@@ -88,6 +89,15 @@ impl Block {
                 }];
                 rows
             }
+            Kind::Reasoning => {
+                let text = self.text.trim();
+                if text.is_empty() { return Vec::new(); }
+                // Dimmed, gutter-indented, italicized thinking.
+                crate::tui::markdown::wrap_styled(text, width.saturating_sub(2).max(8))
+                    .into_iter()
+                    .map(|l| format!("  {}", theme.fg("dim", &crate::tui::render::italic(&l))))
+                    .collect()
+            }
             Kind::Summary => vec![theme.fg("dim", &format!("  {}", self.text))],
             Kind::Notice => wrap_styled(&self.text, width.saturating_sub(2).max(8))
                 .into_iter()
@@ -100,6 +110,8 @@ impl Block {
 fn gap(prev: Kind, next: Kind) -> usize {
     if prev == Kind::Tool && next == Kind::Tool { 0 } else { 1 }
 }
+
+// (reasoning uses the default one-row gap before the reply that follows it)
 
 #[derive(Default)]
 pub struct Transcript {

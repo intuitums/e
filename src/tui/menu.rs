@@ -44,6 +44,7 @@ pub enum MenuKind {
     Files,
     Models,
     Sessions,
+    Skills,
 }
 
 pub struct Menu {

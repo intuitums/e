@@ -20,6 +20,10 @@ pub fn bold(s: &str) -> String {
     format!("{BOLD_ON}{s}{WEIGHT_OFF}")
 }
 
+pub fn italic(s: &str) -> String {
+    format!("{ITALIC_ON}{s}{ITALIC_OFF}")
+}
+
 pub fn dim(s: &str) -> String {
     format!("{DIM_ON}{s}{WEIGHT_OFF}")
 }

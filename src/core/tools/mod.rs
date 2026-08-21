@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 mod bash;
 mod edit;
 mod fs;
+mod skill;
 
 /// Result of a tool call: text for the model, plus a short display line.
 pub struct ToolOutput {
@@ -54,6 +55,7 @@ pub fn present(name: &str, args: &Value) -> (String, String) {
         "bash" => ("Ran".into(), args["command"].as_str().unwrap_or("").lines().next().unwrap_or("").to_string()),
         "grep" => ("Searched".into(), args["pattern"].as_str().unwrap_or("").to_string()),
         "ls" => ("Listed".into(), args["path"].as_str().unwrap_or(".").to_string()),
+        "skill" => ("Skill".into(), args["name"].as_str().unwrap_or("").to_string()),
         other => (other.to_string(), String::new()),
     }
 }
@@ -71,6 +73,7 @@ static SPECS: &[Spec] = &[
     Spec { name: "ls", schema: fs::ls_schema, run: fs::ls },
     Spec { name: "grep", schema: fs::grep_schema, run: fs::grep },
     Spec { name: "bash", schema: bash::schema, run: bash::run },
+    Spec { name: "skill", schema: skill::schema, run: skill::run },
 ];
 
 /// Execute a named tool. `cwd` is the workspace root.

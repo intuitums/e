@@ -36,6 +36,16 @@ fn commit(
     }
 }
 
+fn clone_request(r: &Request) -> Request {
+    Request {
+        model: r.model.clone(),
+        system: r.system.clone(),
+        messages: r.messages.clone(),
+        effort: r.effort.clone(),
+        tools: r.tools.clone(),
+    }
+}
+
 #[derive(Debug)]
 pub enum SessionEvent {
     TurnStart,
@@ -47,6 +57,8 @@ pub enum SessionEvent {
     ToolEnd { id: u64, summary: String, is_error: bool },
     Usage { input: u64, output: u64, cache_read: u64 },
     Error(String),
+    /// A transient failure is being retried.
+    Retry { attempt: u32, message: String },
     /// A steering message was accepted mid-turn (for display as a user block).
     Steered(String),
     TurnEnd { aborted: bool },
@@ -153,12 +165,14 @@ impl Agent {
                     effort: effort.clone(),
                     tools: tools::schemas(),
                 };
-                let (mut rx, handle) = provider::stream(request);
+
+                let mut attempt = 0u32;
+                let (mut rx, mut handle) = provider::stream(clone_request(&request));
 
                 let mut text = String::new();
                 let mut calls: Vec<ToolCall> = Vec::new();
                 let mut errored = false;
-                while let Some(event) = rx.recv().await {
+                'stream: while let Some(event) = rx.recv().await {
                     if cancel.load(Ordering::SeqCst) {
                         handle.abort();
                         break 'turn true;
@@ -175,7 +189,25 @@ impl Agent {
                         ProviderEvent::Usage { input, output, cache_read } => {
                             let _ = events.send(SessionEvent::Usage { input, output, cache_read }).await;
                         }
-                        ProviderEvent::Error { message, .. } => {
+                        ProviderEvent::Error { message, delivered } => {
+                            // Only a definitely-unsent failure is safe to retry
+                            // (fx's DeliveryCertainty): a delivered request may
+                            // have run tools or been billed.
+                            let retryable = !delivered
+                                && !message.contains("no credentials")
+                                && !message.contains("run /login");
+                            if retryable && text.is_empty() && calls.is_empty() && attempt < 2 {
+                                attempt += 1;
+                                let backoff = std::time::Duration::from_millis(500 * attempt as u64);
+                                let _ = events
+                                    .send(SessionEvent::Retry { attempt, message: message.clone() })
+                                    .await;
+                                tokio::time::sleep(backoff).await;
+                                let (nrx, nhandle) = provider::stream(clone_request(&request));
+                                rx = nrx;
+                                handle = nhandle;
+                                continue 'stream;
+                            }
                             let _ = events.send(SessionEvent::Error(message)).await;
                             errored = true;
                         }
