@@ -39,6 +39,10 @@ struct App {
     should_quit: bool,
     /// Prompt-side tokens of the latest request ≈ current context size.
     context_tokens: u64,
+    /// A provider awaiting a pasted API key; the next submit is the secret.
+    pending_key: Option<String>,
+    /// Background job narration (login flows) into the transcript.
+    jobs: tokio::sync::mpsc::Sender<String>,
 }
 
 impl App {
@@ -69,10 +73,32 @@ impl App {
         }
         self.editor.push_history(text);
 
+        if let Some(secret_for) = self.pending_key.take() {
+            self.editor.mask = false;
+            match e::core::login::save_api_key(&secret_for, &trimmed) {
+                Ok(()) => self.notice(format!("{secret_for}: key saved to ~/.e/auth.json")),
+                Err(e) => self.notice(format!("{secret_for}: {e}")),
+            }
+            return;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("/login") {
+            self.login(rest.trim().to_string());
+            return;
+        }
+
         if let Some(rest) = trimmed.strip_prefix("/model") {
             let query = rest.trim();
             if query.is_empty() {
-                self.notice(format!("model: {}", self.agent.model_slug()));
+                let current = self.agent.model_slug();
+                let mut listing = String::from("models:");
+                for m in model::catalog() {
+                    let slug = model::slug(&m);
+                    let mark = if slug == current { "  ← current" } else { "" };
+                    listing.push_str(&format!("\n  {slug}{mark}"));
+                }
+                listing.push_str("\n\nswitch with /model <name>");
+                self.notice(listing);
             } else if let Some(found) = model::resolve(query) {
                 persist_model(&found);
                 self.notice(format!("model set to {}", model::slug(&found)));
@@ -85,6 +111,10 @@ impl App {
         match trimmed.as_str() {
             "/quit" | "/exit" => self.should_quit = true,
             "/version" => self.notice(format!("e {}", e::VERSION)),
+            "/help" => self.notice(
+                "commands:\n  /login [provider]   sign in (API key or account)\n  /model [name]       list or switch models\n  /new                fresh session\n  /version            show the version\n  /quit               exit"
+                    .into(),
+            ),
             "/new" | "/clear" => {
                 self.context_tokens = 0;
                 self.agent.clear();
@@ -95,6 +125,27 @@ impl App {
                 self.notice(format!("unknown command {trimmed}"));
             }
             _ => self.prompt(trimmed),
+        }
+    }
+
+    /// `/login` — bare lists providers and methods; with a provider, runs
+    /// that provider's method: Account (browser OAuth) or API key (masked
+    /// paste into the composer).
+    fn login(&mut self, provider: String) {
+        if provider.is_empty() {
+            self.notice(
+                "sign in with /login <provider>:\n  openai-codex   Account — opens the browser (ChatGPT sign-in)\n  opencode-go    API key — pasted here, stored in ~/.e/auth.json\n\nany other provider name is treated as an API-key provider"
+                    .into(),
+            );
+            return;
+        }
+        if provider == "openai-codex" {
+            self.notice("starting the openai-codex sign-in…".into());
+            tokio::spawn(e::core::login::codex_login(provider, self.jobs.clone()));
+        } else {
+            self.notice(format!("paste the {provider} API key and press enter (esc cancels)"));
+            self.pending_key = Some(provider);
+            self.editor.mask = true;
         }
     }
 
@@ -241,24 +292,7 @@ async fn main() -> std::io::Result<()> {
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("auth") {
-        let result = match args.get(1).map(String::as_str) {
-            None | Some("status") => {
-                e::core::login::auth_status();
-                Ok(())
-            }
-            Some("openai-codex") => e::core::login::auth_codex("openai-codex").await,
-            Some(provider) => e::core::login::auth_api_key(provider),
-        };
-        if let Err(message) = result {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        return Ok(());
-    }
-    if args.first().map(String::as_str) == Some("models") {
-        for m in e::core::model::catalog() {
-            println!("{}", e::core::model::slug(&m));
-        }
+        e::core::login::auth_status();
         return Ok(());
     }
 
@@ -272,6 +306,7 @@ async fn main() -> std::io::Result<()> {
     let (cols, rows) = terminal::size()?;
     let mut screen = Screen::new(cols, rows);
     let (agent, mut session_events) = Agent::new(model::default_model());
+    let (jobs_tx, mut jobs_rx) = tokio::sync::mpsc::channel::<String>(16);
     let mut app = App {
         theme,
         transcript: Transcript::default(),
@@ -282,6 +317,8 @@ async fn main() -> std::io::Result<()> {
         armed_at: None,
         should_quit: false,
         context_tokens: 0,
+        pending_key: None,
+        jobs: jobs_tx,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
     // A message on the command line becomes the first prompt.
@@ -311,7 +348,12 @@ async fn main() -> std::io::Result<()> {
                     TermEvent::Resize(c, r) => screen.resize(c, r),
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                        if k.code == KeyCode::Esc && app.agent.is_streaming() {
+                        if k.code == KeyCode::Esc && app.pending_key.is_some() {
+                            app.pending_key = None;
+                            app.editor.mask = false;
+                            app.editor.set_text("");
+                            app.notice("login cancelled".into());
+                        } else if k.code == KeyCode::Esc && app.agent.is_streaming() {
                             app.agent.interrupt();
                         } else if ctrl && k.code == KeyCode::Char('c') {
                             if app.agent.is_streaming() {
@@ -340,6 +382,11 @@ async fn main() -> std::io::Result<()> {
                 match event {
                     Some(e) => app.on_session_event(e),
                     None => break,
+                }
+            }
+            message = jobs_rx.recv() => {
+                if let Some(message) = message {
+                    app.notice(message);
                 }
             }
             _ = tick.tick() => {

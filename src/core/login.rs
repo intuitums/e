@@ -37,25 +37,31 @@ pub fn auth_status() {
     }
 }
 
-/// Prompt for an API key on stdin and store it.
-pub fn auth_api_key(provider: &str) -> Result<(), String> {
-    eprint!("paste the {provider} API key: ");
-    std::io::stderr().flush().ok();
-    let mut key = String::new();
-    std::io::stdin().read_line(&mut key).map_err(|e| e.to_string())?;
-    let key = key.trim().to_string();
+/// Store an API key for a provider.
+pub fn save_api_key(provider: &str, key: &str) -> Result<(), String> {
+    let key = key.trim();
     if key.is_empty() {
         return Err("empty key".into());
     }
     let mut file = auth::load();
-    file.insert(provider.to_string(), Credential::ApiKey { key });
-    auth::save(&file).map_err(|e| e.to_string())?;
-    println!("saved to ~/.e/auth.json");
-    Ok(())
+    file.insert(provider.to_string(), Credential::ApiKey { key: key.to_string() });
+    auth::save(&file).map_err(|e| e.to_string())
 }
 
-/// The browser PKCE flow for the ChatGPT backend.
-pub async fn auth_codex(provider: &str) -> Result<(), String> {
+/// The browser PKCE flow, reporting progress through `notify` so the TUI can
+/// narrate it. The blocking callback wait runs off the async runtime.
+pub async fn codex_login(provider: String, notify: tokio::sync::mpsc::Sender<String>) {
+    let message = match codex_login_inner(&provider, &notify).await {
+        Ok(()) => format!("signed in to {provider} — saved to ~/.e/auth.json"),
+        Err(e) => format!("login failed: {e}"),
+    };
+    let _ = notify.send(message).await;
+}
+
+async fn codex_login_inner(
+    provider: &str,
+    notify: &tokio::sync::mpsc::Sender<String>,
+) -> Result<(), String> {
     let mut verifier_bytes = [0u8; 64];
     rand::thread_rng().fill_bytes(&mut verifier_bytes);
     let verifier = b64url(&verifier_bytes);
@@ -76,10 +82,13 @@ pub async fn auth_codex(provider: &str) -> Result<(), String> {
     let listener = TcpListener::bind("127.0.0.1:1455")
         .map_err(|e| format!("cannot listen on localhost:1455 ({e}) — is another login running?"))?;
 
-    eprintln!("opening browser…\n\n  {authorize}\n");
+    let _ = notify.send("opening the browser to sign in…".into()).await;
     let _ = std::process::Command::new("open").arg(&authorize).spawn();
 
-    let code = wait_for_code(&listener, &state)?;
+    let expected = state.clone();
+    let code = tokio::task::spawn_blocking(move || wait_for_code(&listener, &expected))
+        .await
+        .map_err(|e| e.to_string())??;
 
     let response = crate::core::provider::http()
         .post(format!("{AUTH_BASE}/oauth/token"))
@@ -119,13 +128,11 @@ pub async fn auth_codex(provider: &str) -> Result<(), String> {
         },
     );
     auth::save(&file).map_err(|e| e.to_string())?;
-    println!("signed in — saved to ~/.e/auth.json");
     Ok(())
 }
 
 /// Accept exactly one callback request, validate state, answer with a page.
 fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String, String> {
-    eprintln!("waiting for the browser callback…");
     for incoming in listener.incoming() {
         let mut stream = incoming.map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);

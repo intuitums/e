@@ -8,6 +8,8 @@ use crate::tui::markdown::visible_width;
 use crate::tui::theme::Theme;
 
 pub struct Editor {
+    /// Render `•` per character — for secret entry (/login keys).
+    pub mask: bool,
     text: Vec<char>,
     cursor: usize,
     history: Vec<String>,
@@ -23,7 +25,7 @@ pub enum EditorResult {
 
 impl Editor {
     pub fn new() -> Self {
-        Editor { text: Vec::new(), cursor: 0, history: Vec::new(), history_pos: None, draft: String::new() }
+        Editor { mask: false, text: Vec::new(), cursor: 0, history: Vec::new(), history_pos: None, draft: String::new() }
     }
 
     pub fn text(&self) -> String {
@@ -155,7 +157,7 @@ impl Editor {
         let mut rows = vec![String::new()];
 
         // Split into logical lines, tracking where the cursor falls.
-        let text = self.text();
+        let text = if self.mask { "•".repeat(self.text.len()) } else { self.text() };
         let mut consumed = 0usize;
         let logical: Vec<&str> = if text.is_empty() { vec![""] } else { text.split('\n').collect() };
         for (li, line) in logical.iter().enumerate() {
