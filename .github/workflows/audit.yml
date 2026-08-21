@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   audit:
-    name: cargo audit
+    name: Cargo
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
