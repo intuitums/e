@@ -1,0 +1,6 @@
+date:            2026-08-21_06-31
+version:         e 0.3.0 (64a1154)
+machine:         arm64 · Darwin 27.0.0
+binary size:     5430928 bytes (5.18 MiB)
+cold start:      3.2 ms   (e --version, median of 20)
+first frame:     6.2 ms   (spawn → banner on a bare home, median of 5)
