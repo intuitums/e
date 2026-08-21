@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- The `!` passthrough sent its argument under the wrong key ("cmd" vs
+  the tool's "command"), so every `!` command returned an argument error
+  instead of running — found reviewing this stack; the smoke that should
+  have caught it matched the typed text instead of real output.
+- The bash tool's timeout is real: the advertised wall-clock bound was
+  never enforced (a runaway command hung the agent forever). Commands now
+  run as their own process group and the group is killed at the deadline;
+  output pipes are drained while polling so large output cannot deadlock
+  the wait. guard.sh gains core/tools/bash.rs as an audited unsafe site
+  (setsid + kill).
 - Release profile: thin LTO, one codegen unit, stripped symbols — a third
   off the binary (8.02 → 5.18 MiB) with speed unchanged. Unwinding stays
   on so a panicking tool remains a tool error, not a dead session.
