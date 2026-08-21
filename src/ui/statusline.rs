@@ -1,7 +1,7 @@
 //! Activity row and status line — pure projections of app state.
 
-use crate::core::output::{compact_model_label, format_tokens};
-use crate::ui::render_engine::markdown::visible_width;
+use crate::kernel::output::{compact_model_label, format_tokens};
+use crate::ui::frame::markdown::visible_width;
 use crate::ui::theme::Theme;
 use std::collections::BTreeMap;
 

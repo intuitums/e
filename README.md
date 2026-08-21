@@ -52,20 +52,24 @@ drift silently.
 
 ## Layout
 
+The tree speaks e's own vocabulary:
+
 ```
 src/
-  core/            the harness kernel — no terminal dependencies
-  ui/              the frontend
-    render_engine/ markdown → lines, syntax coloring, the diffing painter
-tests/             the parity suite (byte-pinned visual contract)
-scripts/           pty capture + replay harness
-themes/            the two palettes
-legacy/            the previous TypeScript frontend, kept as the executable
-                   reference until the Rust harness reaches parity
+  kernel/     the harness — budgeted (DESIGN.md §3), terminal-free
+  ui/         the frontend
+    frame/    the line machinery: markdown → styled lines, syntax
+              tinting, and the diffing painter
+    composer.rs  transcript.rs  statusline.rs  style.rs  theme.rs
+tests/        the parity suite (the byte-pinned visual contract)
+scripts/      pty capture + replay harness
+themes/       the two palettes
+legacy/       the previous TypeScript frontend, kept as the executable
+              reference until the Rust harness reaches parity
 ```
 
-`src/tools/`, `src/builtins/`, and the rest of `src/core/` (providers, agent
-loop, sessions, permissions) land milestone by milestone.
+Tools and the rest of the kernel (providers, agent loop, sessions,
+permissions) land milestone by milestone.
 
 ## Run
 

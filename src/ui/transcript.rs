@@ -4,8 +4,8 @@
 //! runs of tool rows contiguous. Blocks render (and cache) their final lines
 //! at a given width; streaming touches only the tail block.
 
-use crate::ui::render::{bold, dim};
-use crate::ui::render_engine::markdown::{render_markdown, wrap_styled};
+use crate::ui::style::{bold, dim};
+use crate::ui::frame::markdown::{render_markdown, wrap_styled};
 use crate::ui::theme::Theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]

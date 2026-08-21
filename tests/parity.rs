@@ -2,8 +2,8 @@
 //! test literals. Ported from `test/parity.test.ts`, which remains the
 //! executable TypeScript twin until the swap milestone.
 
-use e::core::output::{compact_model_label, format_duration, format_tokens};
-use e::ui::render::heading_style;
+use e::kernel::output::{compact_model_label, format_duration, format_tokens};
+use e::ui::style::heading_style;
 use e::ui::theme::Theme;
 
 #[test]
@@ -89,7 +89,7 @@ fn the_palette_carries_the_reference_values() {
     }
 }
 
-use e::ui::render_engine::markdown::{code_panel, render_markdown};
+use e::ui::frame::markdown::{code_panel, render_markdown};
 
 fn dark() -> Theme {
     read_theme("dark").0

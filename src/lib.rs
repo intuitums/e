@@ -1,11 +1,11 @@
 //! e — a TUI for coding agents.
 //!
-//! Layout mirrors the reference design's tree: `core/` is the harness kernel
-//! (engine-facing, no terminal dependencies), `ui/` is the frontend, with
-//! `ui/render_engine/` holding the line-level machinery. `tools/` and
-//! `builtins/` arrive with the agent loop.
+//! The tree speaks e's own vocabulary (DESIGN.md): `kernel/` is the budgeted,
+//! terminal-free harness; `ui/` is the frontend, with `ui/frame/` holding the
+//! line machinery — markdown folded to styled lines, syntax tinting, and the
+//! diffing painter.
 
-pub mod core;
+pub mod kernel;
 pub mod ui;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
