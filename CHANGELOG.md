@@ -8,7 +8,11 @@
   four-hour freshness window — a model a gateway ships today appears in
   `/models` today, no e release involved — and opening the picker asks
   the gateways again (60-second floor), popping new rows into the open
-  picker the moment the answer lands. Built-ins and `models.json` always
+  picker the moment the answer lands. Windows the gateway reports
+  (context_length and friends) are kept instead of the 200k default;
+  non-chat ids (embeddings, audio, images, moderation) and dated aliases
+  of listed models are filtered; refreshes are serialized in-process; and
+  grok-build-0.1 leaves the built-ins. Built-ins and `models.json` always
   win a name clash; failures are silent.
 - OpenCode Go and OpenCode Zen are two providers, as they actually are:
   `opencode-go` (the Go plan gateway, zen/go/v1) and `opencode` (the Zen

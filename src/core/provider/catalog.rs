@@ -113,7 +113,6 @@ pub fn builtin_catalog() -> Vec<Model> {
         zen("glm-5.2", 1_000_000),
         xai("grok-4.6", 500_000),
         xai("grok-4.3", 1_000_000),
-        xai("grok-build-0.1", 256_000),
         openai("gpt-5.5", 272_000),
         openai("gpt-5.5-pro", 1_050_000),
         openai("gpt-5.4", 272_000),
@@ -178,10 +177,17 @@ fn remote_overlay(models: &mut Vec<Model>) {
         else {
             continue; // only providers e knows how to speak to
         };
-        let Some(ids) = entry.get("ids").and_then(|v| v.as_array()) else {
-            continue;
-        };
-        for id in ids.iter().filter_map(|v| v.as_str()) {
+        let listed = entry.get("models").and_then(|v| v.as_array()).cloned();
+        let legacy = entry.get("ids").and_then(|v| v.as_array()).map(|ids| {
+            ids.iter()
+                .filter_map(|v| v.as_str())
+                .map(|id| serde_json::json!({ "id": id }))
+                .collect::<Vec<_>>()
+        });
+        for item in listed.or(legacy).unwrap_or_default() {
+            let Some(id) = item["id"].as_str() else {
+                continue;
+            };
             if !models.iter().any(|m| m.provider == provider && m.id == id) {
                 models.push(Model {
                     provider: provider.clone(),
@@ -189,7 +195,7 @@ fn remote_overlay(models: &mut Vec<Model>) {
                     base_url: base.clone(),
                     api: Api::Completions,
                     efforts: &[],
-                    context_window: 200_000,
+                    context_window: item["context_window"].as_u64().unwrap_or(200_000),
                 });
             }
         }
@@ -207,6 +213,10 @@ pub async fn refresh_remote() {
 /// picker calls this with a short window so a gateway's brand-new model
 /// appears the moment someone looks for it.
 pub async fn refresh_remote_within(max_age_ms: u64) {
+    // Serialize refreshes in-process: launch, sign-in, and picker-open can
+    // race, and interleaved read-merge-writes could drop a provider's entry.
+    static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = REFRESH_LOCK.lock().await;
     let auth = crate::core::auth::load();
     let now = crate::core::auth::now_ms();
     let stored = crate::core::config::store::read_object(&store_path());
@@ -227,8 +237,15 @@ pub async fn refresh_remote_within(max_age_ms: u64) {
         if fresh {
             continue;
         }
-        if let Some(ids) = fetch_model_ids(&provider, &base).await {
-            let entry = serde_json::json!({ "checked_at": now, "ids": ids });
+        if let Some(models) = fetch_models(&provider, &base).await {
+            let listed: Vec<serde_json::Value> = models
+                .iter()
+                .map(|(id, window)| match window {
+                    Some(w) => serde_json::json!({ "id": id, "context_window": w }),
+                    None => serde_json::json!({ "id": id }),
+                })
+                .collect();
+            let entry = serde_json::json!({ "checked_at": now, "models": listed });
             let _ = crate::core::config::store::update(&store_path(), 0o644, |obj| {
                 obj.insert(provider.clone(), entry);
             });
@@ -236,8 +253,48 @@ pub async fn refresh_remote_within(max_age_ms: u64) {
     }
 }
 
-/// `GET {base}/models` with the provider's credential; None on any failure.
-async fn fetch_model_ids(provider: &str, base: &str) -> Option<Vec<String>> {
+/// Ids that are plainly not chat models — keep the picker for models a
+/// coding agent can actually talk to.
+fn looks_like_chat_model(id: &str) -> bool {
+    const NOISE: &[&str] = &[
+        "embed",
+        "whisper",
+        "tts",
+        "audio",
+        "image",
+        "dall-e",
+        "moderation",
+        "rerank",
+    ];
+    let lower = id.to_lowercase();
+    !NOISE.iter().any(|n| lower.contains(n))
+}
+
+/// "model-20251001" / "model-2024-05-13" is a dated alias; drop it when the
+/// undated base is also in the list.
+fn dated_alias_of(id: &str) -> Option<&str> {
+    let (base, suffix) = id.rsplit_once('-')?;
+    if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_digit()) {
+        return Some(base);
+    }
+    // -YYYY-MM-DD
+    if suffix.len() == 2 {
+        if let Some((b2, mid)) = base.rsplit_once('-') {
+            if mid.len() == 2 {
+                if let Some((b3, year)) = b2.rsplit_once('-') {
+                    if year.len() == 4 && year.chars().all(|c| c.is_ascii_digit()) {
+                        return Some(b3);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `GET {base}/models` with the provider's credential — (id, window?) per
+/// listed model; None on any failure.
+async fn fetch_models(provider: &str, base: &str) -> Option<Vec<(String, Option<u64>)>> {
     let auth = crate::core::auth::load();
     let credential = auth.get(provider)?;
     let key = match credential {
@@ -255,15 +312,32 @@ async fn fetch_model_ids(provider: &str, base: &str) -> Option<Vec<String>> {
         request.bearer_auth(&key)
     };
     let body: serde_json::Value = request.send().await.ok()?.json().await.ok()?;
-    let ids: Vec<String> = body["data"]
-        .as_array()?
-        .iter()
-        .filter_map(|m| m["id"].as_str().map(String::from))
-        .collect();
-    if ids.is_empty() {
+    let entries = body["data"].as_array()?;
+    let all_ids: Vec<&str> = entries.iter().filter_map(|m| m["id"].as_str()).collect();
+    let mut out = Vec::new();
+    for entry in entries {
+        let Some(id) = entry["id"].as_str() else {
+            continue;
+        };
+        if !looks_like_chat_model(id) {
+            continue;
+        }
+        if let Some(base_id) = dated_alias_of(id) {
+            if all_ids.contains(&base_id) {
+                continue;
+            }
+        }
+        // Some gateways report the window; keep it when they do.
+        let window = entry["context_length"]
+            .as_u64()
+            .or(entry["context_window"].as_u64())
+            .or(entry["max_context_length"].as_u64());
+        out.push((id.to_string(), window));
+    }
+    if out.is_empty() {
         None
     } else {
-        Some(ids)
+        Some(out)
     }
 }
 

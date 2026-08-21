@@ -99,7 +99,10 @@ fn xai_builtins_carry_their_real_windows() {
     };
     assert_eq!(find("grok-4.3").context_window, 1_000_000);
     assert_eq!(find("grok-4.6").context_window, 500_000);
-    assert_eq!(find("grok-build-0.1").context_window, 256_000);
+    assert!(
+        !catalog.iter().any(|m| m.id == "grok-build-0.1"),
+        "grok-build-0.1 was culled from the built-ins"
+    );
     assert_eq!(find("grok-4.6").base_url, "https://api.x.ai/v1");
     assert_eq!(e::core::provider::catalog::display_name("xai"), "xAI");
     assert_eq!(e::core::provider::catalog::display_name("openai"), "OpenAI");
@@ -255,7 +258,12 @@ async fn provider_reported_models_appear_without_a_release() {
         let mut buf = [0u8; 8192];
         let n = a.read(&mut buf).unwrap();
         let sent = String::from_utf8_lossy(&buf[..n]).to_string();
-        let body = r#"{"data":[{"id":"brand-new-model"},{"id":"small"}]}"#;
+        let body = r#"{"data":[
+            {"id":"brand-new-model","context_length":64000},
+            {"id":"small"},
+            {"id":"text-embedding-large"},
+            {"id":"brand-new-model-20260101"}
+        ]}"#;
         let _ = a.write_all(
             format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -280,9 +288,15 @@ async fn provider_reported_models_appear_without_a_release() {
 
     // The unheard-of model is now in the catalog — and available.
     let catalog = e::core::provider::catalog::catalog();
-    assert!(catalog
+    let fresh = catalog
         .iter()
-        .any(|m| m.provider == "mock" && m.id == "brand-new-model"));
+        .find(|m| m.provider == "mock" && m.id == "brand-new-model")
+        .expect("gateway model appears");
+    // The gateway reported the window; the overlay keeps it.
+    assert_eq!(fresh.context_window, 64_000);
+    // Non-chat ids and dated aliases of listed models stay out.
+    assert!(!catalog.iter().any(|m| m.id == "text-embedding-large"));
+    assert!(!catalog.iter().any(|m| m.id == "brand-new-model-20260101"));
     let available = e::core::provider::catalog::available();
     assert!(available.iter().any(|m| m.id == "brand-new-model"));
 
