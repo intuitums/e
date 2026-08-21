@@ -90,11 +90,68 @@ impl App {
         vec![
             MenuItem::new("/login", "sign in to a provider — account or API key", "/login"),
             MenuItem::new("/model", "switch the model", "/model"),
+            MenuItem::new("/resume", "resume a saved session", "/resume"),
             MenuItem::new("/new", "start a fresh session", "/new"),
             MenuItem::new("/help", "show commands", "/help"),
             MenuItem::new("/version", "show the version", "/version"),
             MenuItem::new("/quit", "exit", "/quit"),
         ]
+    }
+
+    fn open_resume_menu(&mut self) {
+        let cwd = self.agent.cwd();
+        let items: Vec<MenuItem> = e::core::session::list(&cwd)
+            .into_iter()
+            .map(|info| {
+                let mut item = MenuItem::new(
+                    if info.title.is_empty() { "(untitled)" } else { &info.title },
+                    "",
+                    &info.path.to_string_lossy(),
+                );
+                item.meta = format!("{} · {} msgs", ago(info.modified), info.message_count);
+                item
+            })
+            .collect();
+        if items.is_empty() {
+            self.notice("no saved sessions for this workspace".into());
+            return;
+        }
+        self.menu = Some(Menu::new(MenuKind::Sessions, "Sessions", HINT_USE, items));
+    }
+
+    fn resume_recent(&mut self) {
+        let cwd = self.agent.cwd();
+        match e::core::session::most_recent(&cwd) {
+            Some(path) => self.resume_path(path),
+            None => self.notice("no saved sessions for this workspace".into()),
+        }
+    }
+
+    fn resume_path(&mut self, path: std::path::PathBuf) {
+        let messages = match e::core::session::Session::load(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                self.notice(format!("could not open session: {e}"));
+                return;
+            }
+        };
+        self.transcript.clear();
+        self.transcript.push(Block::new(Kind::Banner, e::VERSION));
+        for m in &messages {
+            match m.role.as_str() {
+                "user" => { self.transcript.push(Block::new(Kind::User, m.content.clone())); }
+                "assistant" if !m.content.trim().is_empty() => {
+                    self.transcript.push(Block::new(Kind::Assistant, m.content.clone()));
+                }
+                _ => {}
+            }
+        }
+        self.agent.load_history(messages);
+        match e::core::session::Session::reopen(&path) {
+            Ok(s) => self.agent.set_session(Some(s)),
+            Err(_) => {}
+        }
+        self.notice(format!("resumed {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
     }
 
     fn open_model_menu(&mut self) {
@@ -207,6 +264,9 @@ impl App {
                 };
                 self.editor.set_text(&replaced);
             }
+            MenuKind::Sessions => {
+                self.resume_path(std::path::PathBuf::from(item.value));
+            }
             MenuKind::Models => {
                 if let Some(found) = model::resolve(&item.value) {
                     persist_model(&found);
@@ -223,6 +283,7 @@ impl App {
         match command.as_str() {
             "/login" => self.open_login_menu(),
             "/model" => self.open_model_menu(),
+            "/resume" => self.open_resume_menu(),
             other => self.submit(other.to_string()),
         }
     }
@@ -277,9 +338,11 @@ impl App {
             "/new" | "/clear" => {
                 self.context_tokens = 0;
                 self.agent.clear();
+                self.agent.set_session(None);
                 self.transcript.clear();
                 self.transcript.push(Block::new(Kind::Banner, e::VERSION));
             }
+            "/resume" => self.open_resume_menu(),
             _ if trimmed.starts_with('/') => {
                 self.notice(format!("unknown command {trimmed}"));
             }
@@ -438,6 +501,15 @@ fn title_path() -> String {
     }
 }
 
+fn ago(ms: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let secs = now.saturating_sub(ms) / 1000;
+    if secs < 60 { format!("{secs}s") }
+    else if secs < 3600 { format!("{}m", secs / 60) }
+    else if secs < 86400 { format!("{}h", secs / 3600) }
+    else { format!("{}d", secs / 86400) }
+}
+
 fn system_prompt() -> String {
     let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
     format!(
@@ -526,8 +598,13 @@ async fn main() -> std::io::Result<()> {
         jobs: jobs_tx,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
-    // A message on the command line becomes the first prompt.
-    let initial: String = args.join(" ");
+    // -c continues this workspace's most recent session.
+    let continue_flag = args.iter().any(|a| a == "-c" || a == "--continue");
+    let message_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+    let initial: String = message_args.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
+    if continue_flag {
+        app.resume_recent();
+    }
 
     // Terminal tab title: the custom glyph, a dot, the path.
     {

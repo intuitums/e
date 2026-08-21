@@ -14,7 +14,27 @@ use tokio::sync::mpsc;
 
 use crate::core::model::{slug, Model};
 use crate::core::provider::{self, ChatMessage, Event as ProviderEvent, Request, ToolCall};
+use crate::core::session::Session;
 use crate::core::tools;
+
+/// Append a message to history and to the session log, creating the log on
+/// the first message.
+fn commit(
+    history: &Arc<Mutex<Vec<ChatMessage>>>,
+    session: &Arc<Mutex<Option<Session>>>,
+    cwd: &std::path::Path,
+    model: &Model,
+    message: ChatMessage,
+) {
+    history.lock().unwrap().push(message.clone());
+    let mut guard = session.lock().unwrap();
+    if guard.is_none() {
+        *guard = Session::create(cwd, &slug(model)).ok();
+    }
+    if let Some(s) = guard.as_mut() {
+        s.append(&message);
+    }
+}
 
 #[derive(Debug)]
 pub enum SessionEvent {
@@ -41,6 +61,8 @@ pub struct Agent {
     steer: Arc<Mutex<Vec<String>>>,
     cancel: Arc<AtomicBool>,
     running: bool,
+    /// The session log; every committed message is appended.
+    session: Arc<Mutex<Option<Session>>>,
 }
 
 impl Agent {
@@ -54,6 +76,7 @@ impl Agent {
             steer: Arc::new(Mutex::new(Vec::new())),
             cancel: Arc::new(AtomicBool::new(false)),
             running: false,
+            session: Arc::new(Mutex::new(None)),
         };
         (agent, rx)
     }
@@ -77,6 +100,14 @@ impl Agent {
         self.history.lock().unwrap().clear();
     }
 
+    /// Attach a session log; created lazily on the first message when None.
+    pub fn set_session(&self, session: Option<Session>) {
+        *self.session.lock().unwrap() = session;
+    }
+    pub fn cwd(&self) -> PathBuf {
+        self.cwd.clone()
+    }
+
     /// Queue a message. If a turn is running it steers (drained next step);
     /// otherwise it starts a turn.
     pub fn submit(&mut self, text: String, system: String) {
@@ -84,7 +115,7 @@ impl Agent {
             self.steer.lock().unwrap().push(text);
             return;
         }
-        self.history.lock().unwrap().push(ChatMessage::user(text));
+        commit(&self.history, &self.session, &self.cwd, &self.model, ChatMessage::user(text));
         self.start(system);
     }
 
@@ -98,6 +129,7 @@ impl Agent {
         let model = self.model.clone();
         let cwd = self.cwd.clone();
         let effort = self.effort();
+        let session = self.session.clone();
 
         tokio::spawn(async move {
             let _ = events.send(SessionEvent::TurnStart).await;
@@ -110,7 +142,7 @@ impl Agent {
                 let steered: Vec<String> = { steer.lock().unwrap().drain(..).collect() };
                 for message in steered {
                     let _ = events.send(SessionEvent::Steered(message.clone())).await;
-                    history.lock().unwrap().push(ChatMessage::user(message));
+                    commit(&history, &session, &cwd, &model, ChatMessage::user(message));
                 }
 
                 let messages = { history.lock().unwrap().clone() };
@@ -155,7 +187,7 @@ impl Agent {
                 }
 
                 // Commit the assistant turn (text + any calls).
-                history.lock().unwrap().push(ChatMessage::assistant(text, calls.clone()));
+                commit(&history, &session, &cwd, &model, ChatMessage::assistant(text, calls.clone()));
 
                 if calls.is_empty() {
                     break false; // a plain reply ends the turn
@@ -183,7 +215,7 @@ impl Agent {
                     let _ = events
                         .send(SessionEvent::ToolEnd { id, summary: output.summary.clone(), is_error: output.is_error })
                         .await;
-                    history.lock().unwrap().push(ChatMessage::tool_result(call.id, output.content));
+                    commit(&history, &session, &cwd, &model, ChatMessage::tool_result(call.id, output.content));
                 }
             };
             let _ = events.send(SessionEvent::TurnEnd { aborted }).await;

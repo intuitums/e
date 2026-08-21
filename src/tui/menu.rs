@@ -43,6 +43,7 @@ pub enum MenuKind {
     Commands,
     Files,
     Models,
+    Sessions,
 }
 
 pub struct Menu {
