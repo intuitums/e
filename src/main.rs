@@ -15,6 +15,7 @@ use e::core::model::{self, Model};
 use e::core::output::{format_duration, format_tokens};
 use e::tui::composer::{Editor, EditorResult, Key};
 use e::tui::statusline::{statusline, StatusData, Turn};
+use e::tui::authpanel::{self, AuthStage};
 use e::tui::menu::{Menu, MenuItem, MenuKind, HINT_USE};
 use e::tui::theme::{load_bundled, Theme};
 use e::tui::transcript::{Block, Kind, Transcript};
@@ -42,8 +43,10 @@ struct App {
     context_tokens: u64,
     /// A provider awaiting a pasted API key; the next submit is the secret.
     pending_key: Option<String>,
-    /// The open picker, if any — commands, files, models, providers.
+    /// The open picker, if any — commands, files, models.
     menu: Option<Menu>,
+    /// The sign-in panel, when /login is active.
+    auth: Option<AuthStage>,
     /// Background job narration (login flows) into the transcript.
     jobs: tokio::sync::mpsc::Sender<String>,
 }
@@ -55,8 +58,13 @@ impl App {
             lines.push(String::new());
             lines.push(format!(" • {}", s.turn.label(s.started.elapsed().as_secs())));
         }
-        lines.extend(self.editor.render(&self.theme, width));
-        if let Some(menu) = &self.menu {
+        let entering_key = matches!(self.auth, Some(AuthStage::ApiKey { .. }));
+        if !entering_key {
+            lines.extend(self.editor.render(&self.theme, width));
+        }
+        if let Some(stage) = &self.auth {
+            lines.extend(authpanel::render(stage, &self.theme, width, self.editor.text().chars().count()));
+        } else if let Some(menu) = &self.menu {
             lines.extend(menu.render(&self.theme, width));
         }
         let window = self.agent.model.context_window.max(1);
@@ -102,13 +110,26 @@ impl App {
         self.menu = Some(Menu::new(MenuKind::Models, "Models", HINT_USE, items));
     }
 
-    /// /login: the authentication-method choice, in the reference wording.
+    /// /login: the sign-in panel — the flow's method choice in the auth
+    /// surface's own look.
     fn open_login_menu(&mut self) {
-        let items = vec![
-            MenuItem::new("Sign in with an account", "ChatGPT — opens the browser", "account"),
-            MenuItem::new("Sign in with an API key", "stored in ~/.e/auth.json", "api_key"),
-        ];
-        self.menu = Some(Menu::new(MenuKind::LoginMethod, "Sign in", HINT_USE, items));
+        self.menu = None;
+        self.auth = Some(AuthStage::Choose { selected: 0 });
+    }
+
+    /// A choice made on the panel. One account provider and one key provider
+    /// today, so provider steps collapse straight through.
+    fn auth_choose(&mut self, selected: usize) {
+        if selected == 0 {
+            self.auth = Some(AuthStage::Waiting);
+            self.notice("starting the openai-codex sign-in…".into());
+            tokio::spawn(e::core::login::codex_login("openai-codex".into(), self.jobs.clone()));
+        } else {
+            self.auth = Some(AuthStage::ApiKey { provider: "opencode-go".into() });
+            self.pending_key = Some("opencode-go".into());
+            self.editor.mask = true;
+            self.editor.set_text("");
+        }
     }
 
     fn open_file_menu(&mut self, query: &str) {
@@ -190,13 +211,7 @@ impl App {
                     self.agent.model = found;
                 }
             }
-            MenuKind::LoginMethod => match item.value.as_str() {
-                // One account provider today, so the provider step collapses
-                // (single options are skipped straight through, like the
-                // reference).
-                "account" => self.login("openai-codex".into()),
-                _ => self.login("opencode-go".into()),
-            },
+
         }
         true
     }
@@ -217,6 +232,7 @@ impl App {
         self.editor.push_history(text);
 
         if let Some(secret_for) = self.pending_key.take() {
+            self.auth = None;
             self.editor.mask = false;
             match e::core::login::save_api_key(&secret_for, &trimmed) {
                 Ok(()) => self.notice(format!("{secret_for}: key saved to ~/.e/auth.json")),
@@ -455,6 +471,7 @@ async fn main() -> std::io::Result<()> {
         context_tokens: 0,
         pending_key: None,
         menu: None,
+        auth: None,
         jobs: jobs_tx,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
@@ -483,7 +500,31 @@ async fn main() -> std::io::Result<()> {
                     TermEvent::Resize(c, r) => screen.resize(c, r),
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                        if app.menu.is_some()
+                        if let Some(stage) = &mut app.auth {
+                            match (&mut *stage, k.code) {
+                                (AuthStage::Choose { selected }, KeyCode::Up | KeyCode::Down) => {
+                                    *selected = 1 - *selected;
+                                }
+                                (AuthStage::Choose { selected }, KeyCode::Enter) => {
+                                    let choice = *selected;
+                                    app.auth_choose(choice);
+                                }
+                                (_, KeyCode::Esc) => {
+                                    app.auth = None;
+                                    app.pending_key = None;
+                                    app.editor.mask = false;
+                                    app.editor.set_text("");
+                                }
+                                (AuthStage::ApiKey { .. }, _) => {
+                                    if let Some(key) = key_of(&k) {
+                                        if let EditorResult::Submit(text) = app.editor.key(key) {
+                                            app.submit(text);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else if app.menu.is_some()
                             && matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc)
                             && !ctrl
                         {
@@ -533,6 +574,11 @@ async fn main() -> std::io::Result<()> {
             }
             message = jobs_rx.recv() => {
                 if let Some(message) = message {
+                    if matches!(app.auth, Some(AuthStage::Waiting)) && message.contains("signed in")
+                        || message.contains("login failed")
+                    {
+                        app.auth = None;
+                    }
                     app.notice(message);
                 }
             }

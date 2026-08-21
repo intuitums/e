@@ -43,8 +43,6 @@ pub enum MenuKind {
     Commands,
     Files,
     Models,
-    /// The /login method choice: account vs API key.
-    LoginMethod,
 }
 
 pub struct Menu {
