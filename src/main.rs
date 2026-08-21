@@ -37,6 +37,8 @@ struct App {
     overlay: Option<String>,
     armed_at: Option<Instant>,
     should_quit: bool,
+    /// Prompt-side tokens of the latest request ≈ current context size.
+    context_tokens: u64,
 }
 
 impl App {
@@ -47,13 +49,14 @@ impl App {
             lines.push(format!(" • {}", s.turn.label(s.started.elapsed().as_secs())));
         }
         lines.extend(self.editor.render(&self.theme, width));
+        let window = self.agent.model.context_window.max(1);
+        let percent = ((self.context_tokens.saturating_mul(100)) / window).min(100) as u8;
         let data = StatusData {
             model: self.agent.model_slug(),
             effort: self.agent.effort(),
             session_name: None,
-            context_percent: None,
+            context_percent: Some(percent),
             queued: 0,
-            cwd: std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
         };
         lines.extend(statusline(&self.theme, &data, self.overlay.as_deref(), None, width));
         lines
@@ -83,6 +86,7 @@ impl App {
             "/quit" | "/exit" => self.should_quit = true,
             "/version" => self.notice(format!("e {}", e::VERSION)),
             "/new" | "/clear" => {
+                self.context_tokens = 0;
                 self.agent.clear();
                 self.transcript.clear();
                 self.transcript.push(Block::new(Kind::Banner, banner_path()));
@@ -130,6 +134,7 @@ impl App {
                 // Reasoning stays out of the transcript; the indicator says Thinking.
             }
             SessionEvent::Usage { input, output, cache_read } => {
+                self.context_tokens = input + cache_read;
                 if let Some(s) = &mut self.active {
                     s.turn.input += input + cache_read;
                     s.turn.output += output;
@@ -276,6 +281,7 @@ async fn main() -> std::io::Result<()> {
         overlay: None,
         armed_at: None,
         should_quit: false,
+        context_tokens: 0,
     };
     app.transcript.push(Block::new(Kind::Banner, banner_path()));
     // A message on the command line becomes the first prompt.

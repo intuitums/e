@@ -23,6 +23,9 @@ pub struct Model {
     pub api: Api,
     /// Effort values the backend accepts for its reasoning knob, if any.
     pub efforts: &'static [&'static str],
+    /// Context window in tokens. A conservative default until per-model
+    /// numbers are sourced; overridable via models.json later.
+    pub context_window: u64,
 }
 
 pub fn slug(model: &Model) -> String {
@@ -40,6 +43,7 @@ pub fn builtin_catalog() -> Vec<Model> {
         base_url: OPENCODE_BASE.into(),
         api: Api::Completions,
         efforts: &[],
+        context_window: 200_000,
     };
     let codex = |id: &str| Model {
         provider: "openai-codex".into(),
@@ -47,6 +51,7 @@ pub fn builtin_catalog() -> Vec<Model> {
         base_url: CODEX_BASE.into(),
         api: Api::Responses,
         efforts: EFFORTS,
+        context_window: 272_000,
     };
     vec![
         completions("deepseek-v4-flash"),
@@ -101,6 +106,7 @@ pub fn catalog() -> Vec<Model> {
                             base_url: base.clone(),
                             api,
                             efforts: &[],
+                            context_window: 200_000,
                         });
                     }
                 }

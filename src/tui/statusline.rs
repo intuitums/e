@@ -74,9 +74,9 @@ pub struct StatusData {
     pub model: String,
     pub effort: Option<String>,
     pub session_name: Option<String>,
+    /// Context used, as a percent. Hidden until it rounds to at least 1.
     pub context_percent: Option<u8>,
     pub queued: usize,
-    pub cwd: String,
 }
 
 /// The bottom row: blank spacer, then dot-joined segments; the leading one
@@ -92,7 +92,6 @@ pub fn statusline(theme: &Theme, data: &StatusData, overlay: Option<&str>, hint:
     if let Some(e) = &data.effort { if e != "off" { segments.push(e.clone()); } }
     if let Some(n) = &data.session_name { segments.push(n.clone()); }
     if let Some(p) = data.context_percent { if p >= 1 { segments.push(format!("{p}%")); } }
-    segments.push(shorten_cwd(&data.cwd));
 
     let (head, rest) = segments.split_first().unwrap();
     let mut line = theme.fg("accent", head);
@@ -110,15 +109,4 @@ pub fn statusline(theme: &Theme, data: &StatusData, overlay: Option<&str>, hint:
         }
     }
     vec![String::new(), line]
-}
-
-fn shorten_cwd(cwd: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let p = if !home.is_empty() && cwd.starts_with(&home) {
-        format!("~{}", &cwd[home.len()..])
-    } else {
-        cwd.to_string()
-    };
-    let parts: Vec<&str> = p.split('/').collect();
-    if parts.len() > 3 { format!("…/{}", parts[parts.len() - 2..].join("/")) } else { p }
 }
