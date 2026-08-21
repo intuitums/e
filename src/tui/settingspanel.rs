@@ -5,7 +5,7 @@
 //! row's value; `↑↓` move; framing and the hint come from the shared panel.
 
 use crate::core::settings::{self, Setting};
-use crate::render_width::visible_width;
+use crate::tui::markdown::visible_width;
 use crate::tui::render::bold;
 use crate::tui::theme::Theme;
 

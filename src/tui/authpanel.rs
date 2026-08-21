@@ -8,7 +8,7 @@
 //! ApiKey (inline `┃ •••` entry mirroring the composer) or Waiting (browser
 //! authorization in flight).
 
-use crate::render_width::visible_width;
+use crate::tui::markdown::visible_width;
 use crate::tui::render::bold;
 use crate::tui::theme::Theme;
 

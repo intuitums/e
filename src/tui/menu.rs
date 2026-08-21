@@ -16,7 +16,7 @@
 //! Selection is bold-ink vs default — no caret glyph, the reference
 //! convention.
 
-use crate::render_width::visible_width;
+use crate::tui::markdown::visible_width;
 use crate::tui::render::bold;
 use crate::tui::theme::Theme;
 
