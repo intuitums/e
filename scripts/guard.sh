@@ -11,14 +11,15 @@ say() { printf '%s\n' "$*"; }
 bad() { fail=1; say "FAIL: $*"; }
 
 # 1. Network surface. e talks to its sign-in and model providers and nothing
-#    else. A new host in src/ means a new place user data can go — add it
-#    here deliberately or the build fails.
-allowed_hosts="localhost auth.openai.com api.openai.com chatgpt.com opencode.ai auth.x.ai api.x.ai api.anthropic.com api.github.com github.com"
-found_hosts=$(grep -rhoE 'https?://[A-Za-z0-9.-]+' src/ 2>/dev/null | sed -E 's#https?://##' | sort -u)
+#    else — in the shipped binary (src/) or its dev tooling (scripts/). A new
+#    host means a new place user data can go — add it here deliberately or
+#    the build fails.
+allowed_hosts="localhost models.dev auth.openai.com api.openai.com chatgpt.com opencode.ai auth.x.ai api.x.ai api.anthropic.com api.github.com github.com"
+found_hosts=$(grep -rhoE 'https?://[A-Za-z0-9.-]+' src/ scripts/ 2>/dev/null | sed -E 's#https?://##' | sort -u)
 for host in $found_hosts; do
   case " $allowed_hosts " in
     *" $host "*) ;;
-    *) bad "unlisted network host in src/: $host (grep it, then extend guard.sh deliberately)" ;;
+    *) bad "unlisted network host in src/ or scripts/: $host (grep it, then extend guard.sh deliberately)" ;;
   esac
 done
 

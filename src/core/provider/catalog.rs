@@ -25,8 +25,8 @@ pub struct Model {
     pub api: Api,
     /// Effort values the backend accepts for its reasoning knob, if any.
     pub efforts: Vec<String>,
-    /// Context window in tokens. A conservative default until per-model
-    /// numbers are sourced; overridable via models.json later.
+    /// Context window in tokens. The seed value is a fallback: the
+    /// provider's own reported window wins once a refresh has seen it.
     pub context_window: u64,
 }
 
@@ -114,15 +114,26 @@ fn remote_overlay(models: &mut Vec<Model>) {
             let Some(id) = item["id"].as_str() else {
                 continue;
             };
-            if !models.iter().any(|m| m.provider == provider && m.id == id) {
-                models.push(Model {
+            // The gateway's own report wins for the window — the model
+            // chooses its context window, not our tables. Everything else
+            // about a claimed id stays as declared.
+            match models
+                .iter_mut()
+                .find(|m| m.provider == provider && m.id == id)
+            {
+                Some(existing) => {
+                    if let Some(w) = item["context_window"].as_u64() {
+                        existing.context_window = w;
+                    }
+                }
+                None => models.push(Model {
                     provider: provider.clone(),
                     id: id.to_string(),
                     base_url: base.clone(),
                     api: Api::Completions,
                     efforts: Vec::new(),
                     context_window: item["context_window"].as_u64().unwrap_or(200_000),
-                });
+                }),
             }
         }
     }
@@ -307,8 +318,10 @@ pub fn catalog() -> Vec<Model> {
         }
     }
     // The overlay runs last so it can attach to user-declared providers
-    // too; it only adds ids nothing else claimed, so built-ins and the
-    // user's file always win a clash.
+    // too. It adds ids nothing else claimed, and refreshes context windows
+    // from the live report — the one field the model owns. Which models
+    // exist, their dialects, and their efforts stay with the built-ins and
+    // the user's file.
     remote_overlay(&mut models);
     models
 }

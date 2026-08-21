@@ -260,7 +260,7 @@ async fn provider_reported_models_appear_without_a_release() {
         let sent = String::from_utf8_lossy(&buf[..n]).to_string();
         let body = r#"{"data":[
             {"id":"brand-new-model","context_length":64000},
-            {"id":"small"},
+            {"id":"small","context_length":123456},
             {"id":"text-embedding-large"},
             {"id":"brand-new-model-20260101"}
         ]}"#;
@@ -294,6 +294,13 @@ async fn provider_reported_models_appear_without_a_release() {
         .expect("gateway model appears");
     // The gateway reported the window; the overlay keeps it.
     assert_eq!(fresh.context_window, 64_000);
+    // And the report wins over what e already lists: "small" was declared
+    // without a window (the 200K default) — the gateway's 123456 replaces it.
+    let known = catalog
+        .iter()
+        .find(|m| m.provider == "mock" && m.id == "small")
+        .expect("declared model stays listed");
+    assert_eq!(known.context_window, 123_456);
     // Non-chat ids and dated aliases of listed models stay out.
     assert!(!catalog.iter().any(|m| m.id == "text-embedding-large"));
     assert!(!catalog.iter().any(|m| m.id == "brand-new-model-20260101"));
@@ -342,7 +349,14 @@ fn env_var_keys_sign_a_provider_in() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::env::set_var("E_HOME", &dir);
-    std::env::remove_var("ANTHROPIC_API_KEY");
+    // No provider may sign in through the ambient environment — clear every
+    // key_env the registry declares, or a dev box with OPENAI_API_KEY set
+    // fails the emptiness assert below.
+    for provider in e::core::provider::registry::all() {
+        if let Some(env) = &provider.auth.key_env {
+            std::env::remove_var(env);
+        }
+    }
 
     assert!(e::core::provider::catalog::available().is_empty());
     std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-env");

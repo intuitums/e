@@ -822,7 +822,10 @@ impl App {
                 self.logins.clone(),
             ));
         } else if flow.as_deref() == Some("xai-device") {
-            self.notice("starting the xAI sign-in…".into());
+            self.notice(format!(
+                "starting the {} sign-in…",
+                model::display_name(&provider)
+            ));
             tokio::spawn(e::core::auth::login::xai_login(
                 self.jobs.clone(),
                 self.logins.clone(),

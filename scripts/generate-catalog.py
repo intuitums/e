@@ -36,7 +36,6 @@ def fetch():
 def main():
     write = "--write" in sys.argv
     data = fetch()
-    changed = False
     for path in sorted(PROVIDERS.glob("*.json")):
         provider = json.loads(path.read_text())
         dev = data.get(DEV_IDS.get(provider["name"], provider["name"]))
@@ -44,6 +43,7 @@ def main():
             print(f"{provider['name']}: not on models.dev, skipped")
             continue
         dev_models = dev.get("models", {})
+        changed = False
         for model in provider.get("models", []):
             entry = dev_models.get(model["id"])
             if not entry:

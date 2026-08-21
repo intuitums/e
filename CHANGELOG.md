@@ -9,9 +9,15 @@
   /login dispatch, display names, and catalog all derive from the
   registry; adding an API-key provider is now a data edit. API keys fall
   back to their conventional environment variables (ANTHROPIC_API_KEY and
-  friends) when auth.json has no entry — auth.json wins.
-  `scripts/generate-catalog.py` syncs the data's metadata from models.dev
-  (this run corrected the gpt-5.x windows to 1.05M, among others).
+  friends) when auth.json has no entry — auth.json wins. Unknown dialects
+  or OAuth flows in the data fail at startup, never on the wire.
+  `scripts/generate-catalog.py` syncs the seed metadata from models.dev;
+  this run corrected the gpt-5.x windows to 1,050,000, kimi-k3 to
+  1,048,576, gave the OpenCode Go models real windows instead of a flat
+  200K default, and trimmed Zen's minimax-m3 to 512K (compaction triggers
+  earlier there). The seeds are fallbacks only: a provider's own reported
+  context window always wins — the model chooses its window, not our
+  tables.
 - The model catalog is live, the reference behavior: every signed-in
   provider's own `GET /models` is fetched in the background (at launch
   and after each sign-in), cached in `~/.e/models-store.json` with a

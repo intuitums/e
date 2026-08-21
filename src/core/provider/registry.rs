@@ -53,11 +53,14 @@ fn default_window() -> u64 {
 }
 
 impl Provider {
+    /// The wire dialect this provider speaks. `all()` validates the string
+    /// at startup, so an unknown value never reaches this match silently.
     pub fn api(&self) -> Api {
         match self.api.as_str() {
+            "openai-completions" => Api::Completions,
             "codex-responses" | "openai-responses" | "responses" => Api::Responses,
             "anthropic-messages" | "anthropic" => Api::Anthropic,
-            _ => Api::Completions,
+            other => panic!("provider {}: unknown api dialect `{other}`", self.name),
         }
     }
 }
@@ -75,7 +78,21 @@ pub fn all() -> &'static [Provider] {
             include_str!("providers/anthropic.json"),
         ]
         .iter()
-        .map(|json| serde_json::from_str(json).expect("embedded provider data is valid"))
+        .map(|json| {
+            let provider: Provider =
+                serde_json::from_str(json).expect("embedded provider data is valid");
+            // Fail at startup, not on the wire: a typo'd dialect or OAuth
+            // flow is a data bug and must not fall back silently.
+            provider.api();
+            if let Some(flow) = &provider.auth.oauth {
+                assert!(
+                    matches!(flow.as_str(), "codex" | "xai-device"),
+                    "provider {}: unknown oauth flow `{flow}`",
+                    provider.name
+                );
+            }
+            provider
+        })
         .collect()
     })
 }
