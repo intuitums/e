@@ -257,6 +257,7 @@ impl Agent {
 
                 let mut text = String::new();
                 let mut calls: Vec<ToolCall> = Vec::new();
+                let mut reasoning_items: Vec<String> = Vec::new();
                 let mut errored = false;
                 'stream: while let Some(event) = rx.recv().await {
                     if cancel.load(Ordering::SeqCst) {
@@ -272,6 +273,7 @@ impl Agent {
                             let _ = events.send(SessionEvent::ReasoningDelta(d)).await;
                         }
                         ProviderEvent::ToolCall(call) => calls.push(call),
+                        ProviderEvent::ReasoningItem(item) => reasoning_items.push(item),
                         ProviderEvent::Usage {
                             input,
                             output,
@@ -292,7 +294,12 @@ impl Agent {
                             let retryable = !delivered
                                 && !message.contains("no credentials")
                                 && !message.contains("run /login");
-                            if retryable && text.is_empty() && calls.is_empty() && attempt < 2 {
+                            if retryable
+                                && text.is_empty()
+                                && calls.is_empty()
+                                && reasoning_items.is_empty()
+                                && attempt < 2
+                            {
                                 attempt += 1;
                                 let backoff =
                                     std::time::Duration::from_millis(500 * attempt as u64);
@@ -318,6 +325,22 @@ impl Agent {
                     break false;
                 }
 
+                // Reasoning items commit first — the dialect that produced
+                // them must replay them ahead of the assistant turn.
+                for item in reasoning_items.drain(..) {
+                    commit(
+                        &history,
+                        &session,
+                        &cwd,
+                        &model,
+                        ChatMessage {
+                            role: "reasoning".into(),
+                            content: item,
+                            tool_calls: Vec::new(),
+                            tool_call_id: None,
+                        },
+                    );
+                }
                 // Commit the assistant turn (text + any calls).
                 commit(
                     &history,

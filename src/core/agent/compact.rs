@@ -123,6 +123,9 @@ fn transcript(history: &[ChatMessage]) -> String {
     let mut out = String::new();
     for message in history {
         let content = message.content.trim();
+        if message.role == "reasoning" {
+            continue; // encrypted provider state, not conversation
+        }
         if message.role == "tool" {
             let kept: String = content.chars().take(TOOL_RESULT_KEEP).collect();
             let marker = if content.chars().count() > TOOL_RESULT_KEEP {

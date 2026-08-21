@@ -9,6 +9,10 @@
   onto extra rail rows (the reference shape) instead of scrolling one row,
   with the cursor on its visual row. The screen differ clips any overlong
   frame line instead of letting it wrap physically and desync the painter.
+  Audit follow-up: Responses-dialect reasoning items are now captured and
+  replayed verbatim ahead of the calls they produced — without this, the
+  second step of every codex/OpenAI tool turn 400s; other dialects and
+  compaction skip them.
 - `e -r` / `--resume` launches straight into the session picker (the
   reference behavior); `e -c` continues the directory's latest session as
   before. `e --help` documents the CLI surface.

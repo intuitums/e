@@ -66,6 +66,8 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                              "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
                              "content": m.content}],
             })),
+            // Responses-dialect reasoning items mean nothing here.
+            "reasoning" => {}
             _ => messages.push(json!({
                 "role": "user",
                 "content": [{"type": "text", "text": m.content}],
