@@ -201,7 +201,7 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
     let mut heading: Option<u8> = None;
     let mut lists: Vec<ListState> = Vec::new();
     let mut item_first_lines: Vec<String> = Vec::new(); // rendered rows of current list block
-    /// One flag per open item: has its own inline text been emitted yet?
+    // One flag per open item: has its own inline text been emitted yet?
     let mut item_stack: Vec<bool> = Vec::new();
     let mut quote_depth = 0usize;
     let mut code: Option<(String, String)> = None; // (lang, buffer)

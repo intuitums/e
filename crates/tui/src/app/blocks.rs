@@ -1,0 +1,137 @@
+//! The transcript: ordered blocks and the blank rows between them.
+//!
+//! Spacing is decided in exactly one place: one blank row between blocks,
+//! runs of tool rows contiguous. Blocks render (and cache) their final lines
+//! at a given width; streaming touches only the tail block.
+
+use crate::render::ansi::{bold, dim};
+use crate::render::markdown::{render_markdown, wrap_styled};
+use crate::render::theme::Theme;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Banner,
+    User,
+    Assistant,
+    Tool,
+    Summary,
+    Notice,
+}
+
+pub struct Block {
+    pub kind: Kind,
+    pub text: String,
+    /// Tool rows carry extra state.
+    pub done: bool,
+    pub is_error: bool,
+    pub detail: Option<String>,
+    cache: Option<(usize, Vec<String>)>,
+}
+
+impl Block {
+    pub fn new(kind: Kind, text: impl Into<String>) -> Self {
+        Block { kind, text: text.into(), done: false, is_error: false, detail: None, cache: None }
+    }
+
+    pub fn touch(&mut self) {
+        self.cache = None;
+    }
+
+    fn lines(&mut self, theme: &Theme, width: usize) -> &[String] {
+        let valid = matches!(&self.cache, Some((w, _)) if *w == width);
+        if !valid {
+            let lines = self.render(theme, width);
+            self.cache = Some((width, lines));
+        }
+        &self.cache.as_ref().unwrap().1
+    }
+
+    fn render(&self, theme: &Theme, width: usize) -> Vec<String> {
+        match self.kind {
+            Kind::Banner => vec![format!(
+                "{}{}",
+                bold(&theme.fg("userMessageText", "𝑒")),
+                theme.fg("muted", &format!(" v{} · Run /help for commands", self.text))
+            )],
+            Kind::User => {
+                let rail = format!("{} ", theme.fg("userMessageText", "┃"));
+                let mut rows = Vec::new();
+                for line in self.text.split('\n') {
+                    if line.trim().is_empty() {
+                        rows.push(theme.fg("userMessageText", "┃"));
+                        continue;
+                    }
+                    for row in wrap_styled(line, width.saturating_sub(2).max(8)) {
+                        rows.push(format!("{rail}{}", bold(&row)));
+                    }
+                }
+                rows
+            }
+            Kind::Assistant => {
+                let text = self.text.trim();
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                render_markdown(theme, text, width.saturating_sub(2).max(8))
+                    .into_iter()
+                    .map(|l| if l.is_empty() { l } else { format!("  {l}") })
+                    .collect()
+            }
+            Kind::Tool => {
+                let marker = if self.done { "●".to_string() } else { dim("●") };
+                let rows = vec![match &self.detail {
+                    Some(target) if !target.is_empty() => {
+                        format!("  {marker} {} {}", self.text, theme.fg("muted", target))
+                    }
+                    _ => format!("  {marker} {}", self.text),
+                }];
+                rows
+            }
+            Kind::Summary => vec![theme.fg("dim", &format!("  {}", self.text))],
+            Kind::Notice => wrap_styled(&self.text, width.saturating_sub(2).max(8))
+                .into_iter()
+                .map(|l| format!("  {l}"))
+                .collect(),
+        }
+    }
+}
+
+fn gap(prev: Kind, next: Kind) -> usize {
+    if prev == Kind::Tool && next == Kind::Tool { 0 } else { 1 }
+}
+
+#[derive(Default)]
+pub struct Transcript {
+    pub blocks: Vec<Block>,
+}
+
+impl Transcript {
+    pub fn push(&mut self, block: Block) -> usize {
+        self.blocks.push(block);
+        self.blocks.len() - 1
+    }
+
+    pub fn clear(&mut self) {
+        self.blocks.clear();
+    }
+
+    pub fn render(&mut self, theme: &Theme, width: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut prev: Option<Kind> = None;
+        for block in &mut self.blocks {
+            let kind = block.kind;
+            let lines = block.lines(theme, width);
+            if lines.is_empty() {
+                continue;
+            }
+            if let Some(p) = prev {
+                for _ in 0..gap(p, kind) {
+                    out.push(String::new());
+                }
+            }
+            out.extend_from_slice(lines);
+            prev = Some(kind);
+        }
+        out
+    }
+}
