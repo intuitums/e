@@ -958,7 +958,7 @@ impl App {
         let results = self.results.clone();
         let cwd = self.agent.cwd();
         tokio::spawn(async move {
-            let args = serde_json::json!({ "cmd": cmd }).to_string();
+            let args = serde_json::json!({ "command": cmd }).to_string();
             let output =
                 tokio::task::spawn_blocking(move || e::core::tools::run("bash", &args, &cwd))
                     .await

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The `!` passthrough sent its argument under the wrong key ("cmd" vs
+  the tool's "command"), so every `!` command returned an argument error
+  instead of running — found reviewing this stack; the smoke that should
+  have caught it matched the typed text instead of real output.
 - The bash tool's timeout is real: the advertised wall-clock bound was
   never enforced (a runaway command hung the agent forever). Commands now
   run as their own process group and the group is killed at the deadline;
