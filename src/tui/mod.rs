@@ -1,5 +1,6 @@
 //! The terminal frontend.
 
+pub mod background;
 pub mod composer;
 pub mod highlight;
 pub mod markdown;

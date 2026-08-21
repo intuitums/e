@@ -296,11 +296,10 @@ async fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    let light = std::env::var("COLORFGBG")
-        .ok()
-        .and_then(|v| v.rsplit(';').next().and_then(|n| n.parse::<u8>().ok()))
-        .map(|bg| bg >= 7)
-        .unwrap_or(false);
+    // Raw mode first: background detection needs the reply un-line-buffered.
+    terminal::enable_raw_mode()?;
+    let _guard = RawGuard;
+    let light = e::tui::background::detect_light().unwrap_or(false);
     let theme = load_bundled(light).map_err(std::io::Error::other)?;
 
     let (cols, rows) = terminal::size()?;
@@ -324,8 +323,6 @@ async fn main() -> std::io::Result<()> {
     // A message on the command line becomes the first prompt.
     let initial: String = args.join(" ");
 
-    terminal::enable_raw_mode()?;
-    let _guard = RawGuard;
     // Terminal tab title: the custom glyph, a dot, the path.
     {
         let mut out = std::io::stdout();

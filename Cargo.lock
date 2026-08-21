@@ -163,6 +163,7 @@ dependencies = [
  "base64",
  "crossterm",
  "futures",
+ "libc",
  "pulldown-cmark",
  "rand 0.8.7",
  "reqwest",
