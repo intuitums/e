@@ -634,14 +634,7 @@ fn system_prompt() -> String {
 }
 
 fn persist_model(m: &Model) {
-    let path = e::core::home::settings_path();
-    let mut value: serde_json::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    value["model"] = serde_json::Value::String(model::slug(m));
-    let _ = e::core::home::ensure();
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap_or_default());
+    e::core::settings::set_string("model", &model::slug(m));
 }
 
 fn key_of(event: &KeyEvent) -> Option<Key> {

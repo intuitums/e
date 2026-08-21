@@ -43,9 +43,7 @@ pub fn save_api_key(provider: &str, key: &str) -> Result<(), String> {
     if key.is_empty() {
         return Err("empty key".into());
     }
-    let mut file = auth::load();
-    file.insert(provider.to_string(), Credential::ApiKey { key: key.to_string() });
-    auth::save(&file).map_err(|e| e.to_string())
+    auth::set(provider, Credential::ApiKey { key: key.to_string() }).map_err(|e| e.to_string())
 }
 
 /// The browser PKCE flow, reporting progress through `notify` so the TUI can
@@ -117,17 +115,16 @@ async fn codex_login_inner(
     };
     let account_id = auth::account_id_from_jwt(access);
 
-    let mut file = auth::load();
-    file.insert(
-        provider.to_string(),
+    auth::set(
+        provider,
         Credential::OAuth {
             access: access.to_string(),
             refresh: refresh.to_string(),
             expires: auth::now_ms() + expires_in * 1000,
             account_id,
         },
-    );
-    auth::save(&file).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

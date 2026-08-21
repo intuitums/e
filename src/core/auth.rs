@@ -27,25 +27,25 @@ pub enum Credential {
 
 pub type AuthFile = BTreeMap<String, Credential>;
 
+/// Load the credentials e can interpret. Entries in a shape e doesn't
+/// understand are skipped here but left untouched on disk — never wiped.
 pub fn load() -> AuthFile {
-    match std::fs::read_to_string(home::auth_path()) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-        Err(_) => AuthFile::default(),
+    let mut out = AuthFile::new();
+    for (provider, value) in crate::core::store::read_object(&home::auth_path()) {
+        if let Ok(cred) = serde_json::from_value::<Credential>(value) {
+            out.insert(provider, cred);
+        }
     }
+    out
 }
 
-pub fn save(auth: &AuthFile) -> io::Result<()> {
-    home::ensure()?;
-    let path = home::auth_path();
-    let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(auth)?;
-    std::fs::write(&tmp, json)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    }
-    std::fs::rename(&tmp, path)
+/// Store one provider's credential, merging into the file so every other
+/// provider — including any e couldn't parse — survives.
+pub fn set(provider: &str, credential: Credential) -> io::Result<()> {
+    let value = serde_json::to_value(credential).unwrap_or(serde_json::Value::Null);
+    crate::core::store::update(&home::auth_path(), 0o600, |obj| {
+        obj.insert(provider.to_string(), value);
+    })
 }
 
 pub fn now_ms() -> u64 {

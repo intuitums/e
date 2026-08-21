@@ -6,29 +6,18 @@ use serde_json::Value;
 
 use crate::core::home;
 
-fn read() -> Value {
-    std::fs::read_to_string(home::settings_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}))
-}
-
-fn write(value: &Value) {
-    let _ = home::ensure();
-    if let Ok(text) = serde_json::to_string_pretty(value) {
-        let _ = std::fs::write(home::settings_path(), text);
-    }
-}
-
 pub fn get_string(key: &str) -> Option<String> {
-    read().get(key).and_then(|v| v.as_str().map(String::from))
+    crate::core::store::read_object(&home::settings_path())
+        .get(key)
+        .and_then(|v| v.as_str().map(String::from))
 }
 
-/// Set one key, preserving the rest of the file.
+/// Set one key. Every other key on disk — known or not — is preserved, the
+/// write is atomic, and a corrupt file is quarantined rather than reset.
 pub fn set_string(key: &str, val: &str) {
-    let mut value = read();
-    value[key] = Value::String(val.to_string());
-    write(&value);
+    let _ = crate::core::store::update(&home::settings_path(), 0o644, |obj| {
+        obj.insert(key.to_string(), Value::String(val.to_string()));
+    });
 }
 
 /// A settings choice: a label, a category, and the options to cycle through.

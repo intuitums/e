@@ -5,6 +5,7 @@ pub mod auth;
 pub mod responses;
 pub mod session;
 pub mod settings;
+pub mod store;
 pub mod skills;
 pub mod tools;
 pub mod workspace;

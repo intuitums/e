@@ -18,8 +18,8 @@ pub const AUTH_BASE: &str = "https://auth.openai.com";
 
 /// Refresh when within a minute of expiry; persist the rotated pair.
 async fn fresh_access(provider: &str) -> Result<(String, String), String> {
-    let mut file = auth::load();
-    let Some(Credential::OAuth { access, refresh, expires, account_id }) = file.get(provider).cloned() else {
+
+    let Some(Credential::OAuth { access, refresh, expires, account_id }) = auth::load().get(provider).cloned() else {
         return Err(format!("no OAuth credentials for {provider} — run `e auth {provider}`"));
     };
     let account = account_id
@@ -53,16 +53,16 @@ async fn fresh_access(provider: &str) -> Result<(String, String), String> {
         return Err("token refresh response missing fields".into());
     };
     let account = auth::account_id_from_jwt(access).unwrap_or(account);
-    file.insert(
-        provider.to_string(),
+    auth::set(
+        provider,
         Credential::OAuth {
             access: access.to_string(),
             refresh: refresh.to_string(),
             expires: auth::now_ms() + expires_in * 1000,
             account_id: Some(account.clone()),
         },
-    );
-    auth::save(&file).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     Ok((access.to_string(), account))
 }
 
