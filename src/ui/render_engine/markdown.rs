@@ -15,9 +15,9 @@
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthChar;
 
-use crate::render::ansi::*;
-use crate::render::highlight::highlight_line;
-use crate::render::theme::Theme;
+use crate::ui::render::*;
+use crate::ui::render_engine::code_highlight::highlight_line;
+use crate::ui::theme::Theme;
 
 fn osc8(url: &str) -> String {
     format!("\x1b]8;;{url}\x1b\\")

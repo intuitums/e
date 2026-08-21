@@ -2,9 +2,9 @@
 //! test literals. Ported from `test/parity.test.ts`, which remains the
 //! executable TypeScript twin until the swap milestone.
 
-use e_tui::app::fmt::{compact_model_label, format_duration, format_tokens};
-use e_tui::render::ansi::heading_style;
-use e_tui::render::theme::Theme;
+use e::core::output::{compact_model_label, format_duration, format_tokens};
+use e::ui::render::heading_style;
+use e::ui::theme::Theme;
 
 #[test]
 fn heading_styles_match_the_level_table() {
@@ -41,7 +41,7 @@ fn model_labels_shorten_the_reference_way() {
 }
 
 fn read_theme(name: &str) -> (Theme, serde_json::Value) {
-    let path = format!("{}/../../themes/{name}.json", env!("CARGO_MANIFEST_DIR"));
+    let path = format!("{}/themes/{name}.json", env!("CARGO_MANIFEST_DIR"));
     let json = std::fs::read_to_string(&path).expect("theme file");
     (Theme::from_json(&json).expect("parse"), serde_json::from_str(&json).unwrap())
 }
@@ -89,7 +89,7 @@ fn the_palette_carries_the_reference_values() {
     }
 }
 
-use e_tui::render::markdown::{code_panel, render_markdown};
+use e::ui::render_engine::markdown::{code_panel, render_markdown};
 
 fn dark() -> Theme {
     read_theme("dark").0

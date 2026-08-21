@@ -10,11 +10,11 @@ use futures::StreamExt;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use e_tui::app::blocks::{Block, Kind, Transcript};
-use e_tui::app::editor::{Editor, EditorResult, Key};
-use e_tui::app::status::{statusline, StatusData, Turn};
-use e_tui::render::theme::{load_bundled, Theme};
-use e_tui::term::screen::Screen;
+use e::ui::transcript::{Block, Kind, Transcript};
+use e::ui::input::{Editor, EditorResult, Key};
+use e::ui::statusline::{statusline, StatusData, Turn};
+use e::ui::theme::{load_bundled, Theme};
+use e::ui::render_engine::terminal_diff::Screen;
 
 struct App {
     theme: Theme,
@@ -81,7 +81,7 @@ fn key_of(event: &KeyEvent) -> Option<Key> {
 async fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("e {}", e_core::VERSION);
+        println!("e {}", e::VERSION);
         return Ok(());
     }
 
@@ -111,7 +111,7 @@ async fn main() -> std::io::Result<()> {
         armed_at: None,
         should_quit: false,
     };
-    app.transcript.push(Block::new(Kind::Banner, e_core::VERSION));
+    app.transcript.push(Block::new(Kind::Banner, e::VERSION));
 
     terminal::enable_raw_mode()?;
     let _guard = RawGuard;
@@ -191,7 +191,7 @@ fn submit(app: &mut App, text: String) {
             app.should_quit = true;
         }
         "/version" => {
-            app.transcript.push(Block::new(Kind::Notice, format!("e {}", e_core::VERSION)));
+            app.transcript.push(Block::new(Kind::Notice, format!("e {}", e::VERSION)));
         }
         _ => {
             app.transcript.push(Block::new(Kind::User, trimmed));

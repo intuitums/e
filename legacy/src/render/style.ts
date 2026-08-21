@@ -17,7 +17,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 const entry = import.meta.resolve("@earendil-works/pi-coding-agent");
 const themeModule = await import(entry.replace(/index\.js$/, "modes/interactive/theme/theme.js"));
 
-const themesDir = new URL("../../themes/", import.meta.url);
+const themesDir = new URL("../../../themes/", import.meta.url);
 
 let current: Theme;
 

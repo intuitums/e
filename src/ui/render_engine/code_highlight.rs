@@ -6,7 +6,7 @@
 //! `code`, and `comment` tokens, so panels stay palette-correct in both
 //! light and dark.
 
-use crate::render::theme::Theme;
+use crate::ui::theme::Theme;
 
 const KEYWORDS_COMMON: &[&str] = &[
     "if", "else", "for", "while", "return", "break", "continue", "match",

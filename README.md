@@ -44,14 +44,31 @@ drift silently.
   the most recent session
 - automatic light/dark from the terminal background
 
+## Layout
+
+```
+src/
+  core/            the harness kernel — no terminal dependencies
+  ui/              the frontend
+    render_engine/ markdown → lines, syntax coloring, the diffing painter
+tests/             the parity suite (byte-pinned visual contract)
+scripts/           pty capture + replay harness
+themes/            the two palettes
+legacy/            the previous TypeScript frontend, kept as the executable
+                   reference until the Rust harness reaches parity
+```
+
+`src/tools/`, `src/builtins/`, and the rest of `src/core/` (providers, agent
+loop, sessions, permissions) land milestone by milestone.
+
 ## Run
 
 ```
-e
+e            # the TypeScript frontend (current daily driver)
+cargo run    # the Rust harness in progress
 ```
 
-Installed at `~/.local/bin/e` → `bin/e` in this repo. Runs on Node ≥ 22.19
-via type stripping; no build step.
+`~/.local/bin/e` → `bin/e`, which launches `legacy/` until the swap milestone.
 
 ## Roadmap
 

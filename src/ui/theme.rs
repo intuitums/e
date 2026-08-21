@@ -92,5 +92,5 @@ pub fn load_bundled(light: bool) -> Result<Theme, String> {
 fn concat_repo_path(rel: &str) -> String {
     // Resolved relative to the crate at build time; works for `cargo run`
     // and tests. The release binary embeds the themes instead (see M8).
-    format!("{}/../../{}", env!("CARGO_MANIFEST_DIR"), rel)
+    format!("{}/{}", env!("CARGO_MANIFEST_DIR"), rel)
 }
