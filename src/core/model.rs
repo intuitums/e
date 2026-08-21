@@ -1,0 +1,141 @@
+//! The model catalog: a built-in table of the providers e speaks natively,
+//! overridable by `~/.e/models.json` (same shape, merged over the built-ins).
+//! The active model comes from `~/.e/settings.json` `{"model": "provider/id"}`
+//! or a `/model` switch at runtime.
+
+use serde::Deserialize;
+
+use crate::core::home;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Api {
+    /// OpenAI chat-completions dialect (`/chat/completions`, SSE deltas).
+    Completions,
+    /// The responses dialect behind the ChatGPT backend (OAuth + account id).
+    CodexResponses,
+}
+
+#[derive(Clone, Debug)]
+pub struct Model {
+    pub provider: String,
+    pub id: String,
+    pub base_url: String,
+    pub api: Api,
+    /// Effort values the backend accepts for its reasoning knob, if any.
+    pub efforts: &'static [&'static str],
+}
+
+pub fn slug(model: &Model) -> String {
+    format!("{}/{}", model.provider, model.id)
+}
+
+const OPENCODE_BASE: &str = "https://opencode.ai/zen/go/v1";
+const CODEX_BASE: &str = "https://chatgpt.com/backend-api";
+const EFFORTS: &[&str] = &["low", "medium", "high"];
+
+pub fn builtin_catalog() -> Vec<Model> {
+    let completions = |id: &str| Model {
+        provider: "opencode-go".into(),
+        id: id.into(),
+        base_url: OPENCODE_BASE.into(),
+        api: Api::Completions,
+        efforts: &[],
+    };
+    let codex = |id: &str| Model {
+        provider: "openai-codex".into(),
+        id: id.into(),
+        base_url: CODEX_BASE.into(),
+        api: Api::CodexResponses,
+        efforts: EFFORTS,
+    };
+    vec![
+        completions("deepseek-v4-flash"),
+        completions("deepseek-v4-pro"),
+        completions("minimax-m3"),
+        completions("qwen3.7-plus"),
+        completions("qwen3.7-max"),
+        completions("glm-5.2"),
+        completions("glm-5.3"),
+        completions("kimi-k3"),
+        completions("hy3"),
+        completions("muse-spark-1.2-contributor"),
+        codex("gpt-5.6-sol"),
+        codex("gpt-5.6-terra"),
+        codex("gpt-5.6-luna"),
+        codex("gpt-5.5"),
+        codex("gpt-5.4"),
+    ]
+}
+
+#[derive(Deserialize)]
+struct ModelsFile {
+    providers: std::collections::BTreeMap<String, ProviderEntry>,
+}
+
+#[derive(Deserialize)]
+struct ProviderEntry {
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    api: Option<String>,
+    #[serde(default)]
+    models: Vec<String>,
+}
+
+/// Built-ins plus `~/.e/models.json` additions.
+pub fn catalog() -> Vec<Model> {
+    let mut models = builtin_catalog();
+    if let Ok(json) = std::fs::read_to_string(home::home().join("models.json")) {
+        if let Ok(file) = serde_json::from_str::<ModelsFile>(&json) {
+            for (provider, entry) in file.providers {
+                let api = match entry.api.as_deref() {
+                    Some("codex-responses") => Api::CodexResponses,
+                    _ => Api::Completions,
+                };
+                let base = entry.base_url.clone().unwrap_or_else(|| OPENCODE_BASE.into());
+                for id in entry.models {
+                    if !models.iter().any(|m| m.provider == provider && m.id == id) {
+                        models.push(Model {
+                            provider: provider.clone(),
+                            id,
+                            base_url: base.clone(),
+                            api,
+                            efforts: &[],
+                        });
+                    }
+                }
+            }
+        }
+    }
+    models
+}
+
+#[derive(Deserialize, Default)]
+struct Settings {
+    #[serde(default)]
+    model: Option<String>,
+}
+
+pub const DEFAULT_MODEL: &str = "opencode-go/deepseek-v4-flash";
+
+pub fn default_model() -> Model {
+    let wanted = std::fs::read_to_string(home::settings_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Settings>(&s).ok())
+        .and_then(|s| s.model)
+        .unwrap_or_else(|| DEFAULT_MODEL.into());
+    resolve(&wanted).unwrap_or_else(|| resolve(DEFAULT_MODEL).expect("builtin default"))
+}
+
+/// Resolve `provider/id`, a bare id, or a unique substring.
+pub fn resolve(query: &str) -> Option<Model> {
+    let cat = catalog();
+    if let Some(m) = cat.iter().find(|m| slug(m) == query || m.id == query) {
+        return Some(m.clone());
+    }
+    let matches: Vec<&Model> = cat.iter().filter(|m| slug(m).contains(query)).collect();
+    if matches.len() == 1 {
+        return Some(matches[0].clone());
+    }
+    None
+}
