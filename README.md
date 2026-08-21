@@ -20,6 +20,12 @@ deepseek-v4-flash · high · …/repos/e
 
 ## Design
 
+Three principles, spelled out in [DESIGN.md](DESIGN.md): the look is law
+(the visual design is a byte-pinned executable spec), a guest not a landlord
+(credentials, sessions, and conventions interoperate with what's already on
+the machine), and readable in an afternoon (the kernel has a line budget and
+features must pay for themselves inside it).
+
 Grayscale, typography-first, zero chrome: emphasis is weight and underline, not
 color. The transcript grows down the normal screen into scrollback — no alt
 screen, no bordered panes. A `┃` rail marks your turns and the composer; tool
