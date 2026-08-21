@@ -23,6 +23,8 @@ src/core/    the harness, terminal-free
   provider.rs     the seam — one Request, one Event stream, the SSE splitter
   completions.rs · responses.rs    the two wire dialects
   tools/          read · write · edit · ls · grep · bash · skill
+  api/            the extension host: subprocesses over a JSONL line
+                  protocol (docs/extensions.md) — tools, commands, hooks
   session.rs · context.rs · model.rs · auth.rs · login.rs · settings.rs · skills.rs
 src/tui/     the frontend
   render.rs       SGR primitives          screen.rs      the diffing painter
@@ -57,9 +59,9 @@ it through `panel.rs` so it can't diverge.
   person could sensibly prefer are read from `~/.e/` with a built-in default —
   themes from `~/.e/themes/`, and skills, prompts, instructions, the system
   prompt the same way. When you add something user-facing, make it a file-backed
-  override, not a constant. (This is DESIGN.md §2; it is the extensibility that
-  matters. A code-plugin API is separate and still budgeted — don't add one
-  without a decision.)
+  override, not a constant. When data isn't enough there is the extension API
+  (`core/api/`, docs/extensions.md) — grow its protocol by need, never by
+  symmetry, and keep hooks fail-open. (This is DESIGN.md §2.)
 - Verify UI changes with a real frame, not by reasoning about bytes. `scripts/`
   has a pty capture-and-replay harness; that is how the look gets checked.
 - Keep the commit trailer: `Co-authored-by: Claude <noreply@anthropic.com>`.

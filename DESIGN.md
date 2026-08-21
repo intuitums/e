@@ -33,7 +33,7 @@ to run:
   skills/           SKILL.md skill directories
   prompts/          slash prompt templates
   themes/           palette overrides
-  extensions/       reserved (see "What e is not")
+  extensions/       executables speaking the line protocol (docs/extensions.md)
 ```
 
 Sovereignty is not a silo, because every format in that home is an **open
@@ -52,8 +52,12 @@ want to change is data they drop in `~/.e/`, with the built-in as the
 fallback — never something hardcoded they'd have to edit Rust to touch.
 Themes are files in `~/.e/themes/`; skills, prompts, instructions, and the
 system prompt are all overridable the same way. This is the extensibility that
-matters — a person shapes e by owning its data, not by writing a plugin. (Code
-extensions remain a separate budget decision; see "What e is not".) The rule
+matters — a person shapes e by owning its data, not by writing a plugin. And
+when data isn't enough, the home is also the **code surface**: an extension is
+any executable dropped in `~/.e/extensions/`, in any language, speaking a
+line protocol over stdio (docs/extensions.md) — tools, commands, hooks. The
+process boundary is the API; there is no embedded runtime to learn or link
+against. The rule
 for building: if it's a look, a wording, or a behaviour a user could sensibly
 prefer, read it from `~/.e/` with a sane default, don't nail it into the
 binary.
@@ -78,8 +82,10 @@ raised *explicitly, in this file* — never silently.
 
 # What e is not
 
-Not a plugin platform **yet**: `~/.e/extensions/` is reserved, but an
-extension API is a budget decision (principle 3) that has not been paid
-for — until it is, the way to change e is to change e. Not a product surface: no telemetry, no account, no
-upsell, no update channel phoning home. Not a research playground: the
-spec-first discipline means novelty lands behind tests or not at all.
+Not an embedded-runtime platform: extensions exist (principle 2), but they
+are subprocesses over stdio, chosen precisely because a scripting runtime —
+an interpreter, a dylib ABI, a package ecosystem — would blow the budget
+(principle 3). The protocol grows by need, not symmetry. Not a product
+surface: no telemetry, no account, no upsell, no update channel phoning
+home. Not a research playground: the spec-first discipline means novelty
+lands behind tests or not at all.

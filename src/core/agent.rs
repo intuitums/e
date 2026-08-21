@@ -66,6 +66,8 @@ pub enum SessionEvent {
 
 pub struct Agent {
     pub model: Model,
+    /// The extension host; None means built-in tools only.
+    host: Option<std::sync::Arc<crate::core::api::ExtensionHost>>,
     cwd: PathBuf,
     history: Arc<Mutex<Vec<ChatMessage>>>,
     events: mpsc::Sender<SessionEvent>,
@@ -82,6 +84,7 @@ impl Agent {
         let (events, rx) = mpsc::channel(256);
         let agent = Agent {
             model,
+            host: None,
             cwd: std::env::current_dir().unwrap_or_default(),
             history: Arc::new(Mutex::new(Vec::new())),
             events,
@@ -91,6 +94,12 @@ impl Agent {
             session: Arc::new(Mutex::new(None)),
         };
         (agent, rx)
+    }
+
+    /// Attach the extension host: its tools join (and may override) the
+    /// built-ins, and its hooks gate every tool call.
+    pub fn set_host(&mut self, host: std::sync::Arc<crate::core::api::ExtensionHost>) {
+        self.host = Some(host);
     }
 
     pub fn is_streaming(&self) -> bool {
@@ -149,6 +158,7 @@ impl Agent {
         let effort = self.effort();
         let session = self.session.clone();
         let pending = self.pending.clone();
+        let host = self.host.clone();
 
         tokio::spawn(async move {
             let _ = events.send(SessionEvent::TurnStart).await;
@@ -170,7 +180,10 @@ impl Agent {
                     system: system.clone(),
                     messages,
                     effort: effort.clone(),
-                    tools: tools::schemas(),
+                    tools: match &host {
+                        Some(h) => h.merged_tool_schemas(),
+                        None => tools::schemas(),
+                    },
                 };
 
                 let mut attempt = 0u32;
@@ -247,16 +260,7 @@ impl Agent {
                     let id = tool_seq;
                     let _ = events.send(SessionEvent::ToolStart { id, verb, target }).await;
 
-                    let name = call.name.clone();
-                    let arguments = call.arguments.clone();
-                    let cwd2 = cwd.clone();
-                    let output = tokio::task::spawn_blocking(move || tools::run(&name, &arguments, &cwd2))
-                        .await
-                        .unwrap_or(tools::ToolOutput {
-                            content: "tool panicked".into(),
-                            is_error: true,
-                            summary: "error".into(),
-                        });
+                    let output = run_tool(&host, &call.name, &call.arguments, &cwd).await;
                     let _ = events
                         .send(SessionEvent::ToolEnd { id, summary: output.summary.clone(), is_error: output.is_error })
                         .await;
@@ -264,6 +268,9 @@ impl Agent {
                 }
             };
             let _ = events.send(SessionEvent::TurnEnd { aborted }).await;
+            if let Some(h) = &host {
+                h.event("turn_end", serde_json::json!({"aborted": aborted})).await;
+            }
         });
     }
 
@@ -278,4 +285,37 @@ impl Agent {
             let _ = self.events.try_send(SessionEvent::TurnEnd { aborted: true });
         }
     }
+}
+
+/// Dispatch one tool call: extension hooks may block it, an extension that
+/// owns the name serves it, otherwise the built-in runs on a blocking thread.
+async fn run_tool(
+    host: &Option<std::sync::Arc<crate::core::api::ExtensionHost>>,
+    name: &str,
+    arguments: &str,
+    cwd: &PathBuf,
+) -> tools::ToolOutput {
+    if let Some(h) = host {
+        if let Some(reason) = h.hook_tool_call(name, arguments).await {
+            return tools::ToolOutput {
+                content: format!("Tool call blocked by extension: {reason}"),
+                is_error: true,
+                summary: "blocked".into(),
+            };
+        }
+        if h.owns_tool(name) {
+            let result = h.call_tool(name, arguments).await;
+            return tools::ToolOutput {
+                content: result.content,
+                is_error: result.is_error,
+                summary: if result.is_error { "error".into() } else { "done".into() },
+            };
+        }
+    }
+    let name = name.to_string();
+    let arguments = arguments.to_string();
+    let cwd = cwd.clone();
+    tokio::task::spawn_blocking(move || tools::run(&name, &arguments, &cwd)).await.unwrap_or(
+        tools::ToolOutput { content: "tool panicked".into(), is_error: true, summary: "error".into() },
+    )
 }

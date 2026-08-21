@@ -38,6 +38,14 @@ struct ActiveTurn {
     reasoning: Option<usize>,
 }
 
+/// Asynchronous work landing back in the frame loop.
+enum AppJob {
+    /// A line for the transcript (login progress, extension notify…).
+    Notice(String),
+    /// A prompt an extension command asked to submit as the user.
+    Prompt(String),
+}
+
 struct App {
     theme: Theme,
     transcript: Transcript,
@@ -59,6 +67,9 @@ struct App {
     settings: Option<e::tui::settingspanel::SettingsPanel>,
     /// Background job narration (login flows) into the transcript.
     jobs: tokio::sync::mpsc::Sender<String>,
+    /// Extension host; commands and prompts come back on `results`.
+    host: std::sync::Arc<e::core::api::ExtensionHost>,
+    results: tokio::sync::mpsc::Sender<AppJob>,
 }
 
 impl App {
@@ -99,8 +110,8 @@ impl App {
 
     /* ---------- pickers ---------- */
 
-    fn command_items() -> Vec<MenuItem> {
-        vec![
+    fn command_items(&self) -> Vec<MenuItem> {
+        let mut items = vec![
             MenuItem::new("/login", "sign in to a provider — account or API key", "/login"),
             MenuItem::new("/model", "switch the model", "/model"),
             MenuItem::new("/resume", "resume a saved session", "/resume"),
@@ -110,7 +121,12 @@ impl App {
             MenuItem::new("/help", "show commands", "/help"),
             MenuItem::new("/version", "show the version", "/version"),
             MenuItem::new("/quit", "exit", "/quit"),
-        ]
+        ];
+        for (name, description) in self.host.commands() {
+            let slash = format!("/{name}");
+            items.push(MenuItem::new(&slash, &description, &slash));
+        }
+        items
     }
 
     fn open_resume_menu(&mut self) {
@@ -249,7 +265,7 @@ impl App {
             match &mut self.menu {
                 Some(m) if m.kind == MenuKind::Commands => m.set_query(&query),
                 _ => {
-                    let mut menu = Menu::new(MenuKind::Commands, "Commands", HINT_USE, Self::command_items());
+                    let mut menu = Menu::new(MenuKind::Commands, "Commands", HINT_USE, self.command_items());
                     menu.set_query(&query);
                     self.menu = Some(menu);
                 }
@@ -407,7 +423,23 @@ impl App {
             "/settings" => self.open_settings(),
             "/copy" => self.copy_last(),
             _ if trimmed.starts_with('/') => {
-                self.notice(format!("unknown command {trimmed}"));
+                let (name, args) = trimmed[1..].split_once(' ').unwrap_or((&trimmed[1..], ""));
+                if self.host.has_command(name) {
+                    let host = self.host.clone();
+                    let results = self.results.clone();
+                    let (name, args) = (name.to_string(), args.to_string());
+                    tokio::spawn(async move {
+                        let out = host.run_command(&name, &args).await;
+                        if let Some(notice) = out.notice {
+                            let _ = results.send(AppJob::Notice(notice)).await;
+                        }
+                        if let Some(prompt) = out.prompt {
+                            let _ = results.send(AppJob::Prompt(prompt)).await;
+                        }
+                    });
+                } else {
+                    self.notice(format!("unknown command {trimmed}"));
+                }
             }
             _ => self.prompt(trimmed),
         }
@@ -432,13 +464,6 @@ impl App {
     }
 
     fn prompt(&mut self, text: String) {
-        if self.agent.is_streaming() {
-            self.notice("a turn is already streaming — esc to interrupt first".into());
-            return;
-        }
-        // While a turn runs the message is held (steer folds it in later and
-        // echoes it via Steered; queue starts it after the turn). Idle, it
-        // begins a turn now.
         // While a turn runs the message is held and steered in (echoed later
         // via Steered); idle, it begins a turn now.
         let held = self.agent.submit(text.clone(), system_prompt());
@@ -689,8 +714,11 @@ async fn main() -> std::io::Result<()> {
 
     let (cols, rows) = terminal::size()?;
     let mut screen = Screen::new(cols, rows);
-    let (agent, mut session_events) = Agent::new(model::default_model());
+    let (mut agent, mut session_events) = Agent::new(model::default_model());
     let (jobs_tx, mut jobs_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let (results_tx, mut results_rx) = tokio::sync::mpsc::channel::<AppJob>(16);
+    let host = e::core::api::ExtensionHost::start(jobs_tx.clone()).await;
+    agent.set_host(host.clone());
     let mut app = App {
         theme,
         transcript: Transcript::default(),
@@ -706,6 +734,8 @@ async fn main() -> std::io::Result<()> {
         auth: None,
         settings: None,
         jobs: jobs_tx,
+        host,
+        results: results_tx,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
     // -c continues this workspace's most recent session.
@@ -827,6 +857,13 @@ async fn main() -> std::io::Result<()> {
                     None => break,
                 }
             }
+            job = results_rx.recv() => {
+                match job {
+                    Some(AppJob::Notice(notice)) => app.notice(notice),
+                    Some(AppJob::Prompt(prompt)) => app.prompt(prompt),
+                    None => {}
+                }
+            }
             message = jobs_rx.recv() => {
                 if let Some(message) = message {
                     if matches!(app.auth, Some(AuthStage::Waiting)) && message.contains("signed in")
@@ -853,6 +890,7 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    app.host.shutdown().await;
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     drop(_guard);
     let mut out = std::io::stdout();

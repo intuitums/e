@@ -3,6 +3,7 @@
 //! Menus render between the composer and the status row, the reference
 //! inline-picker shape:
 //!
+//! ```text
 //!   ── divider ─────────────────────────────
 //!   Commands 7 · Type to filter          1–7
 //!
@@ -10,6 +11,7 @@
 //!     /model   list or switch models       ← selected row bold, no caret
 //!   ── divider ─────────────────────────────
 //!   ↑↓ Navigate     Enter Use     Esc Close   (rides the status row)
+//! ```
 //!
 //! Selection is bold-ink vs default — no caret glyph, the reference
 //! convention.
