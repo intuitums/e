@@ -7,6 +7,16 @@ use std::sync::Mutex;
 // E_HOME is process-global; serialize the tests that set it.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Registry env keys leak real sign-ins into signed-out assertions when the
+/// developer's shell exports them — clear them for this process.
+fn clear_env_keys() {
+    for provider in e::core::provider::registry::all() {
+        if let Some(env) = &provider.auth.key_env {
+            std::env::remove_var(env);
+        }
+    }
+}
+
 fn with_models_json(json: &str) -> Vec<e::core::provider::catalog::Model> {
     let dir = std::env::temp_dir().join(format!("e-models-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -141,6 +151,7 @@ fn xai_builtins_carry_their_real_windows() {
 #[test]
 fn only_signed_in_providers_are_available() {
     let _lock = ENV_LOCK.lock().unwrap();
+    clear_env_keys();
     let dir = std::env::temp_dir().join(format!("e-avail-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::env::set_var("E_HOME", &dir);
@@ -174,6 +185,7 @@ fn only_signed_in_providers_are_available() {
 #[test]
 fn cycle_pool_follows_the_scope() {
     let _lock = ENV_LOCK.lock().unwrap();
+    clear_env_keys();
     let dir = std::env::temp_dir().join(format!("e-scope-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::env::set_var("E_HOME", &dir);
@@ -274,6 +286,7 @@ fn legacy_opencode_auth_keys_still_sign_in() {
 async fn provider_reported_models_appear_without_a_release() {
     use std::io::{Read, Write};
     let _lock = ENV_LOCK.lock().unwrap();
+    clear_env_keys();
     let dir = std::env::temp_dir().join(format!("e-live-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

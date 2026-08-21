@@ -16,9 +16,11 @@ import json, pathlib, sys, urllib.request
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROVIDERS = ROOT / "src" / "core" / "provider" / "providers"
 # models.dev ids for e's provider names, where they differ.
+# openai-codex is deliberately absent: models.dev's "openai" entry describes
+# the platform API, and the ChatGPT-backend codex deployment serves different
+# (smaller, 272k) windows — conflating them once inflated codex to 1.05M.
 DEV_IDS = {"opencode-go": "opencode-go", "opencode-zen": "opencode",
-           "xai": "xai", "openai": "openai", "anthropic": "anthropic",
-           "openai-codex": "openai"}
+           "xai": "xai", "openai": "openai", "anthropic": "anthropic"}
 
 
 def fetch():
