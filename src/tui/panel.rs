@@ -7,7 +7,9 @@
 use crate::tui::theme::Theme;
 
 pub fn frame(theme: &Theme, width: usize, header: String, body: Vec<String>) -> Vec<String> {
-    let divider = theme.fg("dim", &"─".repeat(width));
+    // fx colours dividers with divider_style (240 dark / 250 light), dimmer
+    // than body dim — the  token carries exactly those values.
+    let divider = theme.fg("border", &"─".repeat(width));
     let mut out = Vec::with_capacity(body.len() + 4);
     out.push(divider.clone());
     out.push(header);
