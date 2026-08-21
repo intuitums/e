@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Tool rows wear the reference grammar: a finished row is just the row —
+  no "(done)" — and a failed tool turns its marker to the error token
+  with a `│ <outcome>` continuation line (`│ exit 128`) beneath.
+  Reasoning summaries render their inline markdown (**bold titles**, code
+  spans) instead of showing literal asterisks.
 ## 0.4.0 — 2026-08-21
 
 - Installation: `install.sh` (curl-able, checksum-verified, macOS and

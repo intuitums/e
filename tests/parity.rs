@@ -169,3 +169,43 @@ fn inline_spans_match_the_reference() {
     );
     assert!(!out.contains("(https://x.dev)"));
 }
+
+#[test]
+fn tool_rows_carry_no_done_suffix() {
+    use e::tui::transcript::{Block, Kind};
+    let theme = e::tui::theme::resolve("dark", false);
+
+    // Success: the row is the row — the reference shape, no "(done)".
+    let mut block = Block::new(Kind::Tool, "Ran");
+    block.detail = Some("cargo test".into());
+    block.done = true;
+    block.result = Some("done".into());
+    let rows = block.lines_for_test(&theme, 80);
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].contains("(done)"));
+    assert!(rows[0].contains("Ran"));
+
+    // Failure: error-token marker plus the │ continuation with the outcome.
+    let mut failed = Block::new(Kind::Tool, "Ran");
+    failed.detail = Some("false".into());
+    failed.done = true;
+    failed.is_error = true;
+    failed.result = Some("exit 7".into());
+    let rows = failed.lines_for_test(&theme, 80);
+    assert_eq!(rows.len(), 2);
+    assert!(rows[1].contains("│ exit 7"));
+}
+
+#[test]
+fn reasoning_renders_inline_markdown() {
+    let theme = e::tui::theme::resolve("dark", false);
+    let styled = e::tui::markdown::inline_spans(&theme, "**Assessing clarity** of `e docs`");
+    assert!(!styled.contains("**"), "literal asterisks leaked");
+    assert!(styled.contains("\x1b[1mAssessing clarity\x1b[22m"));
+    assert!(!styled.contains('`'), "literal backticks leaked");
+    // Unpaired markers pass through untouched.
+    assert_eq!(
+        e::tui::markdown::inline_spans(&theme, "2 ** 3 and a ` alone"),
+        "2 ** 3 and a ` alone"
+    );
+}

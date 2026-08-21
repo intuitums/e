@@ -846,10 +846,7 @@ impl App {
                         if let Some(b) = self.transcript.blocks.get_mut(idx) {
                             b.done = true;
                             b.is_error = is_error;
-                            b.detail = Some(match b.detail.take() {
-                                Some(t) if !t.is_empty() => format!("{t}  ({summary})"),
-                                _ => summary,
-                            });
+                            b.result = Some(summary);
                             b.touch();
                         }
                     }

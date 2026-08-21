@@ -28,6 +28,9 @@ pub struct Block {
     pub done: bool,
     pub is_error: bool,
     pub detail: Option<String>,
+    /// A finished tool's outcome summary ("exit 7", "timeout 5s"); rendered
+    /// as a continuation line only on failure — the reference convention.
+    pub result: Option<String>,
     cache: Option<(usize, Vec<String>)>,
 }
 
@@ -39,12 +42,18 @@ impl Block {
             done: false,
             is_error: false,
             detail: None,
+            result: None,
             cache: None,
         }
     }
 
     pub fn touch(&mut self) {
         self.cache = None;
+    }
+
+    /// Render for tests: the same rows lines() caches, without the cache.
+    pub fn lines_for_test(&self, theme: &Theme, width: usize) -> Vec<String> {
+        self.render(theme, width)
     }
 
     fn lines(&mut self, theme: &Theme, width: usize) -> &[String] {
@@ -92,17 +101,27 @@ impl Block {
                     .collect()
             }
             Kind::Tool => {
-                let marker = if self.done {
-                    "●".to_string()
-                } else {
+                // The reference shape: a finished row is just the row — no
+                // "(done)". Failure turns the marker to the error token and
+                // adds a `│ <outcome>` continuation beneath.
+                let marker = if !self.done {
                     dim("●")
+                } else if self.is_error {
+                    theme.fg("error", "●")
+                } else {
+                    "●".to_string()
                 };
-                let rows = vec![match &self.detail {
+                let mut rows = vec![match &self.detail {
                     Some(target) if !target.is_empty() => {
                         format!("  {marker} {} {}", self.text, theme.fg("muted", target))
                     }
                     _ => format!("  {marker} {}", self.text),
                 }];
+                if self.done && self.is_error {
+                    if let Some(result) = &self.result {
+                        rows.push(format!("    {}", theme.fg("muted", &format!("│ {result}"))));
+                    }
+                }
                 rows
             }
             Kind::Shell => {
@@ -129,8 +148,11 @@ impl Block {
                 if text.is_empty() {
                     return Vec::new();
                 }
-                // Dimmed, gutter-indented, italicized thinking.
-                crate::tui::markdown::wrap_styled(text, width.saturating_sub(2).max(8))
+                // Dimmed, gutter-indented, italicized thinking. Summaries
+                // arrive as markdown (bold titles, code spans) — render the
+                // inline spans instead of showing literal asterisks.
+                let styled = crate::tui::markdown::inline_spans(theme, text);
+                crate::tui::markdown::wrap_styled(&styled, width.saturating_sub(2).max(8))
                     .into_iter()
                     .map(|l| format!("  {}", theme.fg("dim", &crate::tui::render::italic(&l))))
                     .collect()
