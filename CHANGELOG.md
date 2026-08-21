@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Release profile: thin LTO, one codegen unit, stripped symbols,
+  panic=abort — the binary halves (8.02 → 4.32 MiB) with speed unchanged.
 - `benchmarks/`: a dependency-free suite for the numbers e's identity
   depends on — binary size, cold start, spawn-to-first-frame — with
   timestamped reports under `benchmarks/results/`. First baseline:
