@@ -41,9 +41,8 @@ fn model_labels_shorten_the_reference_way() {
 }
 
 fn read_theme(name: &str) -> (Theme, serde_json::Value) {
-    let path = format!("{}/themes/{name}.json", env!("CARGO_MANIFEST_DIR"));
-    let json = std::fs::read_to_string(&path).expect("theme file");
-    (Theme::from_json(&json).expect("parse"), serde_json::from_str(&json).unwrap())
+    let json = e::tui::theme::bundled_json(name == "light");
+    (Theme::from_json(json).expect("parse"), serde_json::from_str(json).unwrap())
 }
 
 #[test]

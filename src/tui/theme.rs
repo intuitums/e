@@ -81,16 +81,16 @@ impl Theme {
     }
 }
 
-/// Load one of the two bundled palettes from the repo's `themes/` directory.
-pub fn load_bundled(light: bool) -> Result<Theme, String> {
-    let name = if light { "light" } else { "dark" };
-    let path = concat_repo_path(&format!("themes/{name}.json"));
-    let json = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
-    Theme::from_json(&json)
+/// The two palettes are compiled into the binary — no runtime files, no
+/// themes directory. The raw JSON is exposed so tests can assert on it.
+pub const LIGHT_JSON: &str = include_str!("theme_light.json");
+pub const DARK_JSON: &str = include_str!("theme_dark.json");
+
+pub fn bundled_json(light: bool) -> &'static str {
+    if light { LIGHT_JSON } else { DARK_JSON }
 }
 
-fn concat_repo_path(rel: &str) -> String {
-    // Resolved relative to the crate at build time; works for `cargo run`
-    // and tests. The release binary embeds the themes instead (see M8).
-    format!("{}/{}", env!("CARGO_MANIFEST_DIR"), rel)
+/// Load one of the two bundled palettes.
+pub fn load_bundled(light: bool) -> Result<Theme, String> {
+    Theme::from_json(bundled_json(light))
 }
