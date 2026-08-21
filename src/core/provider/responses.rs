@@ -112,6 +112,11 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                     }));
                 }
             }
+            "reasoning" => {
+                if let Ok(item) = serde_json::from_str::<serde_json::Value>(&m.content) {
+                    input.push(item);
+                }
+            }
             "tool" => input.push(json!({
                 "type": "function_call_output",
                 "call_id": m.tool_call_id.clone().unwrap_or_default(),
@@ -140,7 +145,23 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         body["reasoning"] = json!({"effort": effort, "summary": "auto"});
     }
     if !request.tools.is_empty() {
-        body["tools"] = json!(request.tools);
+        // The Responses dialect wants flat tools ({type, name, …}) — the
+        // chat-completions nesting 400s with "Missing required parameter:
+        // 'tools[0].name'". Caught by the first live codex turn.
+        let tools: Vec<serde_json::Value> = request
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "name": t["function"]["name"],
+                    "description": t["function"]["description"],
+                    "parameters": t["function"]["parameters"],
+                    "strict": false,
+                })
+            })
+            .collect();
+        body["tools"] = json!(tools);
     }
 
     let mut builder = match &account {
@@ -223,6 +244,11 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                 }
                 "response.output_item.done" => {
                     let item = &value["item"];
+                    if item["type"].as_str() == Some("reasoning") {
+                        // Must be replayed verbatim on the next request, ahead
+                        // of the calls it produced — the API 400s otherwise.
+                        let _ = tx.send(Event::ReasoningItem(item.to_string())).await;
+                    }
                     if item["type"].as_str() == Some("function_call") {
                         let key = item["id"]
                             .as_str()

@@ -4,7 +4,6 @@
 //! ctrl+a/e/k/u/w, history up/down, shift+enter (or alt+enter) newline.
 //! Anything else waits until asked for.
 
-use crate::tui::markdown::visible_width;
 use crate::tui::theme::Theme;
 
 pub struct Editor {
@@ -219,7 +218,8 @@ impl Editor {
         let inner = width.saturating_sub(2).max(8);
         let mut rows = vec![String::new()];
 
-        // Split into logical lines, tracking where the cursor falls.
+        // Logical lines wrap to `inner`-wide visual rows, every row carrying
+        // the rail — the reference shape. The cursor maps to its visual row.
         let text = if self.mask {
             "•".repeat(self.text.len())
         } else {
@@ -233,39 +233,52 @@ impl Editor {
         };
         for (li, line) in logical.iter().enumerate() {
             let line_start = consumed;
-            let line_len = line.chars().count();
-            consumed += line_len + 1; // + the newline
+            let chars: Vec<char> = line.chars().collect();
+            consumed += chars.len() + 1; // + the newline
             let cursor_here = self.cursor >= line_start
-                && self.cursor <= line_start + line_len
+                && self.cursor <= line_start + chars.len()
                 && (li + 1 == logical.len() || self.cursor < consumed);
-            let mut rendered = String::new();
-            if cursor_here {
-                let col = self.cursor - line_start;
-                let chars: Vec<char> = line.chars().collect();
-                let before: String = chars[..col].iter().collect();
-                let at: String = chars
-                    .get(col)
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| " ".into());
-                let after: String = if col < chars.len() {
-                    chars[col + 1..].iter().collect()
-                } else {
-                    String::new()
-                };
-                rendered = format!("{before}\x1b[7m{at}\x1b[27m{after}");
+            let cursor_col = if cursor_here {
+                Some(self.cursor - line_start)
             } else {
-                rendered.push_str(line);
+                None
+            };
+
+            // Visual rows: chunks of `inner` chars; the cursor resting past a
+            // full final chunk needs one extra empty row to sit on.
+            let mut chunk_count = chars.len().div_ceil(inner).max(1);
+            if cursor_col == Some(chars.len())
+                && !chars.is_empty()
+                && chars.len().is_multiple_of(inner)
+            {
+                chunk_count += 1;
             }
-            // Naive width clamp: scroll horizontally so the cursor stays visible.
-            if visible_width(&rendered) > inner {
-                // v1: show the tail.
-                let plain: Vec<char> = rendered.chars().collect();
-                let keep: String = plain[plain.len().saturating_sub(inner + 8)..]
-                    .iter()
-                    .collect();
-                rendered = keep;
+            for row in 0..chunk_count {
+                let begin = row * inner;
+                let slice: &[char] = if begin < chars.len() {
+                    &chars[begin..(begin + inner).min(chars.len())]
+                } else {
+                    &[]
+                };
+                let rendered = match cursor_col {
+                    Some(col) if col >= begin && col < begin + inner => {
+                        let at = col - begin;
+                        let before: String = slice[..at.min(slice.len())].iter().collect();
+                        let cursor_char = slice
+                            .get(at)
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| " ".into());
+                        let after: String = if at < slice.len() {
+                            slice[at + 1..].iter().collect()
+                        } else {
+                            String::new()
+                        };
+                        format!("{before}\x1b[7m{cursor_char}\x1b[27m{after}")
+                    }
+                    _ => slice.iter().collect(),
+                };
+                rows.push(format!("{rail}{rendered}"));
             }
-            rows.push(format!("{rail}{rendered}"));
         }
         rows
     }

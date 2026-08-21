@@ -81,7 +81,7 @@ async fn completions_stream_parses_deltas_and_usage() {
                 break;
             }
             Event::Error { message, .. } => panic!("stream error: {message}"),
-            Event::ToolCall(_) => {}
+            Event::ToolCall(_) | Event::ReasoningItem(_) => {}
         }
     }
     assert!(done);

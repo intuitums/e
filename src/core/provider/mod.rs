@@ -73,6 +73,10 @@ pub enum Event {
         output: u64,
         cache_read: u64,
     },
+    /// A Responses-dialect reasoning item (verbatim JSON): the API demands
+    /// it be resent ahead of the function calls it produced, so the agent
+    /// stores it in history and the dialect replays it.
+    ReasoningItem(String),
     Done,
     /// `delivered`: whether the request may have reached the provider —
     /// only definitely-unsent failures are safe to auto-retry.
