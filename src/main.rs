@@ -619,7 +619,7 @@ impl App {
             }
         }
 
-        if let Some(rest) = trimmed.strip_prefix("/login") {
+        if let Some(rest) = command_arg(&trimmed, "/login") {
             let provider = rest.trim().to_string();
             if provider.is_empty() {
                 self.open_login_menu();
@@ -633,9 +633,8 @@ impl App {
             self.open_scoped_menu();
             return;
         }
-        let model_rest = trimmed
-            .strip_prefix("/models")
-            .or_else(|| trimmed.strip_prefix("/model"));
+        let model_rest =
+            command_arg(&trimmed, "/models").or_else(|| command_arg(&trimmed, "/model"));
         if let Some(rest) = model_rest {
             let query = rest.trim();
             if query.is_empty() {
@@ -1080,6 +1079,15 @@ fn system_prompt() -> String {
 
 fn persist_model(m: &Model) {
     e::core::config::settings::set_string("model", &model::slug(m));
+}
+
+/// The text after a slash command, only on a word boundary: `/login x` →
+/// `Some(" x")`, `/login` → `Some("")`, `/loginfoo` → `None` (so a typo falls
+/// through to the unknown-command notice instead of inventing an argument).
+fn command_arg<'a>(input: &'a str, command: &str) -> Option<&'a str> {
+    input
+        .strip_prefix(command)
+        .filter(|rest| rest.is_empty() || rest.starts_with(' '))
 }
 
 fn key_of(event: &KeyEvent) -> Option<Key> {

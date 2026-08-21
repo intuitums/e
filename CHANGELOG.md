@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Slash commands match on a word boundary: /loginfoo no longer starts an
+  API-key flow for a provider named "foo" — it falls through to the
+  unknown-command notice, like any other typo.
 - A pasted API key no longer lands in the composer's recall history,
   where up-arrow would recall it for the rest of the session; it goes to
   ~/.e/auth.json and nowhere else.
