@@ -23,7 +23,7 @@ pub enum AuthStage {
 
 const DESCRIPTION_COL: usize = 34;
 
-fn choice_row(
+pub(crate) fn choice_row(
     theme: &Theme,
     selected: bool,
     label: &str,

@@ -34,6 +34,7 @@ to run:
   prompts/          slash prompt templates
   themes/           palette overrides
   models.json       extra models and per-model context windows; wins on a name clash
+  trust.json        which directories may load their own instructions
   extensions/       executables speaking the line protocol (docs/extensions.md)
 ```
 

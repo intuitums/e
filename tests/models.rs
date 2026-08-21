@@ -59,3 +59,29 @@ fn models_json_overrides_a_builtin() {
     );
     assert_eq!(matches[0].context_window, 131_072);
 }
+
+#[test]
+fn trust_gates_project_instructions() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("e-trust-{}", std::process::id()));
+    let ws = home.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::env::set_var("E_HOME", &home);
+    std::fs::write(ws.join("AGENTS.md"), "SECRET-PROJECT-RULE").unwrap();
+    let ws = ws.canonicalize().unwrap();
+
+    // Never asked → the project's AGENTS.md stays out of the prompt.
+    assert_eq!(e::core::trust::status(&ws), None);
+    assert!(!e::core::context::system_prompt(&ws).contains("SECRET-PROJECT-RULE"));
+
+    // Declined → still out.
+    e::core::trust::set(&ws, false).unwrap();
+    assert_eq!(e::core::trust::status(&ws), Some(false));
+    assert!(!e::core::context::system_prompt(&ws).contains("SECRET-PROJECT-RULE"));
+
+    // Trusted → it loads.
+    e::core::trust::set(&ws, true).unwrap();
+    assert!(e::core::context::system_prompt(&ws).contains("SECRET-PROJECT-RULE"));
+
+    let _ = std::fs::remove_dir_all(&home);
+}

@@ -16,11 +16,14 @@ list, not quietly on it.
 
 ## Next
 
+- **Session branching** — session entries already log ids; a parent-id
+  field and a rewind picker would make sessions trees (the reference
+  harness's most distinctive session feature)
+- **Cost tracking** — per-token pricing in `models.json`, dollars in the
+  turn trailer
 - **`e import`** — the explicit one-time migration command (credentials,
   sessions) DESIGN.md promises; today the promise is documented but the
   command doesn't exist
-- **Prompt templates** — `~/.e/prompts/*.md` with `$ARGUMENTS`, surfaced in
-  the `/` picker next to extension commands
 
 ## Later, if they pay for themselves
 

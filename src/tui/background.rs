@@ -72,6 +72,12 @@ fn parse_osc11(reply: &str) -> Option<f32> {
     Some(0.2126 * r + 0.7152 * g + 0.0722 * b)
 }
 
+/// Whether stdout is a terminal — `e ask` styles for a human, streams plain
+/// for a pipe.
+pub fn stdout_is_tty() -> bool {
+    unsafe { libc::isatty(1) == 1 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_osc11;

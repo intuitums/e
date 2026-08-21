@@ -96,8 +96,12 @@ pub fn system_prompt(cwd: &Path) -> String {
     if let Some(rules) = read_trimmed(&home::agents_md_path()) {
         context_files.push((home::agents_md_path().to_string_lossy().into_owned(), rules));
     }
-    if let Some(rules) = read_trimmed(&cwd.join("AGENTS.md")) {
-        context_files.push((cwd.join("AGENTS.md").to_string_lossy().into_owned(), rules));
+    // The project's own instructions load only for trusted directories — an
+    // untrusted repo must not steer the agent through its AGENTS.md.
+    if crate::core::trust::trusted(cwd) {
+        if let Some(rules) = read_trimmed(&cwd.join("AGENTS.md")) {
+            context_files.push((cwd.join("AGENTS.md").to_string_lossy().into_owned(), rules));
+        }
     }
     if !context_files.is_empty() {
         prompt

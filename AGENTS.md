@@ -28,6 +28,8 @@ src/core/    the harness, terminal-free
   api/            the extension host: subprocesses over a JSONL line
                   protocol (docs/extensions.md) — tools, commands, hooks
   compact.rs      compaction: threshold, keep-recent cut, summarize
+  prompts.rs      /name templates from ~/.e/prompts
+  trust.rs        per-directory trust gate for project AGENTS.md
   session.rs · context.rs · model.rs · auth.rs · login.rs · settings.rs · skills.rs
 src/tui/     the frontend
   render.rs       SGR primitives          screen.rs      the diffing painter

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- `!<cmd>` runs a shell command directly; the output shows in the
+  transcript and is recorded into history, so the model sees what you did.
+- `e ask "prompt"` — one full agent turn without the TUI: styled output on
+  a terminal, plain streaming text when piped. The session is saved, so
+  `e -c` continues it.
+- Prompt templates: `~/.e/prompts/<name>.md` becomes `/name` in the picker,
+  with frontmatter `description` / `argument-hint` and bash-style argument
+  substitution (`$1`, `$@`, `${1:-default}`, `${@:2}`).
+- Trust: the first visit to a directory asks once whether e may load its
+  AGENTS.md; declined directories still work but their instructions stay
+  out of context (`/trust` grants later). Remembered in `~/.e/trust.json`.
 - `~/.e/models.json` entries can declare a `context_window` (per model, or
   as a provider default) — compaction and the statusline follow the active
   model's real window. A file entry with a built-in's name now replaces the

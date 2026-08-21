@@ -13,3 +13,4 @@ pub mod settingspanel;
 pub mod statusline;
 pub mod theme;
 pub mod transcript;
+pub mod trustpanel;

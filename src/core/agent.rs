@@ -142,6 +142,19 @@ impl Agent {
         self.history.lock().unwrap().clear();
     }
 
+    /// Commit a user-visible fact into history and the session log without
+    /// starting a turn — the `!` shell passthrough records its output this way
+    /// so the model sees what the user ran.
+    pub fn record_user(&self, text: String) {
+        commit(
+            &self.history,
+            &self.session,
+            &self.cwd,
+            &self.model,
+            ChatMessage::user(text),
+        );
+    }
+
     /// Replace the history with the compaction seed plus the kept recent
     /// messages, detaching from the old session log — everything commits into
     /// a fresh session file, so the compacted state is itself resumable. The

@@ -23,6 +23,7 @@ use e::tui::screen::Screen;
 use e::tui::statusline::{statusline, StatusData, Turn};
 use e::tui::theme::Theme;
 use e::tui::transcript::{Block, Kind, Transcript};
+use e::tui::trustpanel::{self, TrustStage};
 
 /// Per-turn frontend bookkeeping; the engine state lives in the Agent.
 struct ActiveTurn {
@@ -51,6 +52,11 @@ enum AppJob {
     },
     /// A /compact that didn't produce a summary.
     CompactFailed(String),
+    /// A finished `!` shell command: what ran and what it printed.
+    Shell {
+        cmd: String,
+        output: e::core::tools::ToolOutput,
+    },
 }
 
 struct App {
@@ -84,6 +90,8 @@ struct App {
     compact_requested: bool,
     /// Messages typed while compacting; submitted once the swap lands.
     held_prompts: Vec<String>,
+    /// First visit to this directory: the trust question, until answered.
+    trust: Option<TrustStage>,
 }
 
 impl App {
@@ -100,7 +108,10 @@ impl App {
         if !entering_key {
             lines.extend(self.editor.render(&self.theme, width));
         }
-        if let Some(stage) = &self.auth {
+        if let Some(stage) = &self.trust {
+            let dir = self.agent.cwd().to_string_lossy().into_owned();
+            lines.extend(trustpanel::render(stage, &self.theme, width, &dir));
+        } else if let Some(stage) = &self.auth {
             lines.extend(authpanel::render(
                 stage,
                 &self.theme,
@@ -150,11 +161,25 @@ impl App {
             MenuItem::new("/new", "start a fresh session", "/new"),
             MenuItem::new("/copy", "copy the last reply", "/copy"),
             MenuItem::new("/compact", "summarize into a fresh session", "/compact"),
+            MenuItem::new(
+                "/trust",
+                "trust this directory (loads its AGENTS.md)",
+                "/trust",
+            ),
             MenuItem::new("/settings", "change preferences", "/settings"),
             MenuItem::new("/help", "show commands", "/help"),
             MenuItem::new("/version", "show the version", "/version"),
             MenuItem::new("/quit", "exit", "/quit"),
         ];
+        for template in e::core::prompts::list() {
+            let slash = format!("/{}", template.name);
+            let description = if template.argument_hint.is_empty() {
+                template.description.clone()
+            } else {
+                format!("{} — {}", template.description, template.argument_hint)
+            };
+            items.push(MenuItem::new(&slash, &description, &slash));
+        }
         for (name, description) in self.host.commands() {
             let slash = format!("/{name}");
             items.push(MenuItem::new(&slash, &description, &slash));
@@ -444,6 +469,15 @@ impl App {
             return;
         }
 
+        // `!cmd` runs in the shell directly; the output lands in the
+        // transcript and in history, so the model sees what the user did.
+        if let Some(cmd) = trimmed.strip_prefix('!').map(str::trim) {
+            if !cmd.is_empty() {
+                self.run_shell(cmd.to_string());
+                return;
+            }
+        }
+
         if let Some(rest) = trimmed.strip_prefix("/login") {
             let provider = rest.trim().to_string();
             if provider.is_empty() {
@@ -471,7 +505,7 @@ impl App {
             "/quit" | "/exit" => self.should_quit = true,
             "/version" => self.notice(format!("e {}", e::VERSION)),
             "/help" => self.notice(
-                "commands:\n  /login [provider]   sign in (API key or account)\n  /model [name]       list or switch models\n  /new                fresh session\n  /compact            summarize into a fresh session\n  /version            show the version\n  /quit               exit"
+                "commands:\n  /login [provider]   sign in (API key or account)\n  /model [name]       list or switch models\n  /new                fresh session\n  /compact            summarize into a fresh session\n  /trust              trust this directory\n  !<cmd>              run a shell command; the model sees the output\n  /version            show the version\n  /quit               exit"
                     .into(),
             ),
             "/new" | "/clear" => {
@@ -488,9 +522,16 @@ impl App {
             "/settings" => self.open_settings(),
             "/copy" => self.copy_last(),
             "/compact" => self.compact_now(),
+            "/trust" => match e::core::trust::set(&self.agent.cwd(), true) {
+                Ok(()) => self.notice("directory trusted — its AGENTS.md now loads".into()),
+                Err(e) => self.notice(format!("trust: {e}")),
+            },
             _ if trimmed.starts_with('/') => {
                 let (name, args) = trimmed[1..].split_once(' ').unwrap_or((&trimmed[1..], ""));
-                if self.host.has_command(name) {
+                if let Some(template) = e::core::prompts::find(name) {
+                    let expanded = e::core::prompts::substitute(&template.content, args);
+                    self.prompt(expanded);
+                } else if self.host.has_command(name) {
                     let host = self.host.clone();
                     let results = self.results.clone();
                     let (name, args) = (name.to_string(), args.to_string());
@@ -746,6 +787,31 @@ impl App {
         });
     }
 
+    /// `!cmd`: run it through the bash tool off-task; the result arrives as
+    /// AppJob::Shell. Idle only — mid-turn the history is the model's.
+    fn run_shell(&mut self, cmd: String) {
+        if self.agent.is_streaming() || self.compacting {
+            self.notice("busy — run shell commands between turns".into());
+            return;
+        }
+        self.transcript
+            .push(Block::new(Kind::User, format!("! {cmd}")));
+        let results = self.results.clone();
+        let cwd = self.agent.cwd();
+        tokio::spawn(async move {
+            let args = serde_json::json!({ "cmd": cmd }).to_string();
+            let output =
+                tokio::task::spawn_blocking(move || e::core::tools::run("bash", &args, &cwd))
+                    .await
+                    .unwrap_or(e::core::tools::ToolOutput {
+                        content: "shell command panicked".into(),
+                        is_error: true,
+                        summary: "error".into(),
+                    });
+            let _ = results.send(AppJob::Shell { cmd, output }).await;
+        });
+    }
+
     fn copy_last(&mut self) {
         let last = self
             .agent
@@ -868,6 +934,9 @@ async fn main() -> std::io::Result<()> {
         e::core::login::auth_status();
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("ask") {
+        return ask(args[1..].join(" ")).await;
+    }
 
     // Raw mode first: background detection needs the reply un-line-buffered.
     terminal::enable_raw_mode()?;
@@ -903,8 +972,12 @@ async fn main() -> std::io::Result<()> {
         compacting: false,
         compact_requested: false,
         held_prompts: Vec::new(),
+        trust: None,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
+    if e::core::trust::status(&app.agent.cwd()).is_none() {
+        app.trust = Some(TrustStage { selected: 0 });
+    }
     // -c continues this workspace's most recent session.
     let continue_flag = args.iter().any(|a| a == "-c" || a == "--continue");
     let message_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
@@ -945,7 +1018,21 @@ async fn main() -> std::io::Result<()> {
                     TermEvent::Resize(c, r) => screen.resize(c, r),
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                        if let Some(panel) = &mut app.settings {
+                        if let Some(stage) = &mut app.trust {
+                            match k.code {
+                                KeyCode::Up | KeyCode::Down => stage.selected = 1 - stage.selected,
+                                KeyCode::Enter => {
+                                    let trusted = stage.selected == 0;
+                                    app.trust = None;
+                                    if let Err(e) = e::core::trust::set(&app.agent.cwd(), trusted) {
+                                        app.notice(format!("trust: {e}"));
+                                    } else if !trusted {
+                                        app.notice("working untrusted — project AGENTS.md ignored (/trust to allow)".into());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else if let Some(panel) = &mut app.settings {
                             match k.code {
                                 KeyCode::Up => panel.step(-1),
                                 KeyCode::Down => panel.step(1),
@@ -1061,6 +1148,28 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
                     Some(AppJob::CompactFailed(_)) => {}
+                    Some(AppJob::Shell { cmd, output }) => {
+                        // Display a trimmed tail; history gets the full
+                        // (tool-truncated) output so the model sees it all.
+                        let shown: String = {
+                            let lines: Vec<&str> = output.content.lines().collect();
+                            let tail = &lines[lines.len().saturating_sub(20)..];
+                            let mut text = tail.join("\n");
+                            if lines.len() > 20 {
+                                text = format!("… ({} more lines above)\n{text}", lines.len() - 20);
+                            }
+                            text
+                        };
+                        let mut block = Block::new(Kind::Tool, format!("$ {cmd}"));
+                        block.done = true;
+                        block.is_error = output.is_error;
+                        block.detail = Some(shown);
+                        app.transcript.push(block);
+                        app.agent.record_user(format!(
+                            "I ran `{cmd}` in my shell. Output:\n```\n{}\n```",
+                            output.content
+                        ));
+                    }
                     None => {}
                 }
             }
@@ -1096,6 +1205,78 @@ async fn main() -> std::io::Result<()> {
     let mut out = std::io::stdout();
     write!(out, "\r\n\x1b[?25h")?;
     out.flush()?;
+    Ok(())
+}
+
+/// `e ask "prompt"` — one turn, no TUI. On a terminal the reply renders in
+/// the full styled look once complete (tool activity streams as dim rows);
+/// piped, raw text streams to stdout as it arrives. The session is saved
+/// like any other, so `e -c` picks it up.
+async fn ask(prompt: String) -> std::io::Result<()> {
+    if prompt.trim().is_empty() {
+        eprintln!("usage: e ask \"prompt\"");
+        std::process::exit(2);
+    }
+    let tty = e::tui::background::stdout_is_tty();
+    let theme = e::tui::theme::resolve(&e::core::settings::theme(), false);
+    let width = terminal::size()
+        .map(|(c, _)| c as usize)
+        .unwrap_or(80)
+        .min(100);
+
+    let (mut agent, mut events) = Agent::new(model::default_model());
+    let host = e::core::api::ExtensionHost::empty();
+    agent.set_host(host);
+    agent.submit(prompt, system_prompt());
+
+    use std::io::Write as _;
+    let mut text = String::new();
+    let mut failed = false;
+    while let Some(event) = events.recv().await {
+        match event {
+            SessionEvent::TextDelta(d) => {
+                if tty {
+                    text.push_str(&d);
+                } else {
+                    print!("{d}");
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            SessionEvent::ToolStart { verb, target, .. } => {
+                if tty {
+                    println!("{}", theme.fg("dim", &format!("● {verb} {target}")));
+                }
+            }
+            SessionEvent::ToolEnd {
+                summary, is_error, ..
+            } => {
+                if tty && is_error {
+                    println!("{}", theme.fg("dim", &format!("└ {summary}")));
+                }
+            }
+            SessionEvent::Retry { attempt, message } => {
+                eprintln!("retrying ({attempt}/2): {message}");
+            }
+            SessionEvent::Error(message) => {
+                eprintln!("error: {message}");
+                failed = true;
+            }
+            SessionEvent::TurnEnd { .. } => break,
+            _ => {}
+        }
+    }
+    if tty && !text.is_empty() {
+        println!();
+        for line in e::tui::markdown::render_markdown(&theme, &text, width) {
+            println!("{line}");
+        }
+    }
+    if !tty {
+        println!();
+    }
+    if failed {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
