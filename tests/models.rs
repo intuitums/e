@@ -212,3 +212,81 @@ fn every_docs_topic_has_a_body() {
         .contains("initialize"));
     assert!(e::core::resources::docs::body("nope").is_none());
 }
+
+#[test]
+fn zen_and_go_are_distinct_providers() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    std::env::set_var("E_HOME", std::env::temp_dir().join("e-models-none2"));
+    let catalog = e::core::provider::catalog::catalog();
+    let go = catalog
+        .iter()
+        .find(|m| m.provider == "opencode-go")
+        .unwrap();
+    let zen = catalog.iter().find(|m| m.provider == "opencode").unwrap();
+    assert_eq!(go.base_url, "https://opencode.ai/zen/go/v1");
+    assert_eq!(zen.base_url, "https://opencode.ai/zen/v1");
+    assert_eq!(
+        e::core::provider::catalog::display_name("opencode"),
+        "OpenCode Zen"
+    );
+    assert_eq!(
+        e::core::provider::catalog::display_name("opencode-go"),
+        "OpenCode Go"
+    );
+}
+
+// The env lock is deliberately held across awaits: E_HOME must stay ours and
+// each #[tokio::test] runs on its own runtime.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_reported_models_appear_without_a_release() {
+    use std::io::{Read, Write};
+    let _lock = ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("e-live-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+
+    // A mock gateway whose /models lists a model e has never heard of.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut a, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let n = a.read(&mut buf).unwrap();
+        let sent = String::from_utf8_lossy(&buf[..n]).to_string();
+        let body = r#"{"data":[{"id":"brand-new-model"},{"id":"small"}]}"#;
+        let _ = a.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        sent
+    });
+
+    std::fs::write(dir.join("auth.json"), r#"{"mock":{"key":"sk-live"}}"#).unwrap();
+    std::fs::write(
+        dir.join("models.json"),
+        format!(r#"{{"providers":{{"mock":{{"base_url":"http://127.0.0.1:{port}","models":["small"]}}}}}}"#),
+    )
+    .unwrap();
+
+    e::core::provider::catalog::refresh_remote().await;
+    let sent = server.join().unwrap();
+    assert!(sent.contains("GET /models"));
+    assert!(sent.contains("Bearer sk-live") || sent.contains("bearer sk-live"));
+
+    // The unheard-of model is now in the catalog — and available.
+    let catalog = e::core::provider::catalog::catalog();
+    assert!(catalog
+        .iter()
+        .any(|m| m.provider == "mock" && m.id == "brand-new-model"));
+    let available = e::core::provider::catalog::available();
+    assert!(available.iter().any(|m| m.id == "brand-new-model"));
+
+    // A fresh cache is not refetched within the window.
+    e::core::provider::catalog::refresh_remote().await; // would hang/panic if it re-hit the dead server
+    let _ = std::fs::remove_dir_all(&dir);
+}

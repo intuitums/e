@@ -34,7 +34,8 @@ pub fn slug(model: &Model) -> String {
     format!("{}/{}", model.provider, model.id)
 }
 
-const OPENCODE_BASE: &str = "https://opencode.ai/zen/go/v1";
+const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
+const OPENCODE_ZEN_BASE: &str = "https://opencode.ai/zen/v1";
 const XAI_BASE: &str = "https://api.x.ai/v1";
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
 const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
@@ -45,10 +46,18 @@ pub fn builtin_catalog() -> Vec<Model> {
     let completions = |id: &str| Model {
         provider: "opencode-go".into(),
         id: id.into(),
-        base_url: OPENCODE_BASE.into(),
+        base_url: OPENCODE_GO_BASE.into(),
         api: Api::Completions,
         efforts: &[],
         context_window: 200_000,
+    };
+    let zen = |id: &str, context_window: u64| Model {
+        provider: "opencode".into(),
+        id: id.into(),
+        base_url: OPENCODE_ZEN_BASE.into(),
+        api: Api::Completions,
+        efforts: &[],
+        context_window,
     };
     let xai = |id: &str, context_window: u64| Model {
         provider: "xai".into(),
@@ -98,6 +107,10 @@ pub fn builtin_catalog() -> Vec<Model> {
         codex("gpt-5.6-luna"),
         codex("gpt-5.5"),
         codex("gpt-5.4"),
+        zen("deepseek-v4-flash", 1_000_000),
+        zen("kimi-k3", 262_144),
+        zen("minimax-m3", 1_000_000),
+        zen("glm-5.2", 1_000_000),
         xai("grok-4.6", 500_000),
         xai("grok-4.3", 1_000_000),
         xai("grok-build-0.1", 256_000),
@@ -145,10 +158,113 @@ enum ModelEntry {
     },
 }
 
+/// How long a provider's fetched model list stays fresh (the reference's
+/// refresh interval).
+pub const REMOTE_REFRESH_MS: u64 = 4 * 60 * 60 * 1000;
+
+fn store_path() -> std::path::PathBuf {
+    crate::core::config::home::home().join("models-store.json")
+}
+
+/// Model ids each provider reported, from the cache. A new model a gateway
+/// ships appears here on the next refresh — no e release involved.
+fn remote_overlay(models: &mut Vec<Model>) {
+    let object = crate::core::config::store::read_object(&store_path());
+    for (provider, entry) in object {
+        let Some(base) = models
+            .iter()
+            .find(|m| m.provider == provider)
+            .map(|m| m.base_url.clone())
+        else {
+            continue; // only providers e knows how to speak to
+        };
+        let Some(ids) = entry.get("ids").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for id in ids.iter().filter_map(|v| v.as_str()) {
+            if !models.iter().any(|m| m.provider == provider && m.id == id) {
+                models.push(Model {
+                    provider: provider.clone(),
+                    id: id.to_string(),
+                    base_url: base.clone(),
+                    api: Api::Completions,
+                    efforts: &[],
+                    context_window: 200_000,
+                });
+            }
+        }
+    }
+}
+
+/// Refresh the cached model lists from every signed-in provider that serves
+/// the standard `GET {base}/models`. Silent on failure — an offline launch
+/// must not care. Skips providers refreshed within the freshness window.
+pub async fn refresh_remote() {
+    let auth = crate::core::auth::load();
+    let now = crate::core::auth::now_ms();
+    let stored = crate::core::config::store::read_object(&store_path());
+    // One representative model per signed-in provider gives base + auth kind.
+    let mut providers: Vec<(String, String)> = Vec::new();
+    for m in catalog() {
+        if auth.contains_key(&m.provider) && !providers.iter().any(|(p, _)| *p == m.provider) {
+            providers.push((m.provider.clone(), m.base_url.clone()));
+        }
+    }
+    for (provider, base) in providers {
+        let fresh = stored
+            .get(&provider)
+            .and_then(|e| e.get("checked_at"))
+            .and_then(|v| v.as_u64())
+            .map(|at| now.saturating_sub(at) < REMOTE_REFRESH_MS)
+            .unwrap_or(false);
+        if fresh {
+            continue;
+        }
+        if let Some(ids) = fetch_model_ids(&provider, &base).await {
+            let entry = serde_json::json!({ "checked_at": now, "ids": ids });
+            let _ = crate::core::config::store::update(&store_path(), 0o644, |obj| {
+                obj.insert(provider.clone(), entry);
+            });
+        }
+    }
+}
+
+/// `GET {base}/models` with the provider's credential; None on any failure.
+async fn fetch_model_ids(provider: &str, base: &str) -> Option<Vec<String>> {
+    let auth = crate::core::auth::load();
+    let credential = auth.get(provider)?;
+    let key = match credential {
+        crate::core::auth::Credential::ApiKey { key } => key.clone(),
+        crate::core::auth::Credential::OAuth { access, .. } => access.clone(),
+    };
+    let mut request = crate::core::provider::http()
+        .get(format!("{base}/models"))
+        .timeout(std::time::Duration::from_secs(15));
+    request = if provider == "anthropic" {
+        request
+            .header("x-api-key", &key)
+            .header("anthropic-version", "2023-06-01")
+    } else {
+        request.bearer_auth(&key)
+    };
+    let body: serde_json::Value = request.send().await.ok()?.json().await.ok()?;
+    let ids: Vec<String> = body["data"]
+        .as_array()?
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(String::from))
+        .collect();
+    if ids.is_empty() {
+        None
+    } else {
+        Some(ids)
+    }
+}
+
 /// Built-ins plus `~/.e/models.json` — and the file wins on a name clash,
 /// the same rule as themes: never override what the user declared.
 pub fn catalog() -> Vec<Model> {
     let mut models = builtin_catalog();
+    remote_overlay(&mut models);
     if let Ok(json) = std::fs::read_to_string(home::home().join("models.json")) {
         if let Ok(file) = serde_json::from_str::<ModelsFile>(&json) {
             for (provider, entry) in file.providers {
@@ -162,7 +278,7 @@ pub fn catalog() -> Vec<Model> {
                 let base = entry
                     .base_url
                     .clone()
-                    .unwrap_or_else(|| OPENCODE_BASE.into());
+                    .unwrap_or_else(|| OPENCODE_GO_BASE.into());
                 for model in entry.models {
                     let (id, window) = match model {
                         ModelEntry::Id(id) => (id, None),
@@ -182,6 +298,10 @@ pub fn catalog() -> Vec<Model> {
             }
         }
     }
+    // The overlay runs last so it can attach to user-declared providers
+    // too; it only adds ids nothing else claimed, so built-ins and the
+    // user's file always win a clash.
+    remote_overlay(&mut models);
     models
 }
 
@@ -270,6 +390,7 @@ pub fn display_name(provider: &str) -> &str {
         "openai" => "OpenAI",
         "anthropic" => "Anthropic",
         "opencode-go" => "OpenCode Go",
+        "opencode" => "OpenCode Zen",
         "xai" => "xAI",
         other => other,
     }
