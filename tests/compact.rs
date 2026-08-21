@@ -1,6 +1,7 @@
-//! /compact against a mock provider. Pins: the history reaches the model as a
-//! flattened transcript with tool results trimmed, the streamed reply becomes
-//! the summary, and load_compacted seeds a fresh, resumable session file.
+//! Compaction. Pins: the keep-recent cut never lands on a tool result and
+//! spares small histories, the auto threshold is window minus reserve, the
+//! summarized part reaches the model flattened and trimmed, and the fresh
+//! session file carries the seed plus the kept messages.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -55,7 +56,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
     };
 
     let long_tool_output = "x".repeat(5000);
-    let history = vec![
+    let history = [
         ChatMessage::user("fix the parser"),
         ChatMessage::assistant(
             "looking",
@@ -69,7 +70,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
         ChatMessage::assistant("the bug is in line 3", Vec::new()),
     ];
 
-    let summary = e::core::compact::summarize(model.clone(), &history)
+    let summary = e::core::compact::summarize(model.clone(), &history[..3])
         .await
         .unwrap();
     assert_eq!(summary, "Goal: fix the parser. Next: run tests.");
@@ -86,18 +87,74 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
 
     // The seed lands as the first message of a fresh session file.
     let (agent, _rx) = Agent::new(model);
-    agent.load_history(history);
-    agent.load_compacted(&summary);
+    agent.load_compacted(&summary, history[3..].to_vec());
     let seeded = agent.history_snapshot();
-    assert_eq!(seeded.len(), 1);
+    assert_eq!(seeded.len(), 2, "seed plus the kept tail");
     assert!(seeded[0].content.contains("Goal: fix the parser."));
+    assert_eq!(seeded[1].content, "the bug is in line 3");
     let latest = e::core::session::list(&ws).into_iter().next().unwrap();
     let logged = std::fs::read_to_string(&latest.path).unwrap();
     assert!(
         logged.contains("Goal: fix the parser."),
         "seed not persisted to the new session"
     );
+    assert!(
+        logged.contains("the bug is in line 3"),
+        "kept tail not persisted to the new session"
+    );
 
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn threshold_is_window_minus_reserve() {
+    use e::core::compact::{should_compact, RESERVE_TOKENS};
+    let window = 200_000u64;
+    assert!(!should_compact(window - RESERVE_TOKENS, window));
+    assert!(should_compact(window - RESERVE_TOKENS + 1, window));
+    // A tiny window never underflows.
+    assert!(should_compact(1, RESERVE_TOKENS / 2));
+}
+
+#[test]
+fn split_spares_small_histories() {
+    let history = vec![
+        ChatMessage::user("hi"),
+        ChatMessage::assistant("hello", Vec::new()),
+    ];
+    let (to_summarize, kept) = e::core::compact::split(&history);
+    assert!(to_summarize.is_empty());
+    assert_eq!(kept.len(), 2);
+}
+
+#[test]
+fn split_never_cuts_at_a_tool_result() {
+    // Big old turn, then a recent turn whose tool result sits right where a
+    // naive cut would land: the cut must move past it to a non-tool message.
+    let big = "y".repeat(85_000); // ~21k estimated tokens
+    let history = vec![
+        ChatMessage::user("old work"),
+        ChatMessage::assistant(&big, Vec::new()),
+        ChatMessage::user("new task"),
+        ChatMessage::assistant(
+            "",
+            vec![ToolCall {
+                id: "c1".into(),
+                name: "read".into(),
+                arguments: "{}".into(),
+            }],
+        ),
+        ChatMessage::tool_result("c1", "contents"),
+        ChatMessage::assistant("done", Vec::new()),
+    ];
+    let (to_summarize, kept) = e::core::compact::split(&history);
+    assert!(!to_summarize.is_empty(), "the big turn must be summarized");
+    assert_ne!(kept[0].role, "tool", "cut landed on a tool result");
+    // The kept tail is intact and in order.
+    let roles: Vec<&str> = kept.iter().map(|m| m.role.as_str()).collect();
+    assert!(roles
+        .windows(2)
+        .all(|w| !(w[1] == "tool" && w[0] == "user")));
+    assert_eq!(kept.last().unwrap().content, "done");
 }

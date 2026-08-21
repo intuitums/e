@@ -2,10 +2,14 @@
 
 ## Unreleased
 
-- `/compact`: summarizes the session with the current model and seeds a
-  fresh session file with the summary — the old session stays fully
-  resumable under `/resume`. Tool outputs are trimmed in the summarization
-  request; the command refuses to run mid-turn.
+- `/compact`: summarizes the older part of the session and continues in a
+  fresh session file, keeping roughly the most recent 20k tokens of
+  messages verbatim (the cut never separates a tool result from its call).
+  Compaction only runs between turns — a mid-turn `/compact` defers to the
+  end of the turn — and it also triggers automatically when real context
+  usage crosses the model's window minus a 16k reserve. Messages typed
+  while compacting are held and submitted after the swap; the old session
+  stays fully resumable under `/resume`.
 - Dependencies current: rand 0.10, sha2 0.11, base64 0.23, crossterm 0.29,
   pulldown-cmark 0.13. The parity suite pins the rendered output, so the
   markdown and terminal bumps are verified byte-for-byte.

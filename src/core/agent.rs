@@ -142,10 +142,11 @@ impl Agent {
         self.history.lock().unwrap().clear();
     }
 
-    /// Replace the whole history with the compaction seed and detach from the
-    /// old session log — the seed commits into a fresh session file, so the
-    /// compacted state is itself resumable. The old file is untouched.
-    pub fn load_compacted(&self, summary: &str) {
+    /// Replace the history with the compaction seed plus the kept recent
+    /// messages, detaching from the old session log — everything commits into
+    /// a fresh session file, so the compacted state is itself resumable. The
+    /// old file is untouched.
+    pub fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) {
         self.history.lock().unwrap().clear();
         *self.session.lock().unwrap() = None;
         commit(
@@ -155,6 +156,15 @@ impl Agent {
             &self.model,
             ChatMessage::user(crate::core::compact::seed(summary)),
         );
+        for message in kept {
+            commit(
+                &self.history,
+                &self.session,
+                &self.cwd,
+                &self.model,
+                message,
+            );
+        }
     }
 
     /// Attach a session log; created lazily on the first message when None.

@@ -44,8 +44,11 @@ enum AppJob {
     Notice(String),
     /// A prompt an extension command asked to submit as the user.
     Prompt(String),
-    /// A finished /compact: the summary to seed the fresh session with.
-    Compacted(String),
+    /// A finished /compact: the summary and the recent messages kept verbatim.
+    Compacted {
+        summary: String,
+        kept: Vec<e::core::provider::ChatMessage>,
+    },
     /// A /compact that didn't produce a summary.
     CompactFailed(String),
 }
@@ -76,6 +79,11 @@ struct App {
     results: tokio::sync::mpsc::Sender<AppJob>,
     /// A /compact summary is being generated; cleared when it lands or fails.
     compacting: bool,
+    /// /compact was asked for mid-turn; runs when the turn ends (the
+    /// reference behavior — compaction never touches a running turn).
+    compact_requested: bool,
+    /// Messages typed while compacting; submitted once the swap lands.
+    held_prompts: Vec<String>,
 }
 
 impl App {
@@ -468,6 +476,8 @@ impl App {
             ),
             "/new" | "/clear" => {
                 self.compacting = false;
+                self.compact_requested = false;
+                self.held_prompts.clear();
                 self.context_tokens = 0;
                 self.agent.clear();
                 self.agent.set_session(None);
@@ -522,6 +532,12 @@ impl App {
     }
 
     fn prompt(&mut self, text: String) {
+        // While compacting, hold the message; it submits after the swap.
+        if self.compacting {
+            self.transcript.push(Block::new(Kind::User, text.clone()));
+            self.held_prompts.push(text);
+            return;
+        }
         // While a turn runs the message is held and steered in (echoed later
         // via Steered); idle, it begins a turn now.
         let held = self.agent.submit(text.clone(), system_prompt());
@@ -626,7 +642,7 @@ impl App {
                 output,
                 cache_read,
             } => {
-                self.context_tokens = input + cache_read;
+                self.context_tokens = input + cache_read + output;
                 if let Some(s) = &mut self.active {
                     s.turn.input += input + cache_read;
                     s.turn.output += output;
@@ -667,19 +683,42 @@ impl App {
                 if let Some(message) = s.error {
                     self.notice(format!("error: {message}"));
                 }
+                // Compaction runs between turns, never during one: a deferred
+                // /compact fires here, and so does the auto threshold check
+                // against real usage (window minus reserve).
+                let over = e::core::compact::should_compact(
+                    self.context_tokens,
+                    self.agent.model.context_window,
+                );
+                if !aborted && (self.compact_requested || over) {
+                    let auto = !self.compact_requested;
+                    self.compact_requested = false;
+                    self.start_compaction(auto);
+                }
             }
         }
     }
 
-    /// Start a /compact: summarize the history off-task, then swap it in via
-    /// AppJob::Compacted. Refused mid-turn — the history would move under it.
+    /// /compact: mid-turn it is deferred to TurnEnd (compaction never touches
+    /// a running turn); idle it starts now.
     fn compact_now(&mut self) {
         if self.agent.is_streaming() {
-            self.notice("finish the turn first (esc interrupts), then /compact".into());
+            if !self.compact_requested {
+                self.compact_requested = true;
+                self.notice("will compact when this turn ends".into());
+            }
             return;
         }
+        self.start_compaction(false);
+    }
+
+    /// Summarize everything before the keep-recent cut, off-task; the swap
+    /// lands via AppJob::Compacted. `auto` softens the too-small notice.
+    fn start_compaction(&mut self, auto: bool) {
         if self.compacting {
-            self.notice("already compacting".into());
+            if !auto {
+                self.notice("already compacting".into());
+            }
             return;
         }
         let history = self.agent.history_snapshot();
@@ -687,13 +726,20 @@ impl App {
             self.notice("nothing to compact yet".into());
             return;
         }
+        let (to_summarize, kept) = e::core::compact::split(&history);
+        if to_summarize.is_empty() {
+            if !auto {
+                self.notice("recent context already fits — nothing to compact".into());
+            }
+            return;
+        }
         self.compacting = true;
         self.notice("compacting…".into());
         let model = self.agent.model.clone();
         let results = self.results.clone();
         tokio::spawn(async move {
-            let job = match e::core::compact::summarize(model, &history).await {
-                Ok(summary) => AppJob::Compacted(summary),
+            let job = match e::core::compact::summarize(model, &to_summarize).await {
+                Ok(summary) => AppJob::Compacted { summary, kept },
                 Err(message) => AppJob::CompactFailed(message),
             };
             let _ = results.send(job).await;
@@ -855,6 +901,8 @@ async fn main() -> std::io::Result<()> {
         host,
         results: results_tx,
         compacting: false,
+        compact_requested: false,
+        held_prompts: Vec::new(),
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
     // -c continues this workspace's most recent session.
@@ -984,21 +1032,33 @@ async fn main() -> std::io::Result<()> {
                 match job {
                     Some(AppJob::Notice(notice)) => app.notice(notice),
                     Some(AppJob::Prompt(prompt)) => app.prompt(prompt),
-                    Some(AppJob::Compacted(summary)) => {
+                    Some(AppJob::Compacted { summary, kept }) => {
                         // Ignore a result that outlived its session (/new won).
                         if app.compacting {
                             app.compacting = false;
-                            app.agent.load_compacted(&summary);
-                            app.context_tokens = (summary.len() / 4) as u64;
+                            app.agent.load_compacted(&summary, kept);
+                            let seeded: usize = app
+                                .agent
+                                .history_snapshot()
+                                .iter()
+                                .map(|m| m.content.len())
+                                .sum();
+                            app.context_tokens = (seeded / 4) as u64;
                             app.transcript.clear();
                             app.transcript.push(Block::new(Kind::Banner, e::VERSION));
-                            app.transcript.push(Block::new(Kind::Notice, "compacted into a fresh session — the old one is under /resume"));
+                            app.transcript.push(Block::new(Kind::Notice, "compacted — recent messages kept, the full session is under /resume"));
                             app.transcript.push(Block::new(Kind::Summary, summary));
+                            for text in std::mem::take(&mut app.held_prompts) {
+                                app.prompt(text);
+                            }
                         }
                     }
                     Some(AppJob::CompactFailed(message)) if app.compacting => {
                         app.compacting = false;
                         app.notice(format!("compact failed: {message}"));
+                        for text in std::mem::take(&mut app.held_prompts) {
+                            app.prompt(text);
+                        }
                     }
                     Some(AppJob::CompactFailed(_)) => {}
                     None => {}

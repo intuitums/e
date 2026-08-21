@@ -12,7 +12,7 @@ list, not quietly on it.
   AGENTS.md + skills context; sovereign `~/.e/` home
 - **0.3** — the surface: extension API (`~/.e/extensions/`, line protocol —
   tools, commands, hooks, events); editable themes; non-destructive config
-  writes; `/compact` — summarize into a fresh session when context fills
+  writes; compaction — auto at the context threshold and via `/compact`, deferred to turn end, keeping recent messages
 
 ## Next
 

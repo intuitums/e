@@ -27,7 +27,7 @@ src/core/    the harness, terminal-free
   tools/          read · write · edit · ls · grep · bash · skill
   api/            the extension host: subprocesses over a JSONL line
                   protocol (docs/extensions.md) — tools, commands, hooks
-  compact.rs      /compact: summarize, reseed a fresh session
+  compact.rs      compaction: threshold, keep-recent cut, summarize
   session.rs · context.rs · model.rs · auth.rs · login.rs · settings.rs · skills.rs
 src/tui/     the frontend
   render.rs       SGR primitives          screen.rs      the diffing painter
