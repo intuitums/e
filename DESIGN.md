@@ -33,6 +33,7 @@ to run:
   skills/           SKILL.md skill directories
   prompts/          slash prompt templates
   themes/           palette overrides
+  models.json       extra models and per-model context windows; wins on a name clash
   extensions/       executables speaking the line protocol (docs/extensions.md)
 ```
 

@@ -83,11 +83,28 @@ struct ProviderEntry {
     base_url: Option<String>,
     #[serde(default)]
     api: Option<String>,
+    /// Default window for this provider's models; each model may override.
     #[serde(default)]
-    models: Vec<String>,
+    context_window: Option<u64>,
+    #[serde(default)]
+    models: Vec<ModelEntry>,
 }
 
-/// Built-ins plus `~/.e/models.json` additions.
+/// A model in models.json: a bare id string, or an object when the model
+/// needs its own context window.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ModelEntry {
+    Id(String),
+    Detailed {
+        id: String,
+        #[serde(default)]
+        context_window: Option<u64>,
+    },
+}
+
+/// Built-ins plus `~/.e/models.json` — and the file wins on a name clash,
+/// the same rule as themes: never override what the user declared.
 pub fn catalog() -> Vec<Model> {
     let mut models = builtin_catalog();
     if let Ok(json) = std::fs::read_to_string(home::home().join("models.json")) {
@@ -101,17 +118,23 @@ pub fn catalog() -> Vec<Model> {
                     .base_url
                     .clone()
                     .unwrap_or_else(|| OPENCODE_BASE.into());
-                for id in entry.models {
-                    if !models.iter().any(|m| m.provider == provider && m.id == id) {
-                        models.push(Model {
-                            provider: provider.clone(),
-                            id,
-                            base_url: base.clone(),
-                            api,
-                            efforts: &[],
-                            context_window: 200_000,
-                        });
-                    }
+                for model in entry.models {
+                    let (id, window) = match model {
+                        ModelEntry::Id(id) => (id, None),
+                        ModelEntry::Detailed { id, context_window } => (id, context_window),
+                    };
+                    let resolved = Model {
+                        provider: provider.clone(),
+                        id,
+                        base_url: base.clone(),
+                        api,
+                        efforts: &[],
+                        context_window: window
+                            .or(entry.context_window)
+                            .unwrap_or(200_000),
+                    };
+                    models.retain(|m| !(m.provider == resolved.provider && m.id == resolved.id));
+                    models.push(resolved);
                 }
             }
         }

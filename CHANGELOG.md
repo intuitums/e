@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `~/.e/models.json` entries can declare a `context_window` (per model, or
+  as a provider default) — compaction and the statusline follow the active
+  model's real window. A file entry with a built-in's name now replaces the
+  built-in, the same file-wins rule as themes.
 - `/compact`: summarizes the older part of the session and continues in a
   fresh session file, keeping roughly the most recent 20k tokens of
   messages verbatim (the cut never separates a tool result from its call).

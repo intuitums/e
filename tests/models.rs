@@ -1,0 +1,44 @@
+//! The model catalog. Pins: models.json models carry their declared context
+//! window (per-model beats per-provider default beats 200k), and a file entry
+//! with a built-in's name replaces the built-in — the file wins.
+
+use std::sync::Mutex;
+
+// E_HOME is process-global; serialize the tests that set it.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn with_models_json(json: &str) -> Vec<e::core::model::Model> {
+    let dir = std::env::temp_dir().join(format!("e-models-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("models.json"), json).unwrap();
+    std::env::set_var("E_HOME", &dir);
+    let catalog = e::core::model::catalog();
+    let _ = std::fs::remove_dir_all(&dir);
+    catalog
+}
+
+#[test]
+fn models_json_windows_are_per_model() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let catalog = with_models_json(
+        r#"{"providers":{"local":{"base_url":"http://localhost:9999","context_window":64000,
+            "models":["small", {"id":"big","context_window":1000000}]}}}"#,
+    );
+    let find = |id: &str| catalog.iter().find(|m| m.provider == "local" && m.id == id).unwrap();
+    assert_eq!(find("small").context_window, 64_000, "provider default applies");
+    assert_eq!(find("big").context_window, 1_000_000, "per-model wins over provider default");
+}
+
+#[test]
+fn models_json_overrides_a_builtin() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let catalog = with_models_json(
+        r#"{"providers":{"opencode-go":{"models":[{"id":"kimi-k3","context_window":131072}]}}}"#,
+    );
+    let matches: Vec<_> = catalog
+        .iter()
+        .filter(|m| m.provider == "opencode-go" && m.id == "kimi-k3")
+        .collect();
+    assert_eq!(matches.len(), 1, "the file entry replaces the built-in, not duplicates it");
+    assert_eq!(matches[0].context_window, 131_072);
+}
