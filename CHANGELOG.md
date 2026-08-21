@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-08-21
+
+- Installation: `install.sh` (curl-able, checksum-verified, macOS and
+  Linux on both architectures) and a Homebrew tap, both fed by a release
+  workflow that builds and publishes the four binaries on every version
+  tag.
 - Audit follow-up, control flow off prose: provider errors now carry a
   structured kind (auth / transient / delivered) instead of the retry
   decision matching message text like "no credentials"; login flows report
