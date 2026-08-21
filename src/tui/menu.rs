@@ -147,6 +147,17 @@ impl Menu {
         self.filtered.is_empty()
     }
 
+    /// Move the selection to the item with this value, if present.
+    pub fn select_value(&mut self, value: &str) {
+        if let Some(pos) = self
+            .filtered
+            .iter()
+            .position(|&i| self.items[i].value == value)
+        {
+            self.selected = pos;
+        }
+    }
+
     pub fn for_each_item(&mut self, mut f: impl FnMut(&mut MenuItem)) {
         for item in &mut self.items {
             f(item);

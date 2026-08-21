@@ -72,6 +72,8 @@ enum AppJob {
     Reloaded(std::sync::Arc<e::core::api::ExtensionHost>),
     /// The background updater installed a new version.
     Updated(String),
+    /// A provider model-list refresh finished; rebuild an open picker.
+    CatalogRefreshed,
 }
 
 struct App {
@@ -433,6 +435,20 @@ impl App {
     }
 
     fn open_model_menu(&mut self) {
+        // Instant discovery where it matters: show the cached list now, ask
+        // the gateways in the background (60s floor), and pop new rows into
+        // the open picker when the answer lands.
+        let results = self.results.clone();
+        tokio::spawn(async move {
+            e::core::provider::catalog::refresh_remote_within(60_000).await;
+            let _ = results.send(AppJob::CatalogRefreshed).await;
+        });
+        self.build_model_menu();
+    }
+
+    /// The picker itself, from the current catalog — no refresh side effects,
+    /// so the rebuild-on-refresh arm cannot loop.
+    fn build_model_menu(&mut self) {
         let available = model::available();
         if available.is_empty() {
             self.notice("no models available — use /login to sign in to a provider".into());
@@ -491,7 +507,7 @@ impl App {
 
     /// A provider picked on the API-key panel.
     fn auth_key(&mut self, selected: usize) {
-        let provider = ["opencode-go", "xai", "openai", "anthropic"][selected.min(3)];
+        let provider = ["opencode-go", "opencode", "xai", "openai", "anthropic"][selected.min(4)];
         self.auth = Some(AuthStage::ApiKey {
             provider: provider.into(),
         });
@@ -1378,6 +1394,10 @@ e -v, --version"
             }
         });
     }
+    // Providers' model lists refresh in the background (the reference
+    // behavior, sourced from each gateway's own /models): a model a provider
+    // ships today shows in /models today, no e release involved.
+    tokio::spawn(e::core::provider::catalog::refresh_remote());
     if e::core::auth::load().is_empty() {
         app.notice(
             "no provider signed in — use /login to sign in with an account or API key".into(),
@@ -1522,10 +1542,10 @@ e -v, --version"
                                     *selected = 1 - *selected;
                                 }
                                 (AuthStage::Key { selected }, KeyCode::Up) => {
-                                    *selected = (*selected + 3) % 4;
+                                    *selected = (*selected + 4) % 5;
                                 }
                                 (AuthStage::Key { selected }, KeyCode::Down) => {
-                                    *selected = (*selected + 1) % 4;
+                                    *selected = (*selected + 1) % 5;
                                 }
                                 (AuthStage::Account { selected }, KeyCode::Enter) => {
                                     let choice = *selected;
@@ -1645,6 +1665,20 @@ e -v, --version"
                         }
                     }
                     Some(AppJob::CompactFailed(_)) => {}
+                    Some(AppJob::CatalogRefreshed) => {
+                        if let Some(menu) = &app.menu {
+                            if menu.kind == MenuKind::Models {
+                                let selected =
+                                    menu.current().map(|item| item.value.clone());
+                                app.build_model_menu();
+                                if let (Some(menu), Some(value)) =
+                                    (&mut app.menu, selected)
+                                {
+                                    menu.select_value(&value);
+                                }
+                            }
+                        }
+                    }
                     Some(AppJob::Updated(version)) => {
                         app.notice(format!(
                             "e {version} installed — /reload to switch to it now"
@@ -1708,6 +1742,7 @@ e -v, --version"
                         if matches!(app.auth, Some(AuthStage::Waiting)) {
                             app.auth = None;
                         }
+                        tokio::spawn(e::core::provider::catalog::refresh_remote());
                         // A fresh credential may make new models available:
                         // if the current model's provider is still signed out,
                         // fall back to the first available model.

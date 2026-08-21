@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- The model catalog is live, the reference behavior: every signed-in
+  provider's own `GET /models` is fetched in the background (at launch
+  and after each sign-in), cached in `~/.e/models-store.json` with a
+  four-hour freshness window — a model a gateway ships today appears in
+  `/models` today, no e release involved — and opening the picker asks
+  the gateways again (60-second floor), popping new rows into the open
+  picker the moment the answer lands. Windows the gateway reports
+  (context_length and friends) are kept instead of the 200k default;
+  non-chat ids (embeddings, audio, images, moderation) and dated aliases
+  of listed models are filtered; refreshes are serialized in-process; and
+  grok-build-0.1 leaves the built-ins. Built-ins and `models.json` always
+  win a name clash; failures are silent.
+- OpenCode Go and OpenCode Zen are two providers, as they actually are:
+  `opencode-go` (the Go plan gateway, zen/go/v1) and `opencode` (the Zen
+  gateway, zen/v1), each with its own sign-in row and models.
 - Self-update: `e update` fetches the latest release for this platform,
   verifies its checksum, and swaps the binary atomically; the TUI does the
   same silently in the background at launch and notices "e X.Y.Z
