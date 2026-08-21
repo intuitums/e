@@ -79,4 +79,8 @@ it through `panel.rs` so it can't diverge.
   sovereign home, store-only config writes, where `unsafe` lives, SHA-pinned
   CI actions. If a change legitimately moves a boundary, update the guard in
   the same commit — never work around it.
+- Every PR adds its entry to `CHANGELOG.md` under `Unreleased` (pure meta —
+  CI, templates, benchmark results — may skip). Parallel PRs all edit that
+  same region, so expect the changelog to be the merge conflict: rebase and
+  stack the entries, newest first.
 - Keep the commit trailer: `Co-authored-by: Claude <noreply@anthropic.com>`.

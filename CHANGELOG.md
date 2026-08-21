@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `benchmarks/`: a dependency-free suite for the numbers e's identity
+  depends on — binary size, cold start, spawn-to-first-frame — with
+  timestamped reports under `benchmarks/results/`. First baseline:
+  8.02 MiB, 2.5 ms cold start, 9.0 ms to first frame.
 - First-live-turn fixes: the Responses dialect sent tools in the
   chat-completions nested shape and every codex/OpenAI tool call 400'd
   ("Missing required parameter: tools[0].name") — tools are now flat, as
