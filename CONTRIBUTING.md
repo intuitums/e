@@ -1,57 +1,78 @@
-# Contributing
+# Contributing to e
 
-Thanks for wanting to improve e. Read [DESIGN.md](DESIGN.md) first — it is
-short, and it explains what gets merged here and what doesn't.
+This guide exists to save both sides time. Read [DESIGN.md](DESIGN.md) first —
+it is short, and it decides what gets merged here.
 
-## The three gates
+## Philosophy
 
-Every PR runs three checks, and all of them are runnable locally:
+**e's core is minimal.** The whole harness is meant to be readable in an
+afternoon, and that budget is a design input, not an aspiration.
+
+If your feature does not need to live in the core, it should be an extension
+([docs/extensions.md](docs/extensions.md)) or a file in `~/.e/` — a theme, a
+skill, a prompt. PRs that grow the core where the extension surface would do
+will be declined, kindly. Even new hook points for extensions are weighed
+carefully: the protocol grows by need, never by symmetry.
+
+The second pillar: **the look is law.** The visual design is pinned
+byte-for-byte in `tests/`. If a rendering change fails the parity suite, the
+fix is in your code, not in the test — loosening a pinned literal is a design
+change and must be argued as one.
+
+## The one rule
+
+**You must understand your code.** If you cannot explain what your change
+does and how it interacts with the rest of the system, the PR will be closed.
+
+Using AI to write code is fine — this repo is substantially built that way.
+Submitting generated code you have not read and cannot defend is not. If you
+run an agent, run it from the repo root so it picks up `AGENTS.md`; your
+agent must follow the rules in that file.
+
+## Issues
+
+Keep them short, concrete, and worth reading:
+
+- Use the issue templates.
+- If it does not fit on one screen, it is too long.
+- Write in your own voice.
+- State what happened, why it matters, and — for features — check
+  [ROADMAP.md](ROADMAP.md) first: some things are deliberately out
+  (DESIGN.md, "What e is not").
+- If you want to implement it yourself, say so.
+
+Low-signal, duplicate, or automated issues may be closed without discussion.
+
+## Pull requests
+
+Before opening a PR, all four of these must pass locally — CI runs the same:
 
 ```sh
-cargo test                # the whole contract, including the visual spec
-cargo fmt --check         # rustfmt, stock settings
+cargo test                                   # the whole contract, incl. the visual spec
+cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-./scripts/guard.sh        # the security-surface audit
+./scripts/guard.sh                           # the security-surface audit
 ```
 
-**The parity suite is the design document.** The look is pinned
-byte-for-byte in `tests/`. If your change fails a parity test, the fix is in
-your code, not in the test — loosening a pinned literal is a design change
-and needs to be argued as one.
+The guard pins e's trust boundary: which hosts the binary may talk to, that
+e reads only `~/.e/`, that credential writes go through the merge-write
+store, where `unsafe` lives, and that CI actions stay SHA-pinned. If your
+change legitimately moves one of those boundaries, change `guard.sh` in the
+same diff and say why in the PR. A PR that trips the guard without touching
+it will not merge.
 
-**The guard is the trust boundary.** `scripts/guard.sh` pins the promises e
-makes to its users: which network hosts the binary may talk to, that e reads
-only `~/.e/` and never another tool's store, that credential and config
-writes go through the merge-write path in `core/store.rs`, that `unsafe`
-stays in its one audited file, and that CI actions are pinned by commit SHA.
-A PR that moves one of these boundaries must change `guard.sh` in the same
-diff — deliberately, visibly, with a sentence in the PR saying why. A PR
-that trips the guard without touching it will not merge.
+A few conventions:
 
-## What gets merged
-
-- **Small over general.** Fewer moving parts wins. No abstraction layers or
-  configuration beyond what the change in front of you needs.
-- **Extensible over hardcoded.** If a user could sensibly prefer a different
-  look, wording, or behaviour, read it from `~/.e/` with a built-in default
-  (DESIGN.md §2). For code-level needs there is the extension API
-  ([docs/extensions.md](docs/extensions.md)) — grow its protocol by need,
-  never by symmetry, and keep hooks fail-open.
-- **Focused tests.** Each new test pins one behavior worth protecting. No
-  smoke tests, no asserting the framework works.
-- **Inside the budget.** The harness stays readable in an afternoon
-  (DESIGN.md §3). A feature that can't pay for its complexity stays out —
-  check [ROADMAP.md](ROADMAP.md) under "Not planned" before proposing MCP,
-  subagents, or an embedded runtime.
-
-Sensitive paths — the extension host (`src/core/api/`), auth, the store,
-the provider wire code, and `.github/` — additionally require code-owner
-review; CI green is not sufficient there.
-
-## Practical notes
-
-- UI changes are verified with a real frame, not by reasoning about bytes:
-  `scripts/` has a pty capture-and-replay harness.
-- Update every comment and doc your change touches. A stale comment is
+- Focused tests: each new test pins one behavior worth protecting. No smoke
+  tests, no asserting the framework works.
+- Update every comment and doc your change touches — a stale comment is
   worse than no comment.
-- By contributing you agree your work is licensed under [MIT](LICENSE).
+- UI changes are verified with a real frame (`scripts/` has a pty
+  capture-and-replay harness), not by reasoning about bytes.
+- Do not edit `CHANGELOG.md`; entries are added by the maintainer.
+
+Sensitive paths — the extension host (`src/core/api/`), auth, the store, the
+provider wire code, `.github/` — additionally require code-owner review.
+Green CI is not sufficient there.
+
+By contributing you agree your work is licensed under [MIT](LICENSE).
