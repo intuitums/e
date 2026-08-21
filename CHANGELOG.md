@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Self-update: `e update` fetches the latest release for this platform,
+  verifies its checksum, and swaps the binary atomically; the TUI does the
+  same silently in the background at launch and notices "e X.Y.Z
+  installed — restart to use it". Opt out with the Auto-update setting in
+  /settings. Dev builds (under `target/`) are always exempt, and
+  `api.github.com`/`github.com` join the guard allowlist for it.
 - The rest of the reference tool surfaces: command rows preview their
   output beneath the row (first four `│` lines, a `│ … N lines more
   (ctrl o to view)` elision, `│ exit code N` on failure); ctrl+o opens

@@ -13,7 +13,7 @@ bad() { fail=1; say "FAIL: $*"; }
 # 1. Network surface. e talks to its sign-in and model providers and nothing
 #    else. A new host in src/ means a new place user data can go — add it
 #    here deliberately or the build fails.
-allowed_hosts="localhost auth.openai.com api.openai.com chatgpt.com opencode.ai auth.x.ai api.x.ai api.anthropic.com"
+allowed_hosts="localhost auth.openai.com api.openai.com chatgpt.com opencode.ai auth.x.ai api.x.ai api.anthropic.com api.github.com github.com"
 found_hosts=$(grep -rhoE 'https?://[A-Za-z0-9.-]+' src/ 2>/dev/null | sed -E 's#https?://##' | sort -u)
 for host in $found_hosts; do
   case " $allowed_hosts " in
@@ -41,8 +41,9 @@ fi
 #    APIs in core are limited to the files that own a format.
 if out=$(grep -rnE 'fs::write|File::create|OpenOptions' src/core/ --include='*.rs' |
     grep -v '^src/core/config/store.rs:' | grep -v '^src/core/session.rs:' |
-    grep -v '^src/core/config/home.rs:' | grep -v '^src/core/tools/'); then
-  bad "direct file write in src/core outside config/{store,home}.rs, session.rs, tools:"
+    grep -v '^src/core/config/home.rs:' | grep -v '^src/core/tools/' |
+    grep -v '^src/core/update.rs:'); then
+  bad "direct file write in src/core outside config/{store,home}.rs, session.rs, tools, update.rs:"
   say "$out"
 fi
 

@@ -1244,6 +1244,7 @@ e -c, --continue      continue this directory's most recent session\n  \
 e -r, --resume        pick a session to resume\n  \
 e ask \"prompt\"        one agent turn, no TUI; plain text when piped\n  \
 e docs [topic]        print a built-in format guide\n  \
+e update              update e to the latest release\n  \
 e auth                show sign-in status\n  \
 e -v, --version"
         );
@@ -1255,6 +1256,21 @@ e -v, --version"
     }
     if args.first().map(String::as_str) == Some("ask") {
         return ask(args[1..].join(" ")).await;
+    }
+    if args.first().map(String::as_str) == Some("update") {
+        if e::core::update::is_dev_build() {
+            println!("this is a dev build (under target/) — update with cargo, not e update");
+            return Ok(());
+        }
+        match e::core::update::self_update().await {
+            Ok(Some(version)) => println!("updated to e {version} — restart to use it"),
+            Ok(None) => println!("e {} is already the latest", e::VERSION),
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
     }
     if args.first().map(String::as_str) == Some("docs") {
         use e::core::resources::docs;
@@ -1334,6 +1350,21 @@ e -v, --version"
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
     if e::core::config::trust::status(&app.agent.cwd()).is_none() {
         app.trust = Some(TrustStage { selected: 0 });
+    }
+    // The harness pattern: check for a newer release in the background at
+    // launch, install it silently, and say so — the running session is
+    // untouched until a restart. Dev builds and the opt-out are exempt.
+    if !e::core::update::is_dev_build() && e::core::config::settings::auto_update() {
+        let jobs = app.jobs.clone();
+        tokio::spawn(async move {
+            if let Ok(Some(version)) = e::core::update::self_update().await {
+                let _ = jobs
+                    .send(format!(
+                        "e {version} installed — restart to use it (your session is saved; `e -c` continues it)"
+                    ))
+                    .await;
+            }
+        });
     }
     if e::core::auth::load().is_empty() {
         app.notice(
