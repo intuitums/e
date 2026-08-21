@@ -54,6 +54,7 @@ async fn completions_stream_parses_deltas_and_usage() {
             base_url: format!("http://127.0.0.1:{port}"),
             api: Api::Completions,
             efforts: &[],
+            context_window: 200_000,
         },
         system: "sys".into(),
         messages: vec![ChatMessage { role: "user".into(), content: "hi".into() }],
@@ -117,6 +118,7 @@ async fn agent_folds_provider_events_into_one_session_stream() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: &[],
+        context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
     agent.prompt("hi".into(), "sys".into());
