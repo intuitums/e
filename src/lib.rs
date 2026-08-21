@@ -7,4 +7,9 @@
 pub mod core;
 pub mod tui;
 
+/// Width of styled text (ANSI-aware) — shared by the frame and the menus.
+pub mod render_width {
+    pub use crate::tui::markdown::visible_width;
+}
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

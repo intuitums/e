@@ -15,6 +15,7 @@ use e::core::model::{self, Model};
 use e::core::output::{format_duration, format_tokens};
 use e::tui::composer::{Editor, EditorResult, Key};
 use e::tui::statusline::{statusline, StatusData, Turn};
+use e::tui::menu::{Menu, MenuItem, MenuKind, HINT_USE};
 use e::tui::theme::{load_bundled, Theme};
 use e::tui::transcript::{Block, Kind, Transcript};
 use e::tui::screen::Screen;
@@ -41,6 +42,8 @@ struct App {
     context_tokens: u64,
     /// A provider awaiting a pasted API key; the next submit is the secret.
     pending_key: Option<String>,
+    /// The open picker, if any — commands, files, models, providers.
+    menu: Option<Menu>,
     /// Background job narration (login flows) into the transcript.
     jobs: tokio::sync::mpsc::Sender<String>,
 }
@@ -53,6 +56,9 @@ impl App {
             lines.push(format!(" • {}", s.turn.label(s.started.elapsed().as_secs())));
         }
         lines.extend(self.editor.render(&self.theme, width));
+        if let Some(menu) = &self.menu {
+            lines.extend(menu.render(&self.theme, width));
+        }
         let window = self.agent.model.context_window.max(1);
         let percent = ((self.context_tokens.saturating_mul(100)) / window).min(100) as u8;
         let data = StatusData {
@@ -62,8 +68,138 @@ impl App {
             context_percent: Some(percent),
             queued: 0,
         };
-        lines.extend(statusline(&self.theme, &data, self.overlay.as_deref(), None, width));
+        let hint = self.menu.as_ref().map(|m| m.hint);
+        lines.extend(statusline(&self.theme, &data, self.overlay.as_deref(), hint, width));
         lines
+    }
+
+    /* ---------- pickers ---------- */
+
+    fn command_items() -> Vec<MenuItem> {
+        vec![
+            MenuItem::new("/login", "sign in to a provider — account or API key", "/login"),
+            MenuItem::new("/model", "switch the model", "/model"),
+            MenuItem::new("/new", "start a fresh session", "/new"),
+            MenuItem::new("/help", "show commands", "/help"),
+            MenuItem::new("/version", "show the version", "/version"),
+            MenuItem::new("/quit", "exit", "/quit"),
+        ]
+    }
+
+    fn open_model_menu(&mut self) {
+        let current = self.agent.model_slug();
+        let items = model::catalog()
+            .iter()
+            .map(|m| {
+                let slug = model::slug(m);
+                let mut item = MenuItem::new(&m.id, &m.provider, &slug);
+                if slug == current {
+                    item.meta = "current".into();
+                }
+                item
+            })
+            .collect();
+        self.menu = Some(Menu::new(MenuKind::Models, "Models", HINT_USE, items));
+    }
+
+    fn open_provider_menu(&mut self) {
+        let items = vec![
+            MenuItem::new("openai-codex", "Account — opens the browser (ChatGPT sign-in)", "openai-codex"),
+            MenuItem::new("opencode-go", "API key — pasted here, stored in ~/.e/auth.json", "opencode-go"),
+        ];
+        self.menu = Some(Menu::new(MenuKind::Providers, "Sign in", HINT_USE, items));
+    }
+
+    fn open_file_menu(&mut self, query: &str) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let items = e::core::workspace::list_files(&cwd)
+            .into_iter()
+            .map(|path| MenuItem::new(&path, "", &path))
+            .collect();
+        let mut menu = Menu::new(MenuKind::Files, "Files", HINT_USE, items);
+        menu.set_query(query);
+        self.menu = Some(menu);
+    }
+
+    /// Keep pickers in sync with the composer text: `/` at the start opens
+    /// the command picker, an `@word` under the cursor the file picker.
+    fn sync_menu(&mut self) {
+        let text = self.editor.text();
+        if self.pending_key.is_some() {
+            return;
+        }
+        // Slash picker: leading '/', no space yet.
+        if text.starts_with('/') && !text.contains(' ') && !text.contains('\n') {
+            let query = text[1..].to_string();
+            match &mut self.menu {
+                Some(m) if m.kind == MenuKind::Commands => m.set_query(&query),
+                _ => {
+                    let mut menu = Menu::new(MenuKind::Commands, "Commands", HINT_USE, Self::command_items());
+                    menu.set_query(&query);
+                    self.menu = Some(menu);
+                }
+            }
+            return;
+        }
+        // File picker: the last whitespace-delimited token starts with '@'.
+        if let Some(token) = text.split_whitespace().last().filter(|t| t.starts_with('@')) {
+            let query = token[1..].to_string();
+            match &mut self.menu {
+                Some(m) if m.kind == MenuKind::Files => m.set_query(&query),
+                _ => self.open_file_menu(&query),
+            }
+            return;
+        }
+        // Auto pickers close when their trigger text is gone.
+        if matches!(
+            self.menu.as_ref().map(|m| m.kind),
+            Some(MenuKind::Commands) | Some(MenuKind::Files)
+        ) {
+            self.menu = None;
+        }
+    }
+
+    /// Enter on an open picker. Returns true when the key was consumed.
+    fn select_menu(&mut self) -> bool {
+        let Some(menu) = &self.menu else { return false };
+        let Some(item) = menu.current().cloned() else {
+            self.menu = None;
+            return true;
+        };
+        let kind = menu.kind;
+        self.menu = None;
+        match kind {
+            MenuKind::Commands => {
+                self.editor.set_text("");
+                self.dispatch_command(item.value);
+            }
+            MenuKind::Files => {
+                // Replace the @token under construction with the chosen path.
+                let text = self.editor.text();
+                let replaced = match text.rfind('@') {
+                    Some(at) => format!("{}{}", &text[..at], item.value),
+                    None => item.value,
+                };
+                self.editor.set_text(&replaced);
+            }
+            MenuKind::Models => {
+                if let Some(found) = model::resolve(&item.value) {
+                    persist_model(&found);
+                    self.notice(format!("model set to {}", model::slug(&found)));
+                    self.agent.model = found;
+                }
+            }
+            MenuKind::Providers => self.login(item.value),
+        }
+        true
+    }
+
+    fn dispatch_command(&mut self, command: String) {
+        match command.as_str() {
+            "/login" => self.open_provider_menu(),
+            "/model" => self.open_model_menu(),
+            other => self.submit(other.to_string()),
+        }
     }
 
     fn submit(&mut self, text: String) {
@@ -83,22 +219,19 @@ impl App {
         }
 
         if let Some(rest) = trimmed.strip_prefix("/login") {
-            self.login(rest.trim().to_string());
+            let provider = rest.trim().to_string();
+            if provider.is_empty() {
+                self.open_provider_menu();
+            } else {
+                self.login(provider);
+            }
             return;
         }
 
         if let Some(rest) = trimmed.strip_prefix("/model") {
             let query = rest.trim();
             if query.is_empty() {
-                let current = self.agent.model_slug();
-                let mut listing = String::from("models:");
-                for m in model::catalog() {
-                    let slug = model::slug(&m);
-                    let mark = if slug == current { "  ← current" } else { "" };
-                    listing.push_str(&format!("\n  {slug}{mark}"));
-                }
-                listing.push_str("\n\nswitch with /model <name>");
-                self.notice(listing);
+                self.open_model_menu();
             } else if let Some(found) = model::resolve(query) {
                 persist_model(&found);
                 self.notice(format!("model set to {}", model::slug(&found)));
@@ -133,10 +266,7 @@ impl App {
     /// paste into the composer).
     fn login(&mut self, provider: String) {
         if provider.is_empty() {
-            self.notice(
-                "sign in with /login <provider>:\n  openai-codex   Account — opens the browser (ChatGPT sign-in)\n  opencode-go    API key — pasted here, stored in ~/.e/auth.json\n\nany other provider name is treated as an API-key provider"
-                    .into(),
-            );
+            self.open_provider_menu();
             return;
         }
         if provider == "openai-codex" {
@@ -317,6 +447,7 @@ async fn main() -> std::io::Result<()> {
         should_quit: false,
         context_tokens: 0,
         pending_key: None,
+        menu: None,
         jobs: jobs_tx,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
@@ -345,7 +476,18 @@ async fn main() -> std::io::Result<()> {
                     TermEvent::Resize(c, r) => screen.resize(c, r),
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                        if k.code == KeyCode::Esc && app.pending_key.is_some() {
+                        if app.menu.is_some()
+                            && matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc)
+                            && !ctrl
+                        {
+                            match k.code {
+                                KeyCode::Up => { app.menu.as_mut().unwrap().step(-1); }
+                                KeyCode::Down => { app.menu.as_mut().unwrap().step(1); }
+                                KeyCode::Enter => { app.select_menu(); }
+                                KeyCode::Esc => { app.menu = None; }
+                                _ => {}
+                            }
+                        } else if k.code == KeyCode::Esc && app.pending_key.is_some() {
                             app.pending_key = None;
                             app.editor.mask = false;
                             app.editor.set_text("");
@@ -370,6 +512,7 @@ async fn main() -> std::io::Result<()> {
                             if let EditorResult::Submit(text) = app.editor.key(key) {
                                 app.submit(text);
                             }
+                            app.sync_menu();
                         }
                     }
                     _ => {}
