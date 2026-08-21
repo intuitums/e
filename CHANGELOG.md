@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `/compact`: summarizes the session with the current model and seeds a
+  fresh session file with the summary — the old session stays fully
+  resumable under `/resume`. Tool outputs are trimmed in the summarization
+  request; the command refuses to run mid-turn.
 - Dependencies current: rand 0.10, sha2 0.11, base64 0.23, crossterm 0.29,
   pulldown-cmark 0.13. The parity suite pins the rendered output, so the
   markdown and terminal bumps are verified byte-for-byte.

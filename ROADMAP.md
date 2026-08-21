@@ -12,15 +12,13 @@ list, not quietly on it.
   AGENTS.md + skills context; sovereign `~/.e/` home
 - **0.3** — the surface: extension API (`~/.e/extensions/`, line protocol —
   tools, commands, hooks, events); editable themes; non-destructive config
-  writes
+  writes; `/compact` — summarize into a fresh session when context fills
 
 ## Next
 
 - **`e import`** — the explicit one-time migration command (credentials,
   sessions) DESIGN.md promises; today the promise is documented but the
   command doesn't exist
-- **`/compact`** — summarize-and-rewrite when context fills; the token
-  estimate is already in the statusline
 - **Prompt templates** — `~/.e/prompts/*.md` with `$ARGUMENTS`, surfaced in
   the `/` picker next to extension commands
 

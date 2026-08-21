@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod api;
 pub mod auth;
+pub mod compact;
 pub mod completions;
 pub mod context;
 pub mod home;

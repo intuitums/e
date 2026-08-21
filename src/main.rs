@@ -44,6 +44,10 @@ enum AppJob {
     Notice(String),
     /// A prompt an extension command asked to submit as the user.
     Prompt(String),
+    /// A finished /compact: the summary to seed the fresh session with.
+    Compacted(String),
+    /// A /compact that didn't produce a summary.
+    CompactFailed(String),
 }
 
 struct App {
@@ -70,6 +74,8 @@ struct App {
     /// Extension host; commands and prompts come back on `results`.
     host: std::sync::Arc<e::core::api::ExtensionHost>,
     results: tokio::sync::mpsc::Sender<AppJob>,
+    /// A /compact summary is being generated; cleared when it lands or fails.
+    compacting: bool,
 }
 
 impl App {
@@ -135,6 +141,7 @@ impl App {
             MenuItem::new("/resume", "resume a saved session", "/resume"),
             MenuItem::new("/new", "start a fresh session", "/new"),
             MenuItem::new("/copy", "copy the last reply", "/copy"),
+            MenuItem::new("/compact", "summarize into a fresh session", "/compact"),
             MenuItem::new("/settings", "change preferences", "/settings"),
             MenuItem::new("/help", "show commands", "/help"),
             MenuItem::new("/version", "show the version", "/version"),
@@ -456,10 +463,11 @@ impl App {
             "/quit" | "/exit" => self.should_quit = true,
             "/version" => self.notice(format!("e {}", e::VERSION)),
             "/help" => self.notice(
-                "commands:\n  /login [provider]   sign in (API key or account)\n  /model [name]       list or switch models\n  /new                fresh session\n  /version            show the version\n  /quit               exit"
+                "commands:\n  /login [provider]   sign in (API key or account)\n  /model [name]       list or switch models\n  /new                fresh session\n  /compact            summarize into a fresh session\n  /version            show the version\n  /quit               exit"
                     .into(),
             ),
             "/new" | "/clear" => {
+                self.compacting = false;
                 self.context_tokens = 0;
                 self.agent.clear();
                 self.agent.set_session(None);
@@ -469,6 +477,7 @@ impl App {
             "/resume" => self.open_resume_menu(),
             "/settings" => self.open_settings(),
             "/copy" => self.copy_last(),
+            "/compact" => self.compact_now(),
             _ if trimmed.starts_with('/') => {
                 let (name, args) = trimmed[1..].split_once(' ').unwrap_or((&trimmed[1..], ""));
                 if self.host.has_command(name) {
@@ -662,6 +671,35 @@ impl App {
         }
     }
 
+    /// Start a /compact: summarize the history off-task, then swap it in via
+    /// AppJob::Compacted. Refused mid-turn — the history would move under it.
+    fn compact_now(&mut self) {
+        if self.agent.is_streaming() {
+            self.notice("finish the turn first (esc interrupts), then /compact".into());
+            return;
+        }
+        if self.compacting {
+            self.notice("already compacting".into());
+            return;
+        }
+        let history = self.agent.history_snapshot();
+        if history.is_empty() {
+            self.notice("nothing to compact yet".into());
+            return;
+        }
+        self.compacting = true;
+        self.notice("compacting…".into());
+        let model = self.agent.model.clone();
+        let results = self.results.clone();
+        tokio::spawn(async move {
+            let job = match e::core::compact::summarize(model, &history).await {
+                Ok(summary) => AppJob::Compacted(summary),
+                Err(message) => AppJob::CompactFailed(message),
+            };
+            let _ = results.send(job).await;
+        });
+    }
+
     fn copy_last(&mut self) {
         let last = self
             .agent
@@ -816,6 +854,7 @@ async fn main() -> std::io::Result<()> {
         jobs: jobs_tx,
         host,
         results: results_tx,
+        compacting: false,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
     // -c continues this workspace's most recent session.
@@ -945,6 +984,23 @@ async fn main() -> std::io::Result<()> {
                 match job {
                     Some(AppJob::Notice(notice)) => app.notice(notice),
                     Some(AppJob::Prompt(prompt)) => app.prompt(prompt),
+                    Some(AppJob::Compacted(summary)) => {
+                        // Ignore a result that outlived its session (/new won).
+                        if app.compacting {
+                            app.compacting = false;
+                            app.agent.load_compacted(&summary);
+                            app.context_tokens = (summary.len() / 4) as u64;
+                            app.transcript.clear();
+                            app.transcript.push(Block::new(Kind::Banner, e::VERSION));
+                            app.transcript.push(Block::new(Kind::Notice, "compacted into a fresh session — the old one is under /resume"));
+                            app.transcript.push(Block::new(Kind::Summary, summary));
+                        }
+                    }
+                    Some(AppJob::CompactFailed(message)) if app.compacting => {
+                        app.compacting = false;
+                        app.notice(format!("compact failed: {message}"));
+                    }
+                    Some(AppJob::CompactFailed(_)) => {}
                     None => {}
                 }
             }
