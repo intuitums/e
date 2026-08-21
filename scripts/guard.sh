@@ -46,9 +46,10 @@ if out=$(grep -rnE 'fs::write|File::create|OpenOptions' src/core/ --include='*.r
   say "$out"
 fi
 
-# 5. Unsafe code stays where it is audited (the libc terminal poll).
-if out=$(grep -rnE 'unsafe (fn|impl|\{)' src/ --include='*.rs' | grep -v '^src/tui/background.rs:'); then
-  bad "unsafe code outside tui/background.rs:"
+# 5. Unsafe code stays where it is audited: the libc terminal poll and the
+#    bash tool's process-group kill (setsid + SIGKILL at the timeout).
+if out=$(grep -rnE 'unsafe (fn|impl|\{)' src/ --include='*.rs' | grep -v '^src/tui/background.rs:' | grep -v '^src/core/tools/bash.rs:'); then
+  bad "unsafe code outside tui/background.rs, core/tools/bash.rs:"
   say "$out"
 fi
 
