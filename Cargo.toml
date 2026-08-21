@@ -31,12 +31,12 @@ rand = "0.10"
 regex = "1"
 libc = "0.2"
 
-# Half the binary for zero runtime cost (measured: 8.02 -> 4.32 MiB, speed
-# unchanged). panic=abort skips unwinding; the TUI's panic hook restores the
-# terminal explicitly, so nothing relies on Drop during a panic. Release
-# builds slow to ~25s — dev builds are untouched.
+# A third off the binary for zero runtime cost (measured: 8.02 -> 5.18 MiB,
+# speed unchanged). Unwinding stays ON deliberately: a panicking tool is
+# caught at the spawn_blocking boundary and fed back to the model as an
+# error result — panic=abort would turn that into process death for ~0.9 MiB.
+# Release builds slow to ~25s; dev builds are untouched.
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-panic = "abort"
