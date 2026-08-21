@@ -73,63 +73,50 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
             String::new(),
             dim("   ↑↓ Choose · Enter Continue · Esc Cancel"),
         ],
-        AuthStage::Account { selected } => vec![
-            String::new(),
-            dim("   Sign in with an account"),
-            String::new(),
-            choice_row(
-                theme,
-                *selected == 0,
-                "OpenAI Codex",
-                "ChatGPT — opens the browser",
-                width,
-            ),
-            choice_row(
-                theme,
-                *selected == 1,
-                "xAI",
-                "SuperGrok or X Premium — device code",
-                width,
-            ),
-            String::new(),
-            dim("   ↑↓ Choose · Enter Continue · Esc Cancel"),
-        ],
-        AuthStage::Key { selected } => vec![
-            String::new(),
-            dim("   Sign in with an API key"),
-            String::new(),
-            choice_row(
-                theme,
-                *selected == 0,
-                "OpenCode Go",
-                "the Go plan gateway",
-                width,
-            ),
-            choice_row(
-                theme,
-                *selected == 1,
-                "OpenCode Zen",
-                "the Zen gateway",
-                width,
-            ),
-            choice_row(theme, *selected == 2, "xAI", "console.x.ai", width),
-            choice_row(
-                theme,
-                *selected == 3,
-                "OpenAI",
-                "platform.openai.com",
-                width,
-            ),
-            choice_row(
-                theme,
-                *selected == 4,
-                "Anthropic",
-                "console.anthropic.com",
-                width,
-            ),
-            String::new(),
-            dim("   ↑↓ Choose · Enter Continue · Esc Cancel"),
-        ],
+        AuthStage::Account { selected } => {
+            let mut rows = vec![
+                String::new(),
+                dim("   Sign in with an account"),
+                String::new(),
+            ];
+            for (i, provider) in crate::core::provider::registry::oauth_providers()
+                .iter()
+                .enumerate()
+            {
+                rows.push(choice_row(
+                    theme,
+                    *selected == i,
+                    &provider.display,
+                    &provider.auth.oauth_hint,
+                    width,
+                ));
+            }
+            rows.push(String::new());
+            rows.push(dim("   ↑↓ Choose · Enter Continue · Esc Cancel"));
+            rows
+        }
+        AuthStage::Key { selected } => {
+            let mut rows = vec![
+                String::new(),
+                dim("   Sign in with an API key"),
+                String::new(),
+            ];
+            for (i, provider) in crate::core::provider::registry::key_providers()
+                .iter()
+                .enumerate()
+            {
+                rows.push(choice_row(
+                    theme,
+                    *selected == i,
+                    &provider.display,
+                    &provider.auth.key_hint,
+                    width,
+                ));
+            }
+            rows.push(String::new());
+            rows.push(dim("   ↑↓ Choose · Enter Continue · Esc Cancel"));
+            rows
+        }
         AuthStage::ApiKey { provider } => {
             let entry = if mask_count == 0 {
                 format!(

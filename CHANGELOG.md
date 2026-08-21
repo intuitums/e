@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Providers are data, the reference architecture: each built-in lives in
+  `src/core/provider/providers/<name>.json` — gateway, dialect, auth
+  surface (which OAuth flow, which API-key env var), display name, seed
+  models with per-model windows and effort support. The sign-in panels,
+  /login dispatch, display names, and catalog all derive from the
+  registry; adding an API-key provider is now a data edit. API keys fall
+  back to their conventional environment variables (ANTHROPIC_API_KEY and
+  friends) when auth.json has no entry — auth.json wins.
+  `scripts/generate-catalog.py` syncs the data's metadata from models.dev
+  (this run corrected the gpt-5.x windows to 1.05M, among others).
 - The model catalog is live, the reference behavior: every signed-in
   provider's own `GET /models` is fetched in the background (at launch
   and after each sign-in), cached in `~/.e/models-store.json` with a

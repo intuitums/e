@@ -1,0 +1,58 @@
+{
+	"name": "openai",
+	"display": "OpenAI",
+	"base_url": "https://api.openai.com/v1",
+	"api": "openai-responses",
+	"auth": {
+		"key": true,
+		"key_env": "OPENAI_API_KEY",
+		"key_hint": "platform.openai.com"
+	},
+	"models": [
+		{
+			"id": "gpt-5.5",
+			"context_window": 1050000,
+			"efforts": [
+				"low",
+				"medium",
+				"high"
+			]
+		},
+		{
+			"id": "gpt-5.5-pro",
+			"context_window": 1050000,
+			"efforts": [
+				"low",
+				"medium",
+				"high"
+			]
+		},
+		{
+			"id": "gpt-5.4",
+			"context_window": 1050000,
+			"efforts": [
+				"low",
+				"medium",
+				"high"
+			]
+		},
+		{
+			"id": "gpt-5.3-codex",
+			"context_window": 400000,
+			"efforts": [
+				"low",
+				"medium",
+				"high"
+			]
+		},
+		{
+			"id": "gpt-5.2",
+			"context_window": 400000,
+			"efforts": [
+				"low",
+				"medium",
+				"high"
+			]
+		}
+	]
+}

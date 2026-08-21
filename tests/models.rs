@@ -304,3 +304,57 @@ async fn provider_reported_models_appear_without_a_release() {
     e::core::provider::catalog::refresh_remote().await; // would hang/panic if it re-hit the dead server
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_registry_is_coherent() {
+    use e::core::provider::registry;
+    let all = registry::all();
+    assert!(all.len() >= 6);
+    for provider in all {
+        assert!(
+            !provider.display.is_empty(),
+            "{} has no display name",
+            provider.name
+        );
+        assert!(provider.base_url.starts_with("https://"));
+        assert!(
+            provider.auth.oauth.is_some() || provider.auth.key,
+            "{} has no way to sign in",
+            provider.name
+        );
+        if provider.auth.key {
+            assert!(
+                provider.auth.key_env.is_some(),
+                "{} key without env var",
+                provider.name
+            );
+        }
+    }
+    // The panels' contents, from data: two account flows, five key providers.
+    assert_eq!(registry::oauth_providers().len(), 2);
+    assert_eq!(registry::key_providers().len(), 5);
+}
+
+#[test]
+fn env_var_keys_sign_a_provider_in() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("e-envkey-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+    std::env::remove_var("ANTHROPIC_API_KEY");
+
+    assert!(e::core::provider::catalog::available().is_empty());
+    std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-env");
+    let available = e::core::provider::catalog::available();
+    assert!(available.iter().any(|m| m.provider == "anthropic"));
+    // auth.json still wins over the environment.
+    std::fs::write(dir.join("auth.json"), r#"{"anthropic":{"key":"sk-file"}}"#).unwrap();
+    let auth = e::core::auth::load();
+    match auth.get("anthropic").unwrap() {
+        e::core::auth::Credential::ApiKey { key } => assert_eq!(key, "sk-file"),
+        _ => panic!("wrong credential kind"),
+    }
+    std::env::remove_var("ANTHROPIC_API_KEY");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,0 +1,29 @@
+{
+	"name": "opencode",
+	"display": "OpenCode Zen",
+	"base_url": "https://opencode.ai/zen/v1",
+	"api": "openai-completions",
+	"auth": {
+		"key": true,
+		"key_env": "OPENCODE_API_KEY",
+		"key_hint": "the Zen gateway"
+	},
+	"models": [
+		{
+			"id": "deepseek-v4-flash",
+			"context_window": 1000000
+		},
+		{
+			"id": "kimi-k3",
+			"context_window": 1048576
+		},
+		{
+			"id": "minimax-m3",
+			"context_window": 512000
+		},
+		{
+			"id": "glm-5.2",
+			"context_window": 1000000
+		}
+	]
+}

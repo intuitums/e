@@ -33,11 +33,26 @@ pub type AuthFile = BTreeMap<String, Credential>;
 
 /// Load the credentials e can interpret. Entries in a shape e doesn't
 /// understand are skipped here but left untouched on disk — never wiped.
+/// A provider with no stored credential falls back to its conventional
+/// environment variable (ANTHROPIC_API_KEY and friends, declared in the
+/// provider registry) — the reference behavior, and what CI wants.
 pub fn load() -> AuthFile {
     let mut out = AuthFile::new();
     for (provider, value) in crate::core::config::store::read_object(&home::auth_path()) {
         if let Ok(cred) = serde_json::from_value::<Credential>(value) {
             out.insert(provider, cred);
+        }
+    }
+    for provider in crate::core::provider::registry::all() {
+        if out.contains_key(&provider.name) {
+            continue;
+        }
+        if let Some(env) = &provider.auth.key_env {
+            if let Ok(key) = std::env::var(env) {
+                if !key.trim().is_empty() {
+                    out.insert(provider.name.clone(), Credential::ApiKey { key });
+                }
+            }
         }
     }
     out

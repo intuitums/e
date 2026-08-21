@@ -24,7 +24,7 @@ pub struct Model {
     pub base_url: String,
     pub api: Api,
     /// Effort values the backend accepts for its reasoning knob, if any.
-    pub efforts: &'static [&'static str],
+    pub efforts: Vec<String>,
     /// Context window in tokens. A conservative default until per-model
     /// numbers are sourced; overridable via models.json later.
     pub context_window: u64,
@@ -34,96 +34,22 @@ pub fn slug(model: &Model) -> String {
     format!("{}/{}", model.provider, model.id)
 }
 
-const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
-const OPENCODE_ZEN_BASE: &str = "https://opencode.ai/zen/v1";
-const XAI_BASE: &str = "https://api.x.ai/v1";
-const OPENAI_BASE: &str = "https://api.openai.com/v1";
-const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
-const CODEX_BASE: &str = "https://chatgpt.com/backend-api";
-const EFFORTS: &[&str] = &["low", "medium", "high"];
-
 pub fn builtin_catalog() -> Vec<Model> {
-    let completions = |id: &str| Model {
-        provider: "opencode-go".into(),
-        id: id.into(),
-        base_url: OPENCODE_GO_BASE.into(),
-        api: Api::Completions,
-        efforts: &[],
-        context_window: 200_000,
-    };
-    let zen = |id: &str, context_window: u64| Model {
-        provider: "opencode".into(),
-        id: id.into(),
-        base_url: OPENCODE_ZEN_BASE.into(),
-        api: Api::Completions,
-        efforts: &[],
-        context_window,
-    };
-    let xai = |id: &str, context_window: u64| Model {
-        provider: "xai".into(),
-        id: id.into(),
-        base_url: XAI_BASE.into(),
-        api: Api::Completions,
-        efforts: &[],
-        context_window,
-    };
-    let openai = |id: &str, context_window: u64| Model {
-        provider: "openai".into(),
-        id: id.into(),
-        base_url: OPENAI_BASE.into(),
-        api: Api::Responses,
-        efforts: EFFORTS,
-        context_window,
-    };
-    let anthropic = |id: &str, context_window: u64| Model {
-        provider: "anthropic".into(),
-        id: id.into(),
-        base_url: ANTHROPIC_BASE.into(),
-        api: Api::Anthropic,
-        efforts: EFFORTS,
-        context_window,
-    };
-    let codex = |id: &str| Model {
-        provider: "openai-codex".into(),
-        id: id.into(),
-        base_url: CODEX_BASE.into(),
-        api: Api::Responses,
-        efforts: EFFORTS,
-        context_window: 272_000,
-    };
-    vec![
-        completions("deepseek-v4-flash"),
-        completions("deepseek-v4-pro"),
-        completions("minimax-m3"),
-        completions("qwen3.7-plus"),
-        completions("qwen3.7-max"),
-        completions("glm-5.2"),
-        completions("glm-5.3"),
-        completions("kimi-k3"),
-        completions("hy3"),
-        completions("muse-spark-1.2-contributor"),
-        codex("gpt-5.6-sol"),
-        codex("gpt-5.6-terra"),
-        codex("gpt-5.6-luna"),
-        codex("gpt-5.5"),
-        codex("gpt-5.4"),
-        zen("deepseek-v4-flash", 1_000_000),
-        zen("kimi-k3", 262_144),
-        zen("minimax-m3", 1_000_000),
-        zen("glm-5.2", 1_000_000),
-        xai("grok-4.6", 500_000),
-        xai("grok-4.3", 1_000_000),
-        openai("gpt-5.5", 272_000),
-        openai("gpt-5.5-pro", 1_050_000),
-        openai("gpt-5.4", 272_000),
-        openai("gpt-5.3-codex", 400_000),
-        openai("gpt-5.2", 400_000),
-        anthropic("claude-fable-5", 1_000_000),
-        anthropic("claude-opus-5", 1_000_000),
-        anthropic("claude-sonnet-5", 1_000_000),
-        anthropic("claude-opus-4-8", 1_000_000),
-        anthropic("claude-haiku-4-5", 200_000),
-    ]
+    // Providers are data (provider/providers/*.json); this just projects the
+    // registry into models.
+    crate::core::provider::registry::all()
+        .iter()
+        .flat_map(|provider| {
+            provider.models.iter().map(|decl| Model {
+                provider: provider.name.clone(),
+                id: decl.id.clone(),
+                base_url: provider.base_url.clone(),
+                api: provider.api(),
+                efforts: decl.efforts.clone(),
+                context_window: decl.context_window,
+            })
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -194,7 +120,7 @@ fn remote_overlay(models: &mut Vec<Model>) {
                     id: id.to_string(),
                     base_url: base.clone(),
                     api: Api::Completions,
-                    efforts: &[],
+                    efforts: Vec::new(),
                     context_window: item["context_window"].as_u64().unwrap_or(200_000),
                 });
             }
@@ -356,10 +282,11 @@ pub fn catalog() -> Vec<Model> {
                     Some("anthropic") | Some("anthropic-messages") => Api::Anthropic,
                     _ => Api::Completions,
                 };
-                let base = entry
-                    .base_url
-                    .clone()
-                    .unwrap_or_else(|| OPENCODE_GO_BASE.into());
+                let base = entry.base_url.clone().unwrap_or_else(|| {
+                    crate::core::provider::registry::find("opencode-go")
+                        .map(|p| p.base_url.clone())
+                        .unwrap_or_default()
+                });
                 for model in entry.models {
                     let (id, window) = match model {
                         ModelEntry::Id(id) => (id, None),
@@ -370,7 +297,7 @@ pub fn catalog() -> Vec<Model> {
                         id,
                         base_url: base.clone(),
                         api,
-                        efforts: &[],
+                        efforts: Vec::new(),
                         context_window: window.or(entry.context_window).unwrap_or(200_000),
                     };
                     models.retain(|m| !(m.provider == resolved.provider && m.id == resolved.id));
@@ -465,14 +392,8 @@ pub fn cycle_pool() -> Vec<Model> {
 }
 
 /// Human name for a provider, for panels: capitalized, no dashes.
-pub fn display_name(provider: &str) -> &str {
-    match provider {
-        "openai-codex" => "OpenAI Codex",
-        "openai" => "OpenAI",
-        "anthropic" => "Anthropic",
-        "opencode-go" => "OpenCode Go",
-        "opencode" => "OpenCode Zen",
-        "xai" => "xAI",
-        other => other,
-    }
+pub fn display_name(provider: &str) -> String {
+    crate::core::provider::registry::find(provider)
+        .map(|p| p.display.clone())
+        .unwrap_or_else(|| provider.to_string())
 }

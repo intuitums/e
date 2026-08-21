@@ -486,32 +486,42 @@ impl App {
         });
     }
 
-    /// A subscription picked on the account panel.
+    /// A subscription picked on the account panel — the registry names the
+    /// flow; this just dispatches it.
     fn auth_account(&mut self, selected: usize) {
+        let providers = e::core::provider::registry::oauth_providers();
+        let Some(provider) = providers.get(selected) else {
+            return;
+        };
         self.auth = Some(AuthStage::Waiting);
-        if selected == 0 {
-            self.notice("starting the OpenAI Codex sign-in…".into());
-            tokio::spawn(e::core::auth::login::codex_login(
-                "openai-codex".into(),
-                self.jobs.clone(),
-                self.logins.clone(),
-            ));
-        } else {
-            self.notice("starting the xAI sign-in…".into());
-            tokio::spawn(e::core::auth::login::xai_login(
-                self.jobs.clone(),
-                self.logins.clone(),
-            ));
+        self.notice(format!("starting the {} sign-in…", provider.display));
+        match provider.auth.oauth.as_deref() {
+            Some("xai-device") => {
+                tokio::spawn(e::core::auth::login::xai_login(
+                    self.jobs.clone(),
+                    self.logins.clone(),
+                ));
+            }
+            _ => {
+                tokio::spawn(e::core::auth::login::codex_login(
+                    provider.name.clone(),
+                    self.jobs.clone(),
+                    self.logins.clone(),
+                ));
+            }
         }
     }
 
     /// A provider picked on the API-key panel.
     fn auth_key(&mut self, selected: usize) {
-        let provider = ["opencode-go", "opencode", "xai", "openai", "anthropic"][selected.min(4)];
+        let providers = e::core::provider::registry::key_providers();
+        let Some(provider) = providers.get(selected) else {
+            return;
+        };
         self.auth = Some(AuthStage::ApiKey {
-            provider: provider.into(),
+            provider: provider.name.clone(),
         });
-        self.pending_key = Some(provider.into());
+        self.pending_key = Some(provider.name.clone());
         self.editor.mask = true;
         self.editor.set_text("");
     }
@@ -800,14 +810,18 @@ impl App {
             self.open_login_menu();
             return;
         }
-        if provider == "openai-codex" {
-            self.notice("starting the OpenAI Codex sign-in…".into());
+        let flow = e::core::provider::registry::find(&provider).and_then(|p| p.auth.oauth.clone());
+        if flow.as_deref() == Some("codex") {
+            self.notice(format!(
+                "starting the {} sign-in…",
+                model::display_name(&provider)
+            ));
             tokio::spawn(e::core::auth::login::codex_login(
                 provider,
                 self.jobs.clone(),
                 self.logins.clone(),
             ));
-        } else if provider == "xai" {
+        } else if flow.as_deref() == Some("xai-device") {
             self.notice("starting the xAI sign-in…".into());
             tokio::spawn(e::core::auth::login::xai_login(
                 self.jobs.clone(),
@@ -1539,13 +1553,16 @@ e -v, --version"
                                     app.auth_choose(choice);
                                 }
                                 (AuthStage::Account { selected }, KeyCode::Up | KeyCode::Down) => {
-                                    *selected = 1 - *selected;
+                                    let n = e::core::provider::registry::oauth_providers().len();
+                                    *selected = (*selected + 1) % n.max(1);
                                 }
                                 (AuthStage::Key { selected }, KeyCode::Up) => {
-                                    *selected = (*selected + 4) % 5;
+                                    let n = e::core::provider::registry::key_providers().len();
+                                    *selected = (*selected + n - 1) % n.max(1);
                                 }
                                 (AuthStage::Key { selected }, KeyCode::Down) => {
-                                    *selected = (*selected + 1) % 5;
+                                    let n = e::core::provider::registry::key_providers().len();
+                                    *selected = (*selected + 1) % n.max(1);
                                 }
                                 (AuthStage::Account { selected }, KeyCode::Enter) => {
                                     let choice = *selected;
