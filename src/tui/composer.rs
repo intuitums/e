@@ -9,6 +9,9 @@ use crate::tui::theme::Theme;
 pub struct Editor {
     /// Render `•` per character — for secret entry (/login keys).
     pub mask: bool,
+    /// Live paste placeholders: (token, full text), expanded on submit.
+    pastes: Vec<(String, String)>,
+    paste_seq: usize,
     text: Vec<char>,
     cursor: usize,
     history: Vec<String>,
@@ -37,6 +40,8 @@ impl Editor {
             history: Vec::new(),
             history_pos: None,
             draft: String::new(),
+            pastes: Vec::new(),
+            paste_seq: 0,
         }
     }
 
@@ -86,6 +91,35 @@ impl Editor {
     pub fn insert(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += 1;
+    }
+
+    /// A paste becomes a placeholder token — the reference behavior — when
+    /// it is long or multiline; the token expands back on submit. Small
+    /// single-line pastes insert literally.
+    pub fn insert_paste(&mut self, text: &str) {
+        let lines = text.lines().count().max(1);
+        if lines == 1 && text.chars().count() <= 120 {
+            self.insert_str(text);
+            return;
+        }
+        self.paste_seq += 1;
+        let token = format!(
+            "[Pasted text #{}, {} line{}]",
+            self.paste_seq,
+            lines,
+            if lines == 1 { "" } else { "s" }
+        );
+        self.pastes.push((token.clone(), text.to_string()));
+        self.insert_str(&token);
+    }
+
+    /// Replace every live placeholder with its pasted content.
+    pub fn expand_pastes(&self, text: &str) -> String {
+        let mut out = text.to_string();
+        for (token, content) in &self.pastes {
+            out = out.replace(token, content);
+        }
+        out
     }
 
     pub fn insert_str(&mut self, s: &str) {

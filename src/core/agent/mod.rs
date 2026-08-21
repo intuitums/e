@@ -62,11 +62,13 @@ pub enum SessionEvent {
         verb: String,
         target: String,
     },
-    /// A tool finished: its one-line summary and whether it errored.
+    /// A tool finished: its one-line summary, whether it errored, and the
+    /// full (already tool-truncated) output for the preview and the viewer.
     ToolEnd {
         id: u64,
         summary: String,
         is_error: bool,
+        content: String,
     },
     Usage {
         input: u64,
@@ -377,6 +379,7 @@ impl Agent {
                             id,
                             summary: output.summary.clone(),
                             is_error: output.is_error,
+                            content: output.content.clone(),
                         })
                         .await;
                     commit(

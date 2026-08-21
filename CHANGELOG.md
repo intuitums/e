@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- The rest of the reference tool surfaces: command rows preview their
+  output beneath the row (first four `│` lines, a `│ … N lines more
+  (ctrl o to view)` elision, `│ exit code N` on failure); ctrl+o opens
+  the full-detail viewer (scroll, ←/→ between outputs, the reference's
+  footer wording) fed by every tool and `!` output; long or multiline
+  pastes become `[Pasted text #N, L lines]` placeholders that expand on
+  submit; and a tool interrupted mid-run wears the `■` cancelled glyph,
+  tallied as `· N cancelled` in collapsed groups.
+- Finished tool runs collapse into the reference group when the turn
+  ends: a tallied header (`● 3 tool calls · 2 read · 1 command · 1
+  failed`, with the reference's own pluralization) over `├` children and
+  a `└` last — the dot-and-connectors shape. Live calls stay individual
+  rows until then.
+- Tool rows wear the reference grammar: a finished row is just the row —
+  no "(done)" — and a failed tool turns its marker to the error token
+  with a `│ <outcome>` continuation line (`│ exit 128`) beneath.
+  Reasoning summaries render their inline markdown (**bold titles**, code
+  spans) instead of showing literal asterisks.
 ## 0.4.0 — 2026-08-21
 
 - Installation: `install.sh` (curl-able, checksum-verified, macOS and
