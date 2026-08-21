@@ -55,6 +55,8 @@ struct App {
     menu: Option<Menu>,
     /// The sign-in panel, when /login is active.
     auth: Option<AuthStage>,
+    /// The settings panel, when /settings is active.
+    settings: Option<e::tui::settingspanel::SettingsPanel>,
     /// Background job narration (login flows) into the transcript.
     jobs: tokio::sync::mpsc::Sender<String>,
 }
@@ -72,6 +74,8 @@ impl App {
         }
         if let Some(stage) = &self.auth {
             lines.extend(authpanel::render(stage, &self.theme, width, self.editor.text().chars().count()));
+        } else if let Some(panel) = &self.settings {
+            lines.extend(panel.render(&self.theme, width));
         } else if let Some(menu) = &self.menu {
             lines.extend(menu.render(&self.theme, width));
         }
@@ -84,7 +88,11 @@ impl App {
             context_percent: Some(percent),
             queued: 0,
         };
-        let hint = self.menu.as_ref().map(|m| m.hint);
+        let hint = self
+            .settings
+            .as_ref()
+            .map(|_| e::tui::settingspanel::HINT)
+            .or_else(|| self.menu.as_ref().map(|m| m.hint));
         lines.extend(statusline(&self.theme, &data, self.overlay.as_deref(), hint, width));
         lines
     }
@@ -98,6 +106,7 @@ impl App {
             MenuItem::new("/resume", "resume a saved session", "/resume"),
             MenuItem::new("/new", "start a fresh session", "/new"),
             MenuItem::new("/copy", "copy the last reply", "/copy"),
+            MenuItem::new("/settings", "change preferences", "/settings"),
             MenuItem::new("/help", "show commands", "/help"),
             MenuItem::new("/version", "show the version", "/version"),
             MenuItem::new("/quit", "exit", "/quit"),
@@ -158,6 +167,11 @@ impl App {
             Err(_) => {}
         }
         self.notice(format!("resumed {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+    }
+
+    fn open_settings(&mut self) {
+        self.menu = None;
+        self.settings = Some(e::tui::settingspanel::SettingsPanel::new());
     }
 
     fn open_model_menu(&mut self) {
@@ -328,6 +342,7 @@ impl App {
         match command.as_str() {
             "/login" => self.open_login_menu(),
             "/model" => self.open_model_menu(),
+            "/settings" => self.open_settings(),
             "/resume" => self.open_resume_menu(),
             "/copy" => self.copy_last(),
             other => self.submit(other.to_string()),
@@ -389,6 +404,7 @@ impl App {
                 self.transcript.push(Block::new(Kind::Banner, e::VERSION));
             }
             "/resume" => self.open_resume_menu(),
+            "/settings" => self.open_settings(),
             "/copy" => self.copy_last(),
             _ if trimmed.starts_with('/') => {
                 self.notice(format!("unknown command {trimmed}"));
@@ -420,11 +436,15 @@ impl App {
             self.notice("a turn is already streaming — esc to interrupt first".into());
             return;
         }
-        // A message while streaming steers; the user block appears on Steered.
-        if !self.agent.is_streaming() {
-            self.transcript.push(Block::new(Kind::User, text.clone()));
+        // While a turn runs the message is held (steer folds it in later and
+        // echoes it via Steered; queue starts it after the turn). Idle, it
+        // begins a turn now.
+        // While a turn runs the message is held and steered in (echoed later
+        // via Steered); idle, it begins a turn now.
+        let held = self.agent.submit(text.clone(), system_prompt());
+        if !held {
+            self.transcript.push(Block::new(Kind::User, text));
         }
-        self.agent.submit(text, system_prompt());
     }
 
     /// The single session stream, in order. Turn bookkeeping hangs off it.
@@ -576,6 +596,19 @@ impl App {
         }
     }
 
+    /// Resolve the theme from settings (auto detects the terminal) and reload.
+    fn apply_theme(&mut self) {
+        let light = match e::core::settings::THEME.current().as_str() {
+            "light" => true,
+            "dark" => false,
+            _ => e::tui::background::detect_light().unwrap_or(false),
+        };
+        if let Ok(theme) = load_bundled(light) {
+            self.theme = theme;
+            self.transcript.invalidate();
+        }
+    }
+
     fn notice(&mut self, text: String) {
         self.transcript.push(Block::new(Kind::Notice, text));
     }
@@ -664,7 +697,11 @@ async fn main() -> std::io::Result<()> {
     terminal::enable_raw_mode()?;
     let _guard = RawGuard;
     execute!(std::io::stdout(), EnableBracketedPaste)?;
-    let light = e::tui::background::detect_light().unwrap_or(false);
+    let light = match e::core::settings::THEME.current().as_str() {
+        "light" => true,
+        "dark" => false,
+        _ => e::tui::background::detect_light().unwrap_or(false),
+    };
     let theme = load_bundled(light).map_err(std::io::Error::other)?;
 
     let (cols, rows) = terminal::size()?;
@@ -684,6 +721,7 @@ async fn main() -> std::io::Result<()> {
         pending_key: None,
         menu: None,
         auth: None,
+        settings: None,
         jobs: jobs_tx,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
@@ -723,7 +761,18 @@ async fn main() -> std::io::Result<()> {
                     TermEvent::Resize(c, r) => screen.resize(c, r),
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                        if let Some(stage) = &mut app.auth {
+                        if let Some(panel) = &mut app.settings {
+                            match k.code {
+                                KeyCode::Up => panel.step(-1),
+                                KeyCode::Down => panel.step(1),
+                                KeyCode::Left => panel.change(-1),
+                                KeyCode::Right => panel.change(1),
+                                KeyCode::Esc | KeyCode::Enter => app.settings = None,
+                                _ => {}
+                            }
+                            // A theme change applies immediately.
+                            app.apply_theme();
+                        } else if let Some(stage) = &mut app.auth {
                             match (&mut *stage, k.code) {
                                 (AuthStage::Choose { selected }, KeyCode::Up | KeyCode::Down) => {
                                     *selected = 1 - *selected;

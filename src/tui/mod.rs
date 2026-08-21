@@ -8,6 +8,7 @@ pub mod markdown;
 pub mod menu;
 pub mod render;
 pub mod screen;
+pub mod settingspanel;
 pub mod statusline;
 pub mod theme;
 pub mod transcript;

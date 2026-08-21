@@ -69,8 +69,8 @@ pub struct Agent {
     cwd: PathBuf,
     history: Arc<Mutex<Vec<ChatMessage>>>,
     events: mpsc::Sender<SessionEvent>,
-    /// Steering messages queued while a turn runs.
-    steer: Arc<Mutex<Vec<String>>>,
+    /// Messages typed while a turn runs (steered or queued per settings).
+    pending: Arc<Mutex<Vec<String>>>,
     cancel: Arc<AtomicBool>,
     running: bool,
     /// The session log; every committed message is appended.
@@ -85,7 +85,7 @@ impl Agent {
             cwd: std::env::current_dir().unwrap_or_default(),
             history: Arc::new(Mutex::new(Vec::new())),
             events,
-            steer: Arc::new(Mutex::new(Vec::new())),
+            pending: Arc::new(Mutex::new(Vec::new())),
             cancel: Arc::new(AtomicBool::new(false)),
             running: false,
             session: Arc::new(Mutex::new(None)),
@@ -100,7 +100,7 @@ impl Agent {
         slug(&self.model)
     }
     pub fn effort(&self) -> Option<String> {
-        if self.model.efforts.is_empty() { None } else { Some("high".into()) }
+        if self.model.efforts.is_empty() { None } else { Some(crate::core::settings::effort()) }
     }
     pub fn history_snapshot(&self) -> Vec<ChatMessage> {
         self.history.lock().unwrap().clone()
@@ -122,26 +122,33 @@ impl Agent {
 
     /// Queue a message. If a turn is running it steers (drained next step);
     /// otherwise it starts a turn.
-    pub fn submit(&mut self, text: String, system: String) {
+    /// A message typed while a turn runs never fires immediately: it is held
+    /// and steered into the turn at the next step. Returns true if held,
+    /// false if it began a fresh turn.
+    pub fn submit(&mut self, text: String, system: String) -> bool {
         if self.running {
-            self.steer.lock().unwrap().push(text);
-            return;
+            self.pending.lock().unwrap().push(text);
+            return true;
         }
         commit(&self.history, &self.session, &self.cwd, &self.model, ChatMessage::user(text));
         self.start(system);
+        false
     }
+
+
 
     fn start(&mut self, system: String) {
         self.running = true;
         self.cancel.store(false, Ordering::SeqCst);
         let events = self.events.clone();
         let history = self.history.clone();
-        let steer = self.steer.clone();
+
         let cancel = self.cancel.clone();
         let model = self.model.clone();
         let cwd = self.cwd.clone();
         let effort = self.effort();
         let session = self.session.clone();
+        let pending = self.pending.clone();
 
         tokio::spawn(async move {
             let _ = events.send(SessionEvent::TurnStart).await;
@@ -150,8 +157,8 @@ impl Agent {
                 if cancel.load(Ordering::SeqCst) {
                     break true;
                 }
-                // Drain steering (guard dropped before any await).
-                let steered: Vec<String> = { steer.lock().unwrap().drain(..).collect() };
+                // Steer: fold any pending messages into this turn between steps.
+                let steered: Vec<String> = { pending.lock().unwrap().drain(..).collect() };
                 for message in steered {
                     let _ = events.send(SessionEvent::Steered(message.clone())).await;
                     commit(&history, &session, &cwd, &model, ChatMessage::user(message));
@@ -222,7 +229,13 @@ impl Agent {
                 commit(&history, &session, &cwd, &model, ChatMessage::assistant(text, calls.clone()));
 
                 if calls.is_empty() {
-                    break false; // a plain reply ends the turn
+                    // A plain reply would end the turn — but a message that
+                    // landed mid-reply must still be delivered, so continue the
+                    // turn to pick it up rather than stranding it.
+                    if !pending.lock().unwrap().is_empty() {
+                        continue;
+                    }
+                    break false;
                 }
 
                 // Run each tool (yolo: no gate), append results, loop.

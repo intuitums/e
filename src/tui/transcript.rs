@@ -128,6 +128,13 @@ impl Transcript {
         self.blocks.clear();
     }
 
+    /// Drop every block's line cache (after a theme change).
+    pub fn invalidate(&mut self) {
+        for b in &mut self.blocks {
+            b.touch();
+        }
+    }
+
     pub fn render(&mut self, theme: &Theme, width: usize) -> Vec<String> {
         let mut out = Vec::new();
         let mut prev: Option<Kind> = None;
