@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 use super::{schema_object, truncate, ToolOutput};
-use crate::core::skills;
+use crate::core::resources::skills;
 
 pub fn schema() -> Value {
     schema_object(

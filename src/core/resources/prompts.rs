@@ -5,7 +5,7 @@
 //! substitution: `$1`..`$9`, `$@` / `$ARGUMENTS` (all args), `${N:-default}`,
 //! `${@:-default}`, and `${@:N}` (args from N on).
 
-use crate::core::home;
+use crate::core::config::home;
 
 pub struct Template {
     pub name: String,

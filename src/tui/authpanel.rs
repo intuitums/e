@@ -137,7 +137,7 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
                 String::new(),
                 dim(&format!(
                     "   Paste your {} API key",
-                    crate::core::model::display_name(provider)
+                    crate::core::provider::catalog::display_name(provider)
                 )),
                 entry,
                 dim("   Enter saves · Esc cancels"),

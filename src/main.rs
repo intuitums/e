@@ -14,8 +14,8 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use e::core::agent::{Agent, SessionEvent};
-use e::core::model::{self, Model};
 use e::core::output::{format_duration, format_tokens};
+use e::core::provider::catalog::{self as model, Model};
 use e::tui::authpanel::{self, AuthStage};
 use e::tui::composer::{Editor, EditorResult, Key};
 use e::tui::menu::{Menu, MenuItem, MenuKind, HINT_SCOPED, HINT_USE};
@@ -187,7 +187,7 @@ impl App {
             MenuItem::new("/version", "show the version", "/version"),
             MenuItem::new("/quit", "exit", "/quit"),
         ];
-        for template in e::core::prompts::list() {
+        for template in e::core::resources::prompts::list() {
             let slash = format!("/{}", template.name);
             let description = if template.argument_hint.is_empty() {
                 template.description.clone()
@@ -417,13 +417,13 @@ impl App {
         self.auth = Some(AuthStage::Waiting);
         if selected == 0 {
             self.notice("starting the OpenAI Codex sign-in…".into());
-            tokio::spawn(e::core::login::codex_login(
+            tokio::spawn(e::core::auth::login::codex_login(
                 "openai-codex".into(),
                 self.jobs.clone(),
             ));
         } else {
             self.notice("starting the xAI sign-in…".into());
-            tokio::spawn(e::core::login::xai_login(self.jobs.clone()));
+            tokio::spawn(e::core::auth::login::xai_login(self.jobs.clone()));
         }
     }
 
@@ -439,7 +439,7 @@ impl App {
     }
 
     fn open_skills_menu(&mut self, query: &str) {
-        let items: Vec<MenuItem> = e::core::skills::list()
+        let items: Vec<MenuItem> = e::core::resources::skills::list()
             .into_iter()
             .map(|s| MenuItem::new(&s.name, &s.description, &s.name))
             .collect();
@@ -557,7 +557,7 @@ impl App {
                     None => String::new(),
                 };
                 self.editor.set_text("");
-                if let Some(skill) = e::core::skills::get(&item.value) {
+                if let Some(skill) = e::core::resources::skills::get(&item.value) {
                     let combined = if rest.is_empty() {
                         skill.body
                     } else {
@@ -600,7 +600,7 @@ impl App {
         if let Some(secret_for) = self.pending_key.take() {
             self.auth = None;
             self.editor.mask = false;
-            match e::core::login::save_api_key(&secret_for, &trimmed) {
+            match e::core::auth::login::save_api_key(&secret_for, &trimmed) {
                 Ok(()) => self.notice(format!("{secret_for}: key saved to ~/.e/auth.json")),
                 Err(e) => self.notice(format!("{secret_for}: {e}")),
             }
@@ -671,14 +671,14 @@ impl App {
             "/copy" => self.copy_last(),
             "/compact" => self.compact_now(),
             "/reload" => self.reload(),
-            "/trust" => match e::core::trust::set(&self.agent.cwd(), true) {
+            "/trust" => match e::core::config::trust::set(&self.agent.cwd(), true) {
                 Ok(()) => self.notice("directory trusted — its AGENTS.md now loads".into()),
                 Err(e) => self.notice(format!("trust: {e}")),
             },
             _ if trimmed.starts_with('/') => {
                 let (name, args) = trimmed[1..].split_once(' ').unwrap_or((&trimmed[1..], ""));
-                if let Some(template) = e::core::prompts::find(name) {
-                    let expanded = e::core::prompts::substitute(&template.content, args);
+                if let Some(template) = e::core::resources::prompts::find(name) {
+                    let expanded = e::core::resources::prompts::substitute(&template.content, args);
                     self.prompt(expanded);
                 } else if self.host.has_command(name) {
                     let host = self.host.clone();
@@ -711,10 +711,13 @@ impl App {
         }
         if provider == "openai-codex" {
             self.notice("starting the OpenAI Codex sign-in…".into());
-            tokio::spawn(e::core::login::codex_login(provider, self.jobs.clone()));
+            tokio::spawn(e::core::auth::login::codex_login(
+                provider,
+                self.jobs.clone(),
+            ));
         } else if provider == "xai" {
             self.notice("starting the xAI sign-in…".into());
-            tokio::spawn(e::core::login::xai_login(self.jobs.clone()));
+            tokio::spawn(e::core::auth::login::xai_login(self.jobs.clone()));
         } else {
             self.notice(format!(
                 "paste the {provider} API key and press enter (esc cancels)"
@@ -879,7 +882,7 @@ impl App {
                 // Compaction runs between turns, never during one: a deferred
                 // /compact fires here, and so does the auto threshold check
                 // against real usage (window minus reserve).
-                let over = e::core::compact::should_compact(
+                let over = e::core::agent::compact::should_compact(
                     self.context_tokens,
                     self.agent.model.context_window,
                 );
@@ -919,7 +922,7 @@ impl App {
             self.notice("nothing to compact yet".into());
             return;
         }
-        let (to_summarize, kept) = e::core::compact::split(&history);
+        let (to_summarize, kept) = e::core::agent::compact::split(&history);
         if to_summarize.is_empty() {
             if !auto {
                 self.notice("recent context already fits — nothing to compact".into());
@@ -931,7 +934,7 @@ impl App {
         let model = self.agent.model.clone();
         let results = self.results.clone();
         tokio::spawn(async move {
-            let job = match e::core::compact::summarize(model, &to_summarize).await {
+            let job = match e::core::agent::compact::summarize(model, &to_summarize).await {
                 Ok(summary) => AppJob::Compacted { summary, kept },
                 Err(message) => AppJob::CompactFailed(message),
             };
@@ -1028,7 +1031,7 @@ impl App {
     /// Reload the theme from settings (auto detects the terminal).
     fn apply_theme(&mut self) {
         let detected = e::tui::background::detect_light().unwrap_or(false);
-        self.theme = e::tui::theme::resolve(&e::core::settings::theme(), detected);
+        self.theme = e::tui::theme::resolve(&e::core::config::settings::theme(), detected);
         self.transcript.invalidate();
     }
 
@@ -1069,11 +1072,11 @@ fn ago(ms: u64) -> String {
 
 fn system_prompt() -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
-    e::core::context::system_prompt(&cwd)
+    e::core::agent::context::system_prompt(&cwd)
 }
 
 fn persist_model(m: &Model) {
-    e::core::settings::set_string("model", &model::slug(m));
+    e::core::config::settings::set_string("model", &model::slug(m));
 }
 
 fn key_of(event: &KeyEvent) -> Option<Key> {
@@ -1115,7 +1118,7 @@ async fn main() -> std::io::Result<()> {
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("auth") {
-        e::core::login::auth_status();
+        e::core::auth::login::auth_status();
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("ask") {
@@ -1127,7 +1130,7 @@ async fn main() -> std::io::Result<()> {
     let _guard = RawGuard;
     execute!(std::io::stdout(), EnableBracketedPaste)?;
     let detected = e::tui::background::detect_light().unwrap_or(false);
-    let theme = e::tui::theme::resolve(&e::core::settings::theme(), detected);
+    let theme = e::tui::theme::resolve(&e::core::config::settings::theme(), detected);
 
     let (cols, rows) = terminal::size()?;
     let mut screen = Screen::new(cols, rows);
@@ -1161,14 +1164,14 @@ async fn main() -> std::io::Result<()> {
         reloading: false,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
-    if e::core::trust::status(&app.agent.cwd()).is_none() {
+    if e::core::config::trust::status(&app.agent.cwd()).is_none() {
         app.trust = Some(TrustStage { selected: 0 });
     }
     if e::core::auth::load().is_empty() {
         app.notice(
             "no provider signed in — use /login to sign in with an account or API key".into(),
         );
-    } else if let Some(wanted) = e::core::settings::get_string("model") {
+    } else if let Some(wanted) = e::core::config::settings::get_string("model") {
         let current = app.agent.model_slug();
         if wanted != current {
             app.notice(format!(
@@ -1222,7 +1225,7 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Enter => {
                                     let trusted = stage.selected == 0;
                                     app.trust = None;
-                                    if let Err(e) = e::core::trust::set(&app.agent.cwd(), trusted) {
+                                    if let Err(e) = e::core::config::trust::set(&app.agent.cwd(), trusted) {
                                         app.notice(format!("trust: {e}"));
                                     } else if !trusted {
                                         app.notice("working untrusted — project AGENTS.md ignored (/trust to allow)".into());
@@ -1428,8 +1431,8 @@ async fn main() -> std::io::Result<()> {
                     if message.contains("signed in")
                         && !e::core::auth::load().contains_key(&app.agent.model.provider)
                     {
-                        if let Some(m) = e::core::model::available().into_iter().next() {
-                            app.notice(format!("model set to {}", e::core::model::slug(&m)));
+                        if let Some(m) = e::core::provider::catalog::available().into_iter().next() {
+                            app.notice(format!("model set to {}", e::core::provider::catalog::slug(&m)));
                             app.agent.model = m;
                         }
                     }
@@ -1471,7 +1474,7 @@ async fn ask(prompt: String) -> std::io::Result<()> {
         std::process::exit(2);
     }
     let tty = e::tui::background::stdout_is_tty();
-    let theme = e::tui::theme::resolve(&e::core::settings::theme(), false);
+    let theme = e::tui::theme::resolve(&e::core::config::settings::theme(), false);
     let width = terminal::size()
         .map(|(c, _)| c as usize)
         .unwrap_or(80)

@@ -31,8 +31,8 @@ fi
 # 3. Home resolution happens in one place. HOME/E_HOME lookups outside these
 #    files are a second door into the filesystem.
 if out=$(grep -rn 'env::var("HOME")\|env::var("E_HOME")' src/ --include='*.rs' |
-    grep -v '^src/core/home.rs:' | grep -v '^src/main.rs:'); then
-  bad "HOME/E_HOME read outside core/home.rs (or main.rs's title display):"
+    grep -v '^src/core/config/home.rs:' | grep -v '^src/main.rs:'); then
+  bad "HOME/E_HOME read outside core/config/home.rs (or main.rs's title display):"
   say "$out"
 fi
 
@@ -40,9 +40,9 @@ fi
 #    path that never wipes unknown keys and chmods auth to 0600. Direct write
 #    APIs in core are limited to the files that own a format.
 if out=$(grep -rnE 'fs::write|File::create|OpenOptions' src/core/ --include='*.rs' |
-    grep -v '^src/core/store.rs:' | grep -v '^src/core/session.rs:' |
-    grep -v '^src/core/home.rs:' | grep -v '^src/core/tools/'); then
-  bad "direct file write in src/core outside store.rs/session.rs/home.rs/tools:"
+    grep -v '^src/core/config/store.rs:' | grep -v '^src/core/session.rs:' |
+    grep -v '^src/core/config/home.rs:' | grep -v '^src/core/tools/'); then
+  bad "direct file write in src/core outside config/{store,home}.rs, session.rs, tools:"
   say "$out"
 fi
 

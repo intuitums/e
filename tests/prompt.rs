@@ -1,6 +1,6 @@
 //! The system prompt: pi's structure, the settings override, layered context.
 
-use e::core::context::system_prompt;
+use e::core::agent::context::system_prompt;
 use std::path::Path;
 use std::sync::Mutex;
 

@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use crate::core::home;
+use crate::core::config::home;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Api {
@@ -243,11 +243,11 @@ fn resolve_in(models: &[Model], query: &str) -> Option<Model> {
 
 /// The scoped-model ids ("provider/id"), or None when no scope is set.
 pub fn scope() -> Option<Vec<String>> {
-    crate::core::settings::get_strings("scoped_models")
+    crate::core::config::settings::get_strings("scoped_models")
 }
 
 pub fn set_scope(ids: &[String]) {
-    crate::core::settings::set_strings("scoped_models", ids);
+    crate::core::config::settings::set_strings("scoped_models", ids);
 }
 
 /// The models ctrl+p cycles: the scope filtered to what is signed in, or —

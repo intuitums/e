@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Core restructured into domain folders (the reference tree's names):
+  `agent/`, `provider/` (with the catalog), `auth/`, `config/`,
+  `resources/` — pure moves, no behavior change.
 - `/reload`: hot-reload without restarting the session — the extension
   host restarts (picking up new, changed, or removed extensions) and the
   theme re-resolves; skills, prompts, AGENTS.md, settings, and models.json

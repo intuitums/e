@@ -9,7 +9,7 @@
 use serde::Deserialize;
 use std::path::Path;
 
-use crate::core::home;
+use crate::core::config::home;
 
 /// One-line description of each tool, for the Available tools list.
 const TOOL_SNIPPETS: &[(&str, &str)] = &[
@@ -87,7 +87,7 @@ pub fn system_prompt(cwd: &Path) -> String {
     let mut prompt = custom_prompt().unwrap_or_else(default_base);
 
     // Skills catalog (auto-invocable), like pi's skills section.
-    if let Some(catalog) = crate::core::skills::catalog() {
+    if let Some(catalog) = crate::core::resources::skills::catalog() {
         prompt.push_str(&format!("\n\n{catalog}"));
     }
 
@@ -98,7 +98,7 @@ pub fn system_prompt(cwd: &Path) -> String {
     }
     // The project's own instructions load only for trusted directories — an
     // untrusted repo must not steer the agent through its AGENTS.md.
-    if crate::core::trust::trusted(cwd) {
+    if crate::core::config::trust::trusted(cwd) {
         if let Some(rules) = read_trimmed(&cwd.join("AGENTS.md")) {
             context_files.push((cwd.join("AGENTS.md").to_string_lossy().into_owned(), rules));
         }

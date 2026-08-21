@@ -5,11 +5,13 @@
 //! atomically with owner-only permissions. Refresh happens lazily when a
 //! token is within a minute of expiry.
 
+pub mod login;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
 
-use crate::core::home;
+use crate::core::config::home;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -33,7 +35,7 @@ pub type AuthFile = BTreeMap<String, Credential>;
 /// understand are skipped here but left untouched on disk — never wiped.
 pub fn load() -> AuthFile {
     let mut out = AuthFile::new();
-    for (provider, value) in crate::core::store::read_object(&home::auth_path()) {
+    for (provider, value) in crate::core::config::store::read_object(&home::auth_path()) {
         if let Ok(cred) = serde_json::from_value::<Credential>(value) {
             out.insert(provider, cred);
         }
@@ -45,7 +47,7 @@ pub fn load() -> AuthFile {
 /// provider — including any e couldn't parse — survives.
 pub fn set(provider: &str, credential: Credential) -> io::Result<()> {
     let value = serde_json::to_value(credential).unwrap_or(serde_json::Value::Null);
-    crate::core::store::update(&home::auth_path(), 0o600, |obj| {
+    crate::core::config::store::update(&home::auth_path(), 0o600, |obj| {
         obj.insert(provider.to_string(), value);
     })
 }

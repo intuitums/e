@@ -5,10 +5,15 @@
 //! Responses-API family (see `completions.rs` / `responses.rs`).
 //! SSE framing is handled here — one small splitter, tested, shared.
 
+pub mod anthropic;
+pub mod catalog;
+pub mod completions;
+pub mod responses;
+
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use crate::core::model::{Api, Model};
+use crate::core::provider::catalog::{Api, Model};
 
 /// One requested tool invocation, as the model asked for it.
 #[derive(Clone, Debug, serde::Deserialize, Serialize)]
@@ -93,9 +98,9 @@ pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHand
     let (tx, rx) = mpsc::channel(64);
     let handle = tokio::spawn(async move {
         let result = match request.model.api {
-            Api::Completions => crate::core::completions::run(&request, &tx).await,
-            Api::Responses => crate::core::responses::run(&request, &tx).await,
-            Api::Anthropic => crate::core::anthropic::run(&request, &tx).await,
+            Api::Completions => crate::core::provider::completions::run(&request, &tx).await,
+            Api::Responses => crate::core::provider::responses::run(&request, &tx).await,
+            Api::Anthropic => crate::core::provider::anthropic::run(&request, &tx).await,
         };
         match result {
             Ok(()) => {

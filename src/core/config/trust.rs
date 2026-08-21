@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use crate::core::{home, store};
+use crate::core::config::{home, store};
 
 fn file() -> std::path::PathBuf {
     home::home().join("trust.json")

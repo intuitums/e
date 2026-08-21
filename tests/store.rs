@@ -25,7 +25,7 @@ fn settings_write_preserves_unknown_keys() {
     )
     .unwrap();
 
-    e::core::settings::set_string("effort", "low");
+    e::core::config::settings::set_string("effort", "low");
 
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(h.join("settings.json")).unwrap()).unwrap();
@@ -65,7 +65,7 @@ fn a_corrupt_file_is_quarantined_not_reset() {
     let h = home("corrupt");
     std::fs::write(h.join("settings.json"), "{ this is not json").unwrap();
 
-    e::core::settings::set_string("theme", "light");
+    e::core::config::settings::set_string("theme", "light");
 
     // The write succeeded on a fresh object…
     let after: serde_json::Value =

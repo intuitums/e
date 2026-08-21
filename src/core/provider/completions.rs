@@ -27,7 +27,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
             if auth::now_ms() + 60_000 < *expires {
                 access.clone()
             } else {
-                let fresh = crate::core::login::xai_refresh(refresh)
+                let fresh = crate::core::auth::login::xai_refresh(refresh)
                     .await
                     .map_err(|e| (e, false))?;
                 let _ = auth::set(&request.model.provider, fresh.clone());

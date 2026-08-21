@@ -7,12 +7,12 @@ use std::sync::Mutex;
 // E_HOME is process-global; serialize the tests that set it.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-fn with_models_json(json: &str) -> Vec<e::core::model::Model> {
+fn with_models_json(json: &str) -> Vec<e::core::provider::catalog::Model> {
     let dir = std::env::temp_dir().join(format!("e-models-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("models.json"), json).unwrap();
     std::env::set_var("E_HOME", &dir);
-    let catalog = e::core::model::catalog();
+    let catalog = e::core::provider::catalog::catalog();
     let _ = std::fs::remove_dir_all(&dir);
     catalog
 }
@@ -71,17 +71,17 @@ fn trust_gates_project_instructions() {
     let ws = ws.canonicalize().unwrap();
 
     // Never asked → the project's AGENTS.md stays out of the prompt.
-    assert_eq!(e::core::trust::status(&ws), None);
-    assert!(!e::core::context::system_prompt(&ws).contains("SECRET-PROJECT-RULE"));
+    assert_eq!(e::core::config::trust::status(&ws), None);
+    assert!(!e::core::agent::context::system_prompt(&ws).contains("SECRET-PROJECT-RULE"));
 
     // Declined → still out.
-    e::core::trust::set(&ws, false).unwrap();
-    assert_eq!(e::core::trust::status(&ws), Some(false));
-    assert!(!e::core::context::system_prompt(&ws).contains("SECRET-PROJECT-RULE"));
+    e::core::config::trust::set(&ws, false).unwrap();
+    assert_eq!(e::core::config::trust::status(&ws), Some(false));
+    assert!(!e::core::agent::context::system_prompt(&ws).contains("SECRET-PROJECT-RULE"));
 
     // Trusted → it loads.
-    e::core::trust::set(&ws, true).unwrap();
-    assert!(e::core::context::system_prompt(&ws).contains("SECRET-PROJECT-RULE"));
+    e::core::config::trust::set(&ws, true).unwrap();
+    assert!(e::core::agent::context::system_prompt(&ws).contains("SECRET-PROJECT-RULE"));
 
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -90,7 +90,7 @@ fn trust_gates_project_instructions() {
 fn xai_builtins_carry_their_real_windows() {
     let _lock = ENV_LOCK.lock().unwrap();
     std::env::set_var("E_HOME", std::env::temp_dir().join("e-models-none"));
-    let catalog = e::core::model::catalog();
+    let catalog = e::core::provider::catalog::catalog();
     let find = |id: &str| {
         catalog
             .iter()
@@ -101,23 +101,38 @@ fn xai_builtins_carry_their_real_windows() {
     assert_eq!(find("grok-4.6").context_window, 500_000);
     assert_eq!(find("grok-build-0.1").context_window, 256_000);
     assert_eq!(find("grok-4.6").base_url, "https://api.x.ai/v1");
-    assert_eq!(e::core::model::display_name("xai"), "xAI");
-    assert_eq!(e::core::model::display_name("openai"), "OpenAI");
-    assert_eq!(e::core::model::display_name("anthropic"), "Anthropic");
+    assert_eq!(e::core::provider::catalog::display_name("xai"), "xAI");
+    assert_eq!(e::core::provider::catalog::display_name("openai"), "OpenAI");
+    assert_eq!(
+        e::core::provider::catalog::display_name("anthropic"),
+        "Anthropic"
+    );
     let anthropic = catalog
         .iter()
         .find(|m| m.provider == "anthropic" && m.id == "claude-fable-5")
         .unwrap();
     assert_eq!(anthropic.context_window, 1_000_000);
-    assert!(matches!(anthropic.api, e::core::model::Api::Anthropic));
+    assert!(matches!(
+        anthropic.api,
+        e::core::provider::catalog::Api::Anthropic
+    ));
     let openai = catalog
         .iter()
         .find(|m| m.provider == "openai" && m.id == "gpt-5.5-pro")
         .unwrap();
     assert_eq!(openai.context_window, 1_050_000);
-    assert!(matches!(openai.api, e::core::model::Api::Responses));
-    assert_eq!(e::core::model::display_name("opencode-go"), "OpenCode Go");
-    assert_eq!(e::core::model::display_name("openai-codex"), "OpenAI Codex");
+    assert!(matches!(
+        openai.api,
+        e::core::provider::catalog::Api::Responses
+    ));
+    assert_eq!(
+        e::core::provider::catalog::display_name("opencode-go"),
+        "OpenCode Go"
+    );
+    assert_eq!(
+        e::core::provider::catalog::display_name("openai-codex"),
+        "OpenAI Codex"
+    );
 }
 
 #[test]
@@ -128,15 +143,15 @@ fn only_signed_in_providers_are_available() {
     std::env::set_var("E_HOME", &dir);
 
     // Signed out: nothing is available and nothing resolves.
-    assert!(e::core::model::available().is_empty());
-    assert!(e::core::model::resolve("grok-4.6").is_none());
+    assert!(e::core::provider::catalog::available().is_empty());
+    assert!(e::core::provider::catalog::resolve("grok-4.6").is_none());
 
     // Anthropic only: claude models appear, everyone else stays hidden.
     std::fs::write(dir.join("auth.json"), r#"{"anthropic":{"key":"k"}}"#).unwrap();
-    let available = e::core::model::available();
+    let available = e::core::provider::catalog::available();
     assert!(available.iter().all(|m| m.provider == "anthropic"));
-    assert!(e::core::model::resolve("claude-fable-5").is_some());
-    assert!(e::core::model::resolve("grok-4.6").is_none());
+    assert!(e::core::provider::catalog::resolve("claude-fable-5").is_some());
+    assert!(e::core::provider::catalog::resolve("grok-4.6").is_none());
 
     // A configured model whose provider is signed out falls back to an
     // available one instead of sticking.
@@ -145,7 +160,10 @@ fn only_signed_in_providers_are_available() {
         r#"{"model":"opencode-go/deepseek-v4-flash"}"#,
     )
     .unwrap();
-    assert_eq!(e::core::model::default_model().provider, "anthropic");
+    assert_eq!(
+        e::core::provider::catalog::default_model().provider,
+        "anthropic"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -164,19 +182,19 @@ fn cycle_pool_follows_the_scope() {
 
     // No scope: the pool is everything available.
     assert_eq!(
-        e::core::model::cycle_pool().len(),
-        e::core::model::available().len()
+        e::core::provider::catalog::cycle_pool().len(),
+        e::core::provider::catalog::available().len()
     );
 
     // A scope narrows the pool — and unavailable entries are ignored.
-    e::core::model::set_scope(&[
+    e::core::provider::catalog::set_scope(&[
         "anthropic/claude-fable-5".into(),
         "xai/grok-4.6".into(),
         "openai/gpt-5.5".into(), // openai is not signed in
     ]);
-    let pool: Vec<String> = e::core::model::cycle_pool()
+    let pool: Vec<String> = e::core::provider::catalog::cycle_pool()
         .iter()
-        .map(e::core::model::slug)
+        .map(e::core::provider::catalog::slug)
         .collect();
     assert_eq!(pool, vec!["xai/grok-4.6", "anthropic/claude-fable-5"]);
 

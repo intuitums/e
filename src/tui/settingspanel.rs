@@ -4,7 +4,7 @@
 //! set (theme) shows every file they've dropped in. `←→` change the selected
 //! row's value; `↑↓` move; framing and the hint come from the shared panel.
 
-use crate::core::settings::{self, Setting};
+use crate::core::config::settings::{self, Setting};
 use crate::tui::markdown::visible_width;
 use crate::tui::render::bold;
 use crate::tui::theme::Theme;

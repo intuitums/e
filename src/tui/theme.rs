@@ -101,7 +101,7 @@ pub fn load_bundled(light: bool) -> Result<Theme, String> {
 
 /// A user theme from `~/.e/themes/<name>.json`, if present and valid.
 pub fn load_user(name: &str) -> Option<Theme> {
-    let path = crate::core::home::themes_dir().join(format!("{name}.json"));
+    let path = crate::core::config::home::themes_dir().join(format!("{name}.json"));
     let json = std::fs::read_to_string(path).ok()?;
     Theme::from_json(&json).ok()
 }

@@ -15,7 +15,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use crate::core::home;
+use crate::core::config::home;
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()

@@ -12,7 +12,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 
 use crate::core::auth::{self, Credential};
-use crate::core::responses::{AUTH_BASE, CLIENT_ID};
+use crate::core::provider::responses::{AUTH_BASE, CLIENT_ID};
 
 const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 

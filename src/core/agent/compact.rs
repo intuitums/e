@@ -10,7 +10,7 @@
 //! checkpoint prompt. The summary seeds a fresh session file, followed by the
 //! kept messages — the old session stays fully resumable.
 
-use crate::core::model::Model;
+use crate::core::provider::catalog::Model;
 use crate::core::provider::{self, ChatMessage, Event, Request};
 
 /// Auto-compact when context tokens exceed `context_window - RESERVE_TOKENS`.

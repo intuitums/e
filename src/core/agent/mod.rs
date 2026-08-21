@@ -6,13 +6,16 @@
 //! mid-turn are drained between steps, before the next request. The whole turn
 //! emits on one ordered channel and ends with exactly one `TurnEnd`.
 
+pub mod compact;
+pub mod context;
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
-use crate::core::model::{slug, Model};
+use crate::core::provider::catalog::{slug, Model};
 use crate::core::provider::{self, ChatMessage, Event as ProviderEvent, Request, ToolCall};
 use crate::core::session::Session;
 use crate::core::tools;
@@ -129,7 +132,7 @@ impl Agent {
         if self.model.efforts.is_empty() {
             None
         } else {
-            Some(crate::core::settings::effort())
+            Some(crate::core::config::settings::effort())
         }
     }
     pub fn history_snapshot(&self) -> Vec<ChatMessage> {
@@ -167,7 +170,7 @@ impl Agent {
             &self.session,
             &self.cwd,
             &self.model,
-            ChatMessage::user(crate::core::compact::seed(summary)),
+            ChatMessage::user(crate::core::agent::compact::seed(summary)),
         );
         for message in kept {
             commit(

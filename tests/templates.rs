@@ -1,7 +1,7 @@
 //! Prompt templates. Pins the bash-style substitution contract and the
 //! frontmatter parse — the pieces a user's template actually relies on.
 
-use e::core::prompts::substitute;
+use e::core::resources::prompts::substitute;
 
 #[test]
 fn positional_and_all_args() {

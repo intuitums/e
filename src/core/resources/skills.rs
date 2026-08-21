@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use crate::core::home;
+use crate::core::config::home;
 
 pub struct Skill {
     pub name: String,

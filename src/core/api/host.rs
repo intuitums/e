@@ -19,7 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::protocol::{self, CommandResult, HookVerdict, Incoming, Manifest, ToolResult};
-use crate::core::home;
+use crate::core::config::home;
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(5);
 const HOOK_TIMEOUT: Duration = Duration::from_secs(5);

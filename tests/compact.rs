@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 
 use e::core::agent::Agent;
-use e::core::model::{Api, Model};
+use e::core::provider::catalog::{Api, Model};
 use e::core::provider::{ChatMessage, ToolCall};
 
 fn sse(body: &str) -> String {
@@ -70,7 +70,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
         ChatMessage::assistant("the bug is in line 3", Vec::new()),
     ];
 
-    let summary = e::core::compact::summarize(model.clone(), &history[..3])
+    let summary = e::core::agent::compact::summarize(model.clone(), &history[..3])
         .await
         .unwrap();
     assert_eq!(summary, "Goal: fix the parser. Next: run tests.");
@@ -109,7 +109,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
 
 #[test]
 fn threshold_is_window_minus_reserve() {
-    use e::core::compact::{should_compact, RESERVE_TOKENS};
+    use e::core::agent::compact::{should_compact, RESERVE_TOKENS};
     let window = 200_000u64;
     assert!(!should_compact(window - RESERVE_TOKENS, window));
     assert!(should_compact(window - RESERVE_TOKENS + 1, window));
@@ -123,7 +123,7 @@ fn split_spares_small_histories() {
         ChatMessage::user("hi"),
         ChatMessage::assistant("hello", Vec::new()),
     ];
-    let (to_summarize, kept) = e::core::compact::split(&history);
+    let (to_summarize, kept) = e::core::agent::compact::split(&history);
     assert!(to_summarize.is_empty());
     assert_eq!(kept.len(), 2);
 }
@@ -148,7 +148,7 @@ fn split_never_cuts_at_a_tool_result() {
         ChatMessage::tool_result("c1", "contents"),
         ChatMessage::assistant("done", Vec::new()),
     ];
-    let (to_summarize, kept) = e::core::compact::split(&history);
+    let (to_summarize, kept) = e::core::agent::compact::split(&history);
     assert!(!to_summarize.is_empty(), "the big turn must be summarized");
     assert_ne!(kept[0].role, "tool", "cut landed on a tool result");
     // The kept tail is intact and in order.

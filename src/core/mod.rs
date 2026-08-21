@@ -1,23 +1,18 @@
-//! The harness core: budgeted (DESIGN.md §3) and terminal-free.
+//! The harness — terminal-free. `agent/` is the turn loop and its satellites
+//! (compaction, the system prompt); `provider/` is the wire seam, the three
+//! dialects, and the catalog; `auth/` holds credentials and the sign-in
+//! flows; `config/` is the ~/.e surface (paths, the merge-write store,
+//! settings, trust); `resources/` loads skills and prompt templates; `api/`
+//! is the extension host; `tools/` the built-in tools.
 
 pub mod agent;
-pub mod anthropic;
 pub mod api;
 pub mod auth;
-pub mod compact;
-pub mod completions;
-pub mod context;
-pub mod home;
-pub mod login;
-pub mod model;
-pub mod output;
-pub mod prompts;
+pub mod config;
 pub mod provider;
-pub mod responses;
+pub mod resources;
 pub mod session;
-pub mod settings;
-pub mod skills;
-pub mod store;
 pub mod tools;
-pub mod trust;
+
+pub mod output;
 pub mod workspace;

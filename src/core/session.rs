@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::home;
+use crate::core::config::home;
 use crate::core::provider::ChatMessage;
 
 #[derive(Serialize, Deserialize)]

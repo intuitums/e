@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 
 use e::core::agent::{Agent, SessionEvent};
-use e::core::model::{Api, Model};
+use e::core::provider::catalog::{Api, Model};
 
 fn sse(body: &str) -> String {
     format!(

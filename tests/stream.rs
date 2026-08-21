@@ -4,7 +4,7 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
-use e::core::model::{Api, Model};
+use e::core::provider::catalog::{Api, Model};
 use e::core::provider::{stream, ChatMessage, Event, Request, SseSplitter};
 
 #[test]

@@ -21,22 +21,27 @@ test.
 
 ```
 src/core/    the harness, terminal-free
-  agent.rs        the turn loop: request → stream → run tools → repeat; steering
-  provider.rs     the seam — one Request, one Event stream, the SSE splitter
-  completions.rs · responses.rs · anthropic.rs    the three wire dialects
-  tools/          read · write · edit · ls · grep · bash · skill
+  agent/          the turn loop (mod.rs): request → stream → run tools → repeat;
+                  steering · compact.rs (threshold, keep-recent cut, summarize)
+                  · context.rs (system prompt, AGENTS.md, skills catalog)
+  provider/       the seam (mod.rs) — one Request, one Event stream, the SSE
+                  splitter · completions.rs · responses.rs · anthropic.rs (the
+                  three wire dialects) · catalog.rs (models, availability, scope)
+  auth/           credentials (mod.rs) · login.rs (OAuth, device-code, API keys)
+  config/         the ~/.e surface: home.rs (paths) · store.rs (merge-write)
+                  · settings.rs · trust.rs (per-directory trust)
+  resources/      skills.rs · prompts.rs (/name templates)
   api/            the extension host: subprocesses over a JSONL line
                   protocol (docs/extensions.md) — tools, commands, hooks
-  compact.rs      compaction: threshold, keep-recent cut, summarize
-  prompts.rs      /name templates from ~/.e/prompts
-  trust.rs        per-directory trust gate for project AGENTS.md
-  session.rs · context.rs · model.rs · auth.rs · login.rs · settings.rs · skills.rs
+  tools/          read · write · edit · ls · grep · bash · skill
+  session.rs · output.rs · workspace.rs
 src/tui/     the frontend
   render.rs       SGR primitives          screen.rs      the diffing painter
   markdown.rs     md → styled lines       transcript.rs  blocks + gap policy
   highlight.rs    code tinting            composer.rs    the input editor
   panel.rs        the shared footer frame (picker + settings both use it)
-  menu.rs · settingspanel.rs · authpanel.rs · statusline.rs · theme.rs · background.rs
+  menu.rs · settingspanel.rs · authpanel.rs · trustpanel.rs · statusline.rs
+  · theme.rs · background.rs
 src/main.rs  the frame loop, key handling, command dispatch
 ```
 
