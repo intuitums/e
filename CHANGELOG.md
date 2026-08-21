@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.1 — 2026-08-21
+
 - Release notes now carry the version's changelog section and install
   instructions; `e docs models` documents env-var credentials and the
   live catalog; ROADMAP records the 0.4 line.
