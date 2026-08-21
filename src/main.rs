@@ -39,6 +39,17 @@ struct ActiveTurn {
     reasoning: Option<usize>,
 }
 
+/// The reference's compact command-output row limit.
+const PREVIEW_ROWS: usize = 4;
+
+/// The ctrl+o full-detail screen: one stored output at a time, scrollable,
+/// ←/→ switching between outputs — the reference surface, e-sized.
+struct Viewer {
+    /// Index into App::outputs.
+    index: usize,
+    scroll: usize,
+}
+
 /// Asynchronous work landing back in the frame loop.
 enum AppJob {
     /// A line for the transcript (login progress, extension notify…).
@@ -100,9 +111,48 @@ struct App {
     shell_block: Option<usize>,
     /// A /reload is restarting the extension host; prompts are held.
     reloading: bool,
+    /// Full tool outputs for the ctrl+o viewer: (title, content), newest
+    /// last, capped.
+    outputs: Vec<(String, String)>,
+    /// The ctrl+o full-detail viewer, when open.
+    viewer: Option<Viewer>,
 }
 
 impl App {
+    /// The full-detail screen: title, a scroll window, the reference's
+    /// footer wording.
+    fn viewer_frame(&self, width: usize, height: usize) -> Vec<String> {
+        let Some(viewer) = &self.viewer else {
+            return Vec::new();
+        };
+        let Some((title, content)) = self.outputs.get(viewer.index) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        rows.push(format!(
+            "{}{}",
+            e::tui::render::bold(title),
+            self.theme.fg(
+                "muted",
+                &format!("  ({}/{})", viewer.index + 1, self.outputs.len())
+            )
+        ));
+        rows.push(String::new());
+        let body: Vec<&str> = content.lines().collect();
+        let window = height.saturating_sub(4).max(1);
+        for line in body.iter().skip(viewer.scroll).take(window) {
+            rows.push(e::tui::markdown::clip_styled(line, width));
+        }
+        while rows.len() < height.saturating_sub(1) {
+            rows.push(String::new());
+        }
+        rows.push(self.theme.fg(
+            "statusline",
+            "Full detail · ←/→ switch · ctrl o close · ↑↓ scroll · Esc close",
+        ));
+        rows
+    }
+
     fn frame(&mut self, width: usize) -> Vec<String> {
         let mut lines = self.transcript.render(&self.theme, width);
         if let Some(s) = &self.active {
@@ -597,6 +647,7 @@ impl App {
     }
 
     fn submit(&mut self, text: String) {
+        let text = self.editor.expand_pastes(&text);
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() {
             return;
@@ -840,16 +891,37 @@ impl App {
                 id,
                 summary,
                 is_error,
+                content,
             } => {
+                let mut title = None;
                 if let Some(s) = &mut self.active {
                     if let Some(&idx) = s.tool_blocks.get(&id) {
                         if let Some(b) = self.transcript.blocks.get_mut(idx) {
                             b.done = true;
                             b.is_error = is_error;
                             b.result = Some(summary);
+                            // The reference shows command output beneath the
+                            // row: the first lines, then an elision row.
+                            if b.text == "Ran" && !content.trim().is_empty() {
+                                let lines: Vec<&str> = content.lines().collect();
+                                b.preview = lines
+                                    .iter()
+                                    .take(PREVIEW_ROWS)
+                                    .map(|l| l.to_string())
+                                    .collect();
+                                b.more = lines.len().saturating_sub(PREVIEW_ROWS);
+                            }
+                            title = Some(match &b.detail {
+                                Some(t) if !t.is_empty() => format!("{} {}", b.text, t),
+                                _ => b.text.clone(),
+                            });
                             b.touch();
                         }
                     }
+                }
+                // Every non-empty tool output feeds the ctrl+o viewer.
+                if !content.trim().is_empty() {
+                    self.remember_output(title.unwrap_or_else(|| "tool output".into()), content);
                 }
             }
             SessionEvent::Usage {
@@ -875,6 +947,17 @@ impl App {
             }
             SessionEvent::TurnEnd { aborted } => {
                 self.agent.on_turn_end();
+                if aborted {
+                    // A row still running when the turn was interrupted gets
+                    // the reference's cancelled state — it must not read as
+                    // "still running" in the scrollback forever.
+                    for block in &mut self.transcript.blocks {
+                        if block.kind == Kind::Tool && !block.done {
+                            block.cancelled = true;
+                            block.touch();
+                        }
+                    }
+                }
                 // The reference collapse: finished tool runs fold into their
                 // tallied group once the turn is over.
                 self.transcript.collapse_tools();
@@ -991,6 +1074,13 @@ impl App {
                     });
             let _ = results.send(AppJob::Shell { cmd, output }).await;
         });
+    }
+
+    fn remember_output(&mut self, title: String, content: String) {
+        self.outputs.push((title, content));
+        if self.outputs.len() > 50 {
+            self.outputs.remove(0);
+        }
     }
 
     /// /reload, the reference behavior: refresh what a session caches. In e
@@ -1238,6 +1328,8 @@ e -v, --version"
         trust: None,
         shell_block: None,
         reloading: false,
+        outputs: Vec::new(),
+        viewer: None,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
     if e::core::config::trust::status(&app.agent.cwd()).is_none() {
@@ -1295,15 +1387,61 @@ e -v, --version"
                 let Some(Ok(event)) = maybe else { break };
                 match event {
                     TermEvent::Paste(text) => {
-                        // A paste is one unit: insert literally, never triggering
-                        // a picker or submit mid-block.
-                        app.editor.insert_str(&text.replace('\r', "\n"));
+                        // A paste is one unit; long or multiline pastes become
+                        // a placeholder token (the reference behavior) that
+                        // expands back on submit.
+                        app.editor.insert_paste(&text.replace('\r', "\n"));
                         app.sync_menu();
                     }
                     TermEvent::Resize(c, r) => screen.resize(c, r),
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                        if let Some(stage) = &mut app.trust {
+                        if app.viewer.is_some() {
+                            let close = k.code == KeyCode::Esc
+                                || (ctrl && k.code == KeyCode::Char('o'));
+                            if close {
+                                app.viewer = None;
+                            } else if let Some(viewer) = &mut app.viewer {
+                                let total = app
+                                    .outputs
+                                    .get(viewer.index)
+                                    .map(|(_, c)| c.lines().count())
+                                    .unwrap_or(0);
+                                match k.code {
+                                    KeyCode::Up => viewer.scroll = viewer.scroll.saturating_sub(1),
+                                    KeyCode::Down => {
+                                        viewer.scroll = (viewer.scroll + 1)
+                                            .min(total.saturating_sub(1))
+                                    }
+                                    KeyCode::PageUp => {
+                                        viewer.scroll = viewer.scroll.saturating_sub(20)
+                                    }
+                                    KeyCode::PageDown => {
+                                        viewer.scroll = (viewer.scroll + 20)
+                                            .min(total.saturating_sub(1))
+                                    }
+                                    KeyCode::Left => {
+                                        viewer.index = viewer.index.saturating_sub(1);
+                                        viewer.scroll = 0;
+                                    }
+                                    KeyCode::Right => {
+                                        viewer.index = (viewer.index + 1)
+                                            .min(app.outputs.len().saturating_sub(1));
+                                        viewer.scroll = 0;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        } else if ctrl && k.code == KeyCode::Char('o') {
+                            if app.outputs.is_empty() {
+                                app.notice("no tool output to view yet".into());
+                            } else {
+                                app.viewer = Some(Viewer {
+                                    index: app.outputs.len() - 1,
+                                    scroll: 0,
+                                });
+                            }
+                        } else if let Some(stage) = &mut app.trust {
                             match k.code {
                                 KeyCode::Up | KeyCode::Down => stage.selected = 1 - stage.selected,
                                 KeyCode::Enter => {
@@ -1497,6 +1635,9 @@ e -v, --version"
                                 block.touch();
                             }
                         }
+                        if !output.content.trim().is_empty() {
+                            app.remember_output(format!("$ {cmd}"), output.content.clone());
+                        }
                         app.agent.record_user(format!(
                             "I ran `{cmd}` in my shell. Output:\n```\n{}\n```",
                             output.content
@@ -1543,7 +1684,11 @@ e -v, --version"
                 }
             }
         }
-        let frame = app.frame(screen.cols as usize);
+        let frame = if app.viewer.is_some() {
+            app.viewer_frame(screen.cols as usize, screen.rows as usize)
+        } else {
+            app.frame(screen.cols as usize)
+        };
         screen.paint(&frame)?;
         if app.should_quit {
             break;

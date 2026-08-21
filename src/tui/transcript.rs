@@ -36,6 +36,12 @@ pub struct Block {
     pub result: Option<String>,
     /// ToolGroup children, plain "Verb target" per call, in order.
     pub children: Vec<String>,
+    /// The turn was interrupted while this tool ran — the reference's `■`.
+    pub cancelled: bool,
+    /// Command rows: the first output lines, shown as `│` rows beneath.
+    pub preview: Vec<String>,
+    /// Output lines beyond the preview (drives the elision row).
+    pub more: usize,
     cache: Option<(usize, Vec<String>)>,
 }
 
@@ -49,6 +55,9 @@ impl Block {
             detail: None,
             result: None,
             children: Vec::new(),
+            cancelled: false,
+            preview: Vec::new(),
+            more: 0,
             cache: None,
         }
     }
@@ -110,7 +119,9 @@ impl Block {
                 // The reference shape: a finished row is just the row — no
                 // "(done)". Failure turns the marker to the error token and
                 // adds a `│ <outcome>` continuation beneath.
-                let marker = if !self.done {
+                let marker = if self.cancelled {
+                    theme.fg("warning", "■")
+                } else if !self.done {
                     dim("●")
                 } else if self.is_error {
                     theme.fg("error", "●")
@@ -123,9 +134,30 @@ impl Block {
                     }
                     _ => format!("  {marker} {}", self.text),
                 }];
-                if self.done && self.is_error {
-                    if let Some(result) = &self.result {
-                        rows.push(format!("    {}", theme.fg("muted", &format!("│ {result}"))));
+                if self.done {
+                    // The reference's command-output shape: the first lines
+                    // as `│` rows, an elision row for the rest, and an exit
+                    // line ("│ exit code 7") when the command failed.
+                    for line in &self.preview {
+                        rows.push(format!("    {}", theme.fg("muted", &format!("│ {line}"))));
+                    }
+                    if self.more > 0 {
+                        rows.push(format!(
+                            "    {}",
+                            theme.fg(
+                                "muted",
+                                &format!("│ … {} lines more (ctrl o to view)", self.more)
+                            )
+                        ));
+                    }
+                    if self.is_error {
+                        if let Some(result) = &self.result {
+                            let shown = match result.strip_prefix("exit ") {
+                                Some(code) => format!("exit code {code}"),
+                                None => result.clone(),
+                            };
+                            rows.push(format!("    {}", theme.fg("muted", &format!("│ {shown}"))));
+                        }
                     }
                 }
                 rows
@@ -193,9 +225,12 @@ fn flush_run(out: &mut Vec<Block>, run: &mut Vec<Block>) {
     }
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut failed = 0usize;
+    let mut cancelled = 0usize;
     let mut children = Vec::with_capacity(run.len());
     for block in run.iter() {
-        if block.is_error {
+        if block.cancelled {
+            cancelled += 1;
+        } else if block.is_error {
             failed += 1;
         }
         let verb = block.text.clone();
@@ -219,6 +254,9 @@ fn flush_run(out: &mut Vec<Block>, run: &mut Vec<Block>) {
     }
     if failed > 0 {
         header.push_str(&format!(" · {failed} failed"));
+    }
+    if cancelled > 0 {
+        header.push_str(&format!(" · {cancelled} cancelled"));
     }
     let mut group = Block::new(Kind::ToolGroup, header);
     group.done = true;
@@ -284,7 +322,7 @@ impl Transcript {
         let mut out: Vec<Block> = Vec::with_capacity(self.blocks.len());
         let mut run: Vec<Block> = Vec::new();
         for block in self.blocks.drain(..) {
-            if block.kind == Kind::Tool && block.done {
+            if block.kind == Kind::Tool && (block.done || block.cancelled) {
                 run.push(block);
                 continue;
             }

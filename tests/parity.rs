@@ -193,7 +193,8 @@ fn tool_rows_carry_no_done_suffix() {
     failed.result = Some("exit 7".into());
     let rows = failed.lines_for_test(&theme, 80);
     assert_eq!(rows.len(), 2);
-    assert!(rows[1].contains("│ exit 7"));
+    // The reference wording, exactly: "exit code 7", not "exit 7".
+    assert!(rows[1].contains("│ exit code 7"));
 }
 
 #[test]
@@ -284,4 +285,54 @@ fn finished_tool_runs_collapse_to_the_reference_group() {
     t3.push(single);
     t3.collapse_tools();
     assert_eq!(t3.blocks[0].kind, Kind::Tool);
+}
+
+#[test]
+fn command_rows_preview_their_output() {
+    use e::tui::transcript::{Block, Kind};
+    let theme = e::tui::theme::resolve("dark", false);
+    let mut block = Block::new(Kind::Tool, "Ran");
+    block.detail = Some("printf lines".into());
+    block.done = true;
+    block.is_error = true;
+    block.result = Some("exit 7".into());
+    block.preview = vec![
+        "line-1".into(),
+        "line-2".into(),
+        "line-3".into(),
+        "line-4".into(),
+    ];
+    block.more = 2;
+    let rows = block.lines_for_test(&theme, 80);
+    // The reference shape: row, four │ lines, the elision, the exit line.
+    assert_eq!(rows.len(), 7);
+    assert!(rows[1].contains("│ line-1"));
+    assert!(rows[4].contains("│ line-4"));
+    assert!(rows[5].contains("│ … 2 lines more (ctrl o to view)"));
+    assert!(rows[6].contains("│ exit code 7"));
+}
+
+#[test]
+fn interrupted_tools_wear_the_cancelled_glyph() {
+    use e::tui::transcript::{Block, Kind, Transcript};
+    let theme = e::tui::theme::resolve("dark", false);
+    let mut block = Block::new(Kind::Tool, "Ran");
+    block.detail = Some("sleep 100".into());
+    block.cancelled = true;
+    let rows = block.lines_for_test(&theme, 80);
+    assert!(rows[0].contains("■"), "cancelled marker missing");
+    assert!(!rows[0].contains("●"));
+
+    // Groups tally cancellations, the reference wording.
+    let mut t = Transcript::default();
+    let mut done = Block::new(Kind::Tool, "Read");
+    done.done = true;
+    t.push(done);
+    t.push(block);
+    t.collapse_tools();
+    assert!(
+        t.blocks[0].text.ends_with("· 1 cancelled"),
+        "{}",
+        t.blocks[0].text
+    );
 }

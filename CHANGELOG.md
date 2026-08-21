@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The rest of the reference tool surfaces: command rows preview their
+  output beneath the row (first four `│` lines, a `│ … N lines more
+  (ctrl o to view)` elision, `│ exit code N` on failure); ctrl+o opens
+  the full-detail viewer (scroll, ←/→ between outputs, the reference's
+  footer wording) fed by every tool and `!` output; long or multiline
+  pastes become `[Pasted text #N, L lines]` placeholders that expand on
+  submit; and a tool interrupted mid-run wears the `■` cancelled glyph,
+  tallied as `· N cancelled` in collapsed groups.
 - Finished tool runs collapse into the reference group when the turn
   ends: a tallied header (`● 3 tool calls · 2 read · 1 command · 1
   failed`, with the reference's own pluralization) over `├` children and
