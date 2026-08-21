@@ -41,7 +41,7 @@ pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHand
     let handle = tokio::spawn(async move {
         let result = match request.model.api {
             Api::Completions => crate::core::completions::run(&request, &tx).await,
-            Api::CodexResponses => crate::core::codex::run(&request, &tx).await,
+            Api::Responses => crate::core::responses::run(&request, &tx).await,
         };
         match result {
             Ok(()) => {

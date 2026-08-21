@@ -1,6 +1,10 @@
-//! The ChatGPT-backend responses dialect: OAuth bearer + account-id header,
-//! `POST {base}/codex/responses`, responses-API SSE events, lazy token
-//! refresh against the public OAuth token endpoint.
+//! The Responses-API dialect.
+//!
+//! One dialect, more than one deployment: the ChatGPT backend mounts it at
+//! `{base}/codex/responses` behind a subscription OAuth (bearer + account-id
+//! header, lazy refresh); other providers serve the same event grammar at
+//! `{base}/responses` behind a plain key. The provider id — not this module —
+//! names the account type.
 
 use futures::StreamExt;
 use serde_json::json;

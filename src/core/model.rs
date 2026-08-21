@@ -12,7 +12,7 @@ pub enum Api {
     /// OpenAI chat-completions dialect (`/chat/completions`, SSE deltas).
     Completions,
     /// The responses dialect behind the ChatGPT backend (OAuth + account id).
-    CodexResponses,
+    Responses,
 }
 
 #[derive(Clone, Debug)]
@@ -45,7 +45,7 @@ pub fn builtin_catalog() -> Vec<Model> {
         provider: "openai-codex".into(),
         id: id.into(),
         base_url: CODEX_BASE.into(),
-        api: Api::CodexResponses,
+        api: Api::Responses,
         efforts: EFFORTS,
     };
     vec![
@@ -89,7 +89,7 @@ pub fn catalog() -> Vec<Model> {
         if let Ok(file) = serde_json::from_str::<ModelsFile>(&json) {
             for (provider, entry) in file.providers {
                 let api = match entry.api.as_deref() {
-                    Some("codex-responses") => Api::CodexResponses,
+                    Some("codex-responses") => Api::Responses,
                     _ => Api::Completions,
                 };
                 let base = entry.base_url.clone().unwrap_or_else(|| OPENCODE_BASE.into());

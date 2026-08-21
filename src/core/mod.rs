@@ -2,7 +2,7 @@
 
 pub mod agent;
 pub mod auth;
-pub mod codex;
+pub mod responses;
 pub mod completions;
 pub mod home;
 pub mod login;
