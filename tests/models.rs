@@ -24,9 +24,22 @@ fn models_json_windows_are_per_model() {
         r#"{"providers":{"local":{"base_url":"http://localhost:9999","context_window":64000,
             "models":["small", {"id":"big","context_window":1000000}]}}}"#,
     );
-    let find = |id: &str| catalog.iter().find(|m| m.provider == "local" && m.id == id).unwrap();
-    assert_eq!(find("small").context_window, 64_000, "provider default applies");
-    assert_eq!(find("big").context_window, 1_000_000, "per-model wins over provider default");
+    let find = |id: &str| {
+        catalog
+            .iter()
+            .find(|m| m.provider == "local" && m.id == id)
+            .unwrap()
+    };
+    assert_eq!(
+        find("small").context_window,
+        64_000,
+        "provider default applies"
+    );
+    assert_eq!(
+        find("big").context_window,
+        1_000_000,
+        "per-model wins over provider default"
+    );
 }
 
 #[test]
@@ -39,6 +52,10 @@ fn models_json_overrides_a_builtin() {
         .iter()
         .filter(|m| m.provider == "opencode-go" && m.id == "kimi-k3")
         .collect();
-    assert_eq!(matches.len(), 1, "the file entry replaces the built-in, not duplicates it");
+    assert_eq!(
+        matches.len(),
+        1,
+        "the file entry replaces the built-in, not duplicates it"
+    );
     assert_eq!(matches[0].context_window, 131_072);
 }

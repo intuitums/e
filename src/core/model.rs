@@ -129,9 +129,7 @@ pub fn catalog() -> Vec<Model> {
                         base_url: base.clone(),
                         api,
                         efforts: &[],
-                        context_window: window
-                            .or(entry.context_window)
-                            .unwrap_or(200_000),
+                        context_window: window.or(entry.context_window).unwrap_or(200_000),
                     };
                     models.retain(|m| !(m.provider == resolved.provider && m.id == resolved.id));
                     models.push(resolved);
