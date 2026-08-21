@@ -200,6 +200,13 @@ fn remote_overlay(models: &mut Vec<Model>) {
 /// the standard `GET {base}/models`. Silent on failure — an offline launch
 /// must not care. Skips providers refreshed within the freshness window.
 pub async fn refresh_remote() {
+    refresh_remote_within(REMOTE_REFRESH_MS).await
+}
+
+/// Refresh providers whose cache is older than `max_age_ms` — the /models
+/// picker calls this with a short window so a gateway's brand-new model
+/// appears the moment someone looks for it.
+pub async fn refresh_remote_within(max_age_ms: u64) {
     let auth = crate::core::auth::load();
     let now = crate::core::auth::now_ms();
     let stored = crate::core::config::store::read_object(&store_path());
@@ -215,7 +222,7 @@ pub async fn refresh_remote() {
             .get(&provider)
             .and_then(|e| e.get("checked_at"))
             .and_then(|v| v.as_u64())
-            .map(|at| now.saturating_sub(at) < REMOTE_REFRESH_MS)
+            .map(|at| now.saturating_sub(at) < max_age_ms)
             .unwrap_or(false);
         if fresh {
             continue;

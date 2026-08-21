@@ -72,6 +72,8 @@ enum AppJob {
     Reloaded(std::sync::Arc<e::core::api::ExtensionHost>),
     /// The background updater installed a new version.
     Updated(String),
+    /// A provider model-list refresh finished; rebuild an open picker.
+    CatalogRefreshed,
 }
 
 struct App {
@@ -433,6 +435,20 @@ impl App {
     }
 
     fn open_model_menu(&mut self) {
+        // Instant discovery where it matters: show the cached list now, ask
+        // the gateways in the background (60s floor), and pop new rows into
+        // the open picker when the answer lands.
+        let results = self.results.clone();
+        tokio::spawn(async move {
+            e::core::provider::catalog::refresh_remote_within(60_000).await;
+            let _ = results.send(AppJob::CatalogRefreshed).await;
+        });
+        self.build_model_menu();
+    }
+
+    /// The picker itself, from the current catalog — no refresh side effects,
+    /// so the rebuild-on-refresh arm cannot loop.
+    fn build_model_menu(&mut self) {
         let available = model::available();
         if available.is_empty() {
             self.notice("no models available — use /login to sign in to a provider".into());
@@ -1649,6 +1665,20 @@ e -v, --version"
                         }
                     }
                     Some(AppJob::CompactFailed(_)) => {}
+                    Some(AppJob::CatalogRefreshed) => {
+                        if let Some(menu) = &app.menu {
+                            if menu.kind == MenuKind::Models {
+                                let selected =
+                                    menu.current().map(|item| item.value.clone());
+                                app.build_model_menu();
+                                if let (Some(menu), Some(value)) =
+                                    (&mut app.menu, selected)
+                                {
+                                    menu.select_value(&value);
+                                }
+                            }
+                        }
+                    }
                     Some(AppJob::Updated(version)) => {
                         app.notice(format!(
                             "e {version} installed — /reload to switch to it now"

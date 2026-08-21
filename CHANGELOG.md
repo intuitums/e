@@ -6,8 +6,10 @@
   provider's own `GET /models` is fetched in the background (at launch
   and after each sign-in), cached in `~/.e/models-store.json` with a
   four-hour freshness window — a model a gateway ships today appears in
-  `/models` today, no e release involved. Built-ins and `models.json`
-  always win a name clash; failures are silent.
+  `/models` today, no e release involved — and opening the picker asks
+  the gateways again (60-second floor), popping new rows into the open
+  picker the moment the answer lands. Built-ins and `models.json` always
+  win a name clash; failures are silent.
 - OpenCode Go and OpenCode Zen are two providers, as they actually are:
   `opencode-go` (the Go plan gateway, zen/go/v1) and `opencode` (the Zen
   gateway, zen/v1), each with its own sign-in row and models.
