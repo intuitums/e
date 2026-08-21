@@ -128,6 +128,14 @@ static SPECS: &[Spec] = &[
 ];
 
 /// Execute a named tool. `cwd` is the workspace root.
+/// The `!` passthrough's entry: run a shell command through the bash tool
+/// without hand-building its JSON arguments — the arg name lives in exactly
+/// one place (the schema), so a caller can't drift from it again.
+pub fn run_shell(command: &str, cwd: &Path) -> ToolOutput {
+    let args = serde_json::json!({ "command": command }).to_string();
+    run("bash", &args, cwd)
+}
+
 pub fn run(name: &str, arguments: &str, cwd: &Path) -> ToolOutput {
     let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
     match SPECS.iter().find(|s| s.name == name) {

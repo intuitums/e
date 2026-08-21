@@ -40,3 +40,13 @@ fn timeout_kills_spawned_children_too() {
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(out.is_error);
 }
+
+#[test]
+fn run_shell_reaches_the_tool() {
+    // The typed entry the `!` passthrough uses — pins that it actually
+    // executes (the stringly version once sent the wrong arg name and every
+    // `!` command errored).
+    let out = tools::run_shell("printf typed-entry-ok", std::path::Path::new("."));
+    assert!(!out.is_error);
+    assert_eq!(out.content, "typed-entry-ok");
+}

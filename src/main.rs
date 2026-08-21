@@ -958,9 +958,9 @@ impl App {
         let results = self.results.clone();
         let cwd = self.agent.cwd();
         tokio::spawn(async move {
-            let args = serde_json::json!({ "command": cmd }).to_string();
+            let shell_cmd = cmd.clone();
             let output =
-                tokio::task::spawn_blocking(move || e::core::tools::run("bash", &args, &cwd))
+                tokio::task::spawn_blocking(move || e::core::tools::run_shell(&shell_cmd, &cwd))
                     .await
                     .unwrap_or(e::core::tools::ToolOutput {
                         content: "shell command panicked".into(),
