@@ -82,3 +82,63 @@ async fn completions_stream_parses_deltas_and_usage() {
     assert_eq!(reasoning, "hmm");
     assert_eq!(usage, Some((12, 3, 4)));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_folds_provider_events_into_one_session_stream() {
+    use e::core::agent::{Agent, SessionEvent};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let home = std::env::temp_dir().join(format!("e-test-agent-{port}"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 8192];
+        let _ = sock.read(&mut buffer);
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        sock.write_all(response.as_bytes()).unwrap();
+    });
+
+    let model = Model {
+        provider: "mock".into(),
+        id: "m".into(),
+        base_url: format!("http://127.0.0.1:{port}"),
+        api: Api::Completions,
+        efforts: &[],
+    };
+    let (mut agent, mut rx) = Agent::new(model);
+    agent.prompt("hi".into(), "sys".into());
+
+    // The contract: TurnStart first, TurnEnd last, exactly once each.
+    let mut kinds = Vec::new();
+    while let Some(event) = rx.recv().await {
+        let done = matches!(event, SessionEvent::TurnEnd { .. });
+        kinds.push(match event {
+            SessionEvent::TurnStart => "start",
+            SessionEvent::TextDelta(_) => "text",
+            SessionEvent::Usage { .. } => "usage",
+            SessionEvent::TurnEnd { .. } => "end",
+            SessionEvent::ReasoningDelta(_) => "reasoning",
+            SessionEvent::Error(_) => "error",
+        });
+        if done {
+            break;
+        }
+    }
+    assert_eq!(kinds.first(), Some(&"start"));
+    assert_eq!(kinds.last(), Some(&"end"));
+    assert!(kinds.contains(&"text") && kinds.contains(&"usage"));
+    assert!(!kinds.contains(&"error"));
+}

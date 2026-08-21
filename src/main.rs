@@ -10,31 +10,30 @@ use futures::StreamExt;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
+use e::core::agent::{Agent, SessionEvent};
 use e::core::model::{self, Model};
 use e::core::output::{format_duration, format_tokens};
-use e::core::provider::{self, ChatMessage, Event as ProviderEvent};
 use e::tui::composer::{Editor, EditorResult, Key};
 use e::tui::statusline::{statusline, StatusData, Turn};
 use e::tui::theme::{load_bundled, Theme};
 use e::tui::transcript::{Block, Kind, Transcript};
 use e::tui::screen::Screen;
 
-struct Streaming {
-    rx: tokio::sync::mpsc::Receiver<ProviderEvent>,
-    handle: tokio::task::JoinHandle<()>,
+/// Per-turn frontend bookkeeping; the engine state lives in the Agent.
+struct ActiveTurn {
     block: usize,
     text: String,
     turn: Turn,
     started: Instant,
+    error: Option<String>,
 }
 
 struct App {
     theme: Theme,
     transcript: Transcript,
     editor: Editor,
-    model: Model,
-    history: Vec<ChatMessage>,
-    streaming: Option<Streaming>,
+    agent: Agent,
+    active: Option<ActiveTurn>,
     overlay: Option<String>,
     armed_at: Option<Instant>,
     should_quit: bool,
@@ -43,15 +42,14 @@ struct App {
 impl App {
     fn frame(&mut self, width: usize) -> Vec<String> {
         let mut lines = self.transcript.render(&self.theme, width);
-        if let Some(s) = &self.streaming {
+        if let Some(s) = &self.active {
             lines.push(String::new());
             lines.push(format!(" • {}", s.turn.label(s.started.elapsed().as_secs())));
         }
         lines.extend(self.editor.render(&self.theme, width));
-        let effort = if self.model.efforts.is_empty() { None } else { Some("high".to_string()) };
         let data = StatusData {
-            model: model::slug(&self.model),
-            effort,
+            model: self.agent.model_slug(),
+            effort: self.agent.effort(),
             session_name: None,
             context_percent: None,
             queued: 0,
@@ -71,11 +69,11 @@ impl App {
         if let Some(rest) = trimmed.strip_prefix("/model") {
             let query = rest.trim();
             if query.is_empty() {
-                self.notice(format!("model: {}", model::slug(&self.model)));
+                self.notice(format!("model: {}", self.agent.model_slug()));
             } else if let Some(found) = model::resolve(query) {
                 persist_model(&found);
                 self.notice(format!("model set to {}", model::slug(&found)));
-                self.model = found;
+                self.agent.model = found;
             } else {
                 self.notice(format!("no model matches {query:?} — see `e models`"));
             }
@@ -85,7 +83,7 @@ impl App {
             "/quit" | "/exit" => self.should_quit = true,
             "/version" => self.notice(format!("e {}", e::VERSION)),
             "/new" | "/clear" => {
-                self.history.clear();
+                self.agent.clear();
                 self.transcript.clear();
                 self.transcript.push(Block::new(Kind::Banner, e::VERSION));
             }
@@ -97,79 +95,71 @@ impl App {
     }
 
     fn prompt(&mut self, text: String) {
-        if self.streaming.is_some() {
+        if self.agent.is_streaming() {
             self.notice("a turn is already streaming — esc to interrupt first".into());
             return;
         }
         self.transcript.push(Block::new(Kind::User, text.clone()));
-        self.history.push(ChatMessage { role: "user".into(), content: text });
-
-        let block = self.transcript.push(Block::new(Kind::Assistant, ""));
-        let effort = if self.model.efforts.is_empty() { None } else { Some("high".to_string()) };
-        let (rx, handle) = provider::stream(provider::Request {
-            model: self.model.clone(),
-            system: system_prompt(),
-            messages: self.history.clone(),
-            effort,
-        });
-        self.streaming = Some(Streaming {
-            rx,
-            handle,
-            block,
-            text: String::new(),
-            turn: Turn::new(),
-            started: Instant::now(),
-        });
+        self.agent.prompt(text, system_prompt());
     }
 
-    fn on_provider_event(&mut self, event: ProviderEvent) {
-        let Some(s) = &mut self.streaming else { return };
+    /// The single session stream, in order. Turn bookkeeping hangs off it.
+    fn on_session_event(&mut self, event: SessionEvent) {
         match event {
-            ProviderEvent::TextDelta(delta) => {
-                s.text.push_str(&delta);
-                let idx = s.block;
-                let text = s.text.clone();
-                if let Some(b) = self.transcript.blocks.get_mut(idx) {
-                    b.text = text;
-                    b.touch();
+            SessionEvent::TurnStart => {
+                let block = self.transcript.push(Block::new(Kind::Assistant, ""));
+                self.active = Some(ActiveTurn {
+                    block,
+                    text: String::new(),
+                    turn: Turn::new(),
+                    started: Instant::now(),
+                    error: None,
+                });
+            }
+            SessionEvent::TextDelta(delta) => {
+                if let Some(s) = &mut self.active {
+                    s.text.push_str(&delta);
+                    let (idx, text) = (s.block, s.text.clone());
+                    if let Some(b) = self.transcript.blocks.get_mut(idx) {
+                        b.text = text;
+                        b.touch();
+                    }
                 }
             }
-            ProviderEvent::ReasoningDelta(_) => {
+            SessionEvent::ReasoningDelta(_) => {
                 // Reasoning stays out of the transcript; the indicator says Thinking.
             }
-            ProviderEvent::Usage { input, output, cache_read } => {
-                s.turn.input += input + cache_read;
-                s.turn.output += output;
+            SessionEvent::Usage { input, output, cache_read } => {
+                if let Some(s) = &mut self.active {
+                    s.turn.input += input + cache_read;
+                    s.turn.output += output;
+                }
             }
-            ProviderEvent::Done => self.finish_turn(None),
-            ProviderEvent::Error(message) => self.finish_turn(Some(message)),
+            SessionEvent::Error(message) => {
+                if let Some(s) = &mut self.active {
+                    s.error = Some(message);
+                } else {
+                    self.notice(format!("error: {message}"));
+                }
+            }
+            SessionEvent::TurnEnd { aborted } => {
+                self.agent.on_turn_end();
+                let Some(s) = self.active.take() else { return };
+                let tokens = if s.turn.input == 0 && s.turn.output == 0 {
+                    String::new()
+                } else {
+                    format!(" (↑{} ↓{})", format_tokens(s.turn.input), format_tokens(s.turn.output))
+                };
+                let mark = if aborted { " · interrupted" } else { "" };
+                self.transcript.push(Block::new(
+                    Kind::Summary,
+                    format!("{}{}{}", format_duration(s.started.elapsed().as_millis() as u64), tokens, mark),
+                ));
+                if let Some(message) = s.error {
+                    self.notice(format!("error: {message}"));
+                }
+            }
         }
-    }
-
-    fn finish_turn(&mut self, error: Option<String>) {
-        let Some(s) = self.streaming.take() else { return };
-        if !s.text.is_empty() {
-            self.history.push(ChatMessage { role: "assistant".into(), content: s.text.clone() });
-        }
-        let tokens = if s.turn.input == 0 && s.turn.output == 0 {
-            String::new()
-        } else {
-            format!(" (↑{} ↓{})", format_tokens(s.turn.input), format_tokens(s.turn.output))
-        };
-        self.transcript.push(Block::new(
-            Kind::Summary,
-            format!("{}{}", format_duration(s.started.elapsed().as_millis() as u64), tokens),
-        ));
-        if let Some(message) = error {
-            self.notice(format!("error: {message}"));
-        }
-    }
-
-    fn interrupt(&mut self) {
-        if let Some(s) = &self.streaming {
-            s.handle.abort();
-        }
-        self.finish_turn(None);
     }
 
     fn notice(&mut self, text: String) {
@@ -265,13 +255,13 @@ async fn main() -> std::io::Result<()> {
 
     let (cols, rows) = terminal::size()?;
     let mut screen = Screen::new(cols, rows);
+    let (agent, mut session_events) = Agent::new(model::default_model());
     let mut app = App {
         theme,
         transcript: Transcript::default(),
         editor: Editor::new(),
-        model: model::default_model(),
-        history: Vec::new(),
-        streaming: None,
+        agent,
+        active: None,
         overlay: None,
         armed_at: None,
         should_quit: false,
@@ -298,11 +288,11 @@ async fn main() -> std::io::Result<()> {
                     TermEvent::Resize(c, r) => screen.resize(c, r),
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                        if k.code == KeyCode::Esc && app.streaming.is_some() {
-                            app.interrupt();
+                        if k.code == KeyCode::Esc && app.agent.is_streaming() {
+                            app.agent.interrupt();
                         } else if ctrl && k.code == KeyCode::Char('c') {
-                            if app.streaming.is_some() {
-                                app.interrupt();
+                            if app.agent.is_streaming() {
+                                app.agent.interrupt();
                                 arm(&mut app);
                             } else if !app.editor.is_empty() {
                                 app.editor.set_text("");
@@ -323,15 +313,10 @@ async fn main() -> std::io::Result<()> {
                     _ => {}
                 }
             }
-            event = async {
-                match &mut app.streaming {
-                    Some(s) => s.rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
+            event = session_events.recv() => {
                 match event {
-                    Some(e) => app.on_provider_event(e),
-                    None => app.finish_turn(None),
+                    Some(e) => app.on_session_event(e),
+                    None => break,
                 }
             }
             _ = tick.tick() => {
