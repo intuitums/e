@@ -51,7 +51,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
         id: "m".into(),
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
-        efforts: &[],
+        efforts: Vec::new(),
         context_window: 200_000,
     };
 

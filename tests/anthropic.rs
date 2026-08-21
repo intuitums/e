@@ -62,7 +62,7 @@ async fn anthropic_stream_round_trip() {
             id: "claude-test".into(),
             base_url: format!("http://127.0.0.1:{port}"),
             api: Api::Anthropic,
-            efforts: &["low", "medium", "high"],
+            efforts: vec!["low".into(), "medium".into(), "high".into()],
             context_window: 200_000,
         },
         system: "be helpful".into(),

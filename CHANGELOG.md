@@ -2,6 +2,34 @@
 
 ## Unreleased
 
++- The Zen provider's id is `opencode-zen`, matching its display name and
++  `opencode-go` — the two OpenCode gateways now read as a pair. Auth.json
++  keys written under the old `opencode` id still sign in (read-only
++  alias, the file is untouched); a saved `opencode/…` model slug falls
++  back to the picker once, then persists under the new id.
+
++- The catalog splits along its one real seam: `catalog/mod.rs` decides
++  which models exist (registry projection, models.json overrides,
++  resolution, scope) and `catalog/remote.rs` owns the live sync (the
++  GET /models refresh, its cache, and the window-precedence overlay).
++  External paths are unchanged.
+
+- Providers are data, the reference architecture: each built-in lives in
+  `src/core/provider/providers/<name>.json` — gateway, dialect, auth
+  surface (which OAuth flow, which API-key env var), display name, seed
+  models with per-model windows and effort support. The sign-in panels,
+  /login dispatch, display names, and catalog all derive from the
+  registry; adding an API-key provider is now a data edit. API keys fall
+  back to their conventional environment variables (ANTHROPIC_API_KEY and
+  friends) when auth.json has no entry — auth.json wins. Unknown dialects
+  or OAuth flows in the data fail at startup, never on the wire.
+  `scripts/generate-catalog.py` syncs the seed metadata from models.dev;
+  this run corrected the gpt-5.x windows to 1,050,000, kimi-k3 to
+  1,048,576, gave the OpenCode Go models real windows instead of a flat
+  200K default, and trimmed Zen's minimax-m3 to 512K (compaction triggers
+  earlier there). The seeds are fallbacks only: a provider's own reported
+  context window always wins — the model chooses its window, not our
+  tables.
 - The model catalog is live, the reference behavior: every signed-in
   provider's own `GET /models` is fetched in the background (at launch
   and after each sign-in), cached in `~/.e/models-store.json` with a

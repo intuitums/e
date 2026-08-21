@@ -1,0 +1,23 @@
+{
+	"name": "xai",
+	"display": "xAI",
+	"base_url": "https://api.x.ai/v1",
+	"api": "openai-completions",
+	"auth": {
+		"oauth": "xai-device",
+		"oauth_hint": "SuperGrok or X Premium \u2014 device code",
+		"key": true,
+		"key_env": "XAI_API_KEY",
+		"key_hint": "console.x.ai"
+	},
+	"models": [
+		{
+			"id": "grok-4.6",
+			"context_window": 500000
+		},
+		{
+			"id": "grok-4.3",
+			"context_window": 1000000
+		}
+	]
+}

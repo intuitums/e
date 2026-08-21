@@ -1,0 +1,14 @@
+{
+	"name": "anthropic",
+	"display": "Anthropic",
+	"base_url": "https://api.anthropic.com",
+	"api": "anthropic-messages",
+	"auth": { "key": true, "key_env": "ANTHROPIC_API_KEY", "key_hint": "console.anthropic.com" },
+	"models": [
+		{ "id": "claude-fable-5", "context_window": 1000000, "efforts": ["low", "medium", "high"] },
+		{ "id": "claude-opus-5", "context_window": 1000000, "efforts": ["low", "medium", "high"] },
+		{ "id": "claude-sonnet-5", "context_window": 1000000, "efforts": ["low", "medium", "high"] },
+		{ "id": "claude-opus-4-8", "context_window": 1000000, "efforts": ["low", "medium", "high"] },
+		{ "id": "claude-haiku-4-5", "context_window": 200000, "efforts": ["low", "medium", "high"] }
+	]
+}

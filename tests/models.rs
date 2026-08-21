@@ -7,6 +7,16 @@ use std::sync::Mutex;
 // E_HOME is process-global; serialize the tests that set it.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Registry env keys leak real sign-ins into signed-out assertions when the
+/// developer's shell exports them — clear them for this process.
+fn clear_env_keys() {
+    for provider in e::core::provider::registry::all() {
+        if let Some(env) = &provider.auth.key_env {
+            std::env::remove_var(env);
+        }
+    }
+}
+
 fn with_models_json(json: &str) -> Vec<e::core::provider::catalog::Model> {
     let dir = std::env::temp_dir().join(format!("e-models-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -141,6 +151,7 @@ fn xai_builtins_carry_their_real_windows() {
 #[test]
 fn only_signed_in_providers_are_available() {
     let _lock = ENV_LOCK.lock().unwrap();
+    clear_env_keys();
     let dir = std::env::temp_dir().join(format!("e-avail-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::env::set_var("E_HOME", &dir);
@@ -174,6 +185,7 @@ fn only_signed_in_providers_are_available() {
 #[test]
 fn cycle_pool_follows_the_scope() {
     let _lock = ENV_LOCK.lock().unwrap();
+    clear_env_keys();
     let dir = std::env::temp_dir().join(format!("e-scope-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::env::set_var("E_HOME", &dir);
@@ -225,17 +237,46 @@ fn zen_and_go_are_distinct_providers() {
         .iter()
         .find(|m| m.provider == "opencode-go")
         .unwrap();
-    let zen = catalog.iter().find(|m| m.provider == "opencode").unwrap();
+    let zen = catalog
+        .iter()
+        .find(|m| m.provider == "opencode-zen")
+        .unwrap();
     assert_eq!(go.base_url, "https://opencode.ai/zen/go/v1");
     assert_eq!(zen.base_url, "https://opencode.ai/zen/v1");
     assert_eq!(
-        e::core::provider::catalog::display_name("opencode"),
+        e::core::provider::catalog::display_name("opencode-zen"),
         "OpenCode Zen"
     );
     assert_eq!(
         e::core::provider::catalog::display_name("opencode-go"),
         "OpenCode Go"
     );
+}
+
+#[test]
+fn legacy_opencode_auth_keys_still_sign_in() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("e-legacy-auth-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+    for provider in e::core::provider::registry::all() {
+        if let Some(env) = &provider.auth.key_env {
+            std::env::remove_var(env);
+        }
+    }
+
+    // An auth.json written before the rename still signs Zen in.
+    std::fs::write(dir.join("auth.json"), r#"{"opencode":{"key":"sk-old"}}"#).unwrap();
+    let auth = e::core::auth::load();
+    assert!(
+        matches!(auth.get("opencode-zen"), Some(e::core::auth::Credential::ApiKey { key }) if key == "sk-old"),
+        "legacy key not honored"
+    );
+    assert!(e::core::provider::catalog::available()
+        .iter()
+        .any(|m| m.provider == "opencode-zen"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // The env lock is deliberately held across awaits: E_HOME must stay ours and
@@ -245,6 +286,7 @@ fn zen_and_go_are_distinct_providers() {
 async fn provider_reported_models_appear_without_a_release() {
     use std::io::{Read, Write};
     let _lock = ENV_LOCK.lock().unwrap();
+    clear_env_keys();
     let dir = std::env::temp_dir().join(format!("e-live-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -260,7 +302,7 @@ async fn provider_reported_models_appear_without_a_release() {
         let sent = String::from_utf8_lossy(&buf[..n]).to_string();
         let body = r#"{"data":[
             {"id":"brand-new-model","context_length":64000},
-            {"id":"small"},
+            {"id":"small","context_length":123456},
             {"id":"text-embedding-large"},
             {"id":"brand-new-model-20260101"}
         ]}"#;
@@ -294,6 +336,13 @@ async fn provider_reported_models_appear_without_a_release() {
         .expect("gateway model appears");
     // The gateway reported the window; the overlay keeps it.
     assert_eq!(fresh.context_window, 64_000);
+    // And the report wins over what e already lists: "small" was declared
+    // without a window (the 200K default) — the gateway's 123456 replaces it.
+    let known = catalog
+        .iter()
+        .find(|m| m.provider == "mock" && m.id == "small")
+        .expect("declared model stays listed");
+    assert_eq!(known.context_window, 123_456);
     // Non-chat ids and dated aliases of listed models stay out.
     assert!(!catalog.iter().any(|m| m.id == "text-embedding-large"));
     assert!(!catalog.iter().any(|m| m.id == "brand-new-model-20260101"));
@@ -302,5 +351,66 @@ async fn provider_reported_models_appear_without_a_release() {
 
     // A fresh cache is not refetched within the window.
     e::core::provider::catalog::refresh_remote().await; // would hang/panic if it re-hit the dead server
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_registry_is_coherent() {
+    use e::core::provider::registry;
+    let all = registry::all();
+    assert!(all.len() >= 6);
+    for provider in all {
+        assert!(
+            !provider.display.is_empty(),
+            "{} has no display name",
+            provider.name
+        );
+        assert!(provider.base_url.starts_with("https://"));
+        assert!(
+            provider.auth.oauth.is_some() || provider.auth.key,
+            "{} has no way to sign in",
+            provider.name
+        );
+        if provider.auth.key {
+            assert!(
+                provider.auth.key_env.is_some(),
+                "{} key without env var",
+                provider.name
+            );
+        }
+    }
+    // The panels' contents, from data: two account flows, five key providers.
+    assert_eq!(registry::oauth_providers().len(), 2);
+    assert_eq!(registry::key_providers().len(), 5);
+}
+
+#[test]
+fn env_var_keys_sign_a_provider_in() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("e-envkey-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+    // No provider may sign in through the ambient environment — clear every
+    // key_env the registry declares, or a dev box with OPENAI_API_KEY set
+    // fails the emptiness assert below.
+    for provider in e::core::provider::registry::all() {
+        if let Some(env) = &provider.auth.key_env {
+            std::env::remove_var(env);
+        }
+    }
+
+    assert!(e::core::provider::catalog::available().is_empty());
+    std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-env");
+    let available = e::core::provider::catalog::available();
+    assert!(available.iter().any(|m| m.provider == "anthropic"));
+    // auth.json still wins over the environment.
+    std::fs::write(dir.join("auth.json"), r#"{"anthropic":{"key":"sk-file"}}"#).unwrap();
+    let auth = e::core::auth::load();
+    match auth.get("anthropic").unwrap() {
+        e::core::auth::Credential::ApiKey { key } => assert_eq!(key, "sk-file"),
+        _ => panic!("wrong credential kind"),
+    }
+    std::env::remove_var("ANTHROPIC_API_KEY");
     let _ = std::fs::remove_dir_all(&dir);
 }

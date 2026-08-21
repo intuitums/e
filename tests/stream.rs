@@ -53,7 +53,7 @@ async fn completions_stream_parses_deltas_and_usage() {
             id: "m".into(),
             base_url: format!("http://127.0.0.1:{port}"),
             api: Api::Completions,
-            efforts: &[],
+            efforts: Vec::new(),
             context_window: 200_000,
         },
         system: "sys".into(),
@@ -123,7 +123,7 @@ async fn agent_folds_provider_events_into_one_session_stream() {
         id: "m".into(),
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
-        efforts: &[],
+        efforts: Vec::new(),
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);

@@ -52,7 +52,7 @@ async fn responses_tools_are_flat_on_the_wire() {
             id: "gpt-test".into(),
             base_url: format!("http://127.0.0.1:{port}"),
             api: Api::Responses,
-            efforts: &["low", "medium", "high"],
+            efforts: vec!["low".into(), "medium".into(), "high".into()],
             context_window: 400_000,
         },
         system: "sys".into(),
@@ -153,7 +153,7 @@ async fn reasoning_items_replay_ahead_of_their_calls() {
         id: "gpt-test".into(),
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Responses,
-        efforts: &["low", "medium", "high"],
+        efforts: vec!["low".into(), "medium".into(), "high".into()],
         context_window: 400_000,
     };
     let (mut agent, mut rx) = Agent::new(model);

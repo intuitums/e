@@ -67,7 +67,7 @@ async fn agent_runs_a_tool_then_replies() {
         id: "m".into(),
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
-        efforts: &[],
+        efforts: Vec::new(),
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);

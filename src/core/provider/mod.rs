@@ -8,6 +8,7 @@
 pub mod anthropic;
 pub mod catalog;
 pub mod completions;
+pub mod registry;
 pub mod responses;
 
 use serde::Serialize;
