@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Dependencies current: rand 0.10, sha2 0.11, base64 0.23, crossterm 0.29,
+  pulldown-cmark 0.13. The parity suite pins the rendered output, so the
+  markdown and terminal bumps are verified byte-for-byte.
 - Open-source hardening: CI (fmt, clippy, tests on Linux + macOS),
   `scripts/guard.sh` — a security-surface audit pinning the allowed network
   hosts, the sovereign `~/.e/` home, store-only credential writes, the one

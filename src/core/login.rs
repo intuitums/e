@@ -6,7 +6,7 @@
 //! exchanged and persisted. No other tool's store is ever read (DESIGN.md §2).
 
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -71,11 +71,11 @@ async fn codex_login_inner(
     notify: &tokio::sync::mpsc::Sender<String>,
 ) -> Result<(), String> {
     let mut verifier_bytes = [0u8; 64];
-    rand::thread_rng().fill_bytes(&mut verifier_bytes);
+    rand::rng().fill_bytes(&mut verifier_bytes);
     let verifier = b64url(&verifier_bytes);
     let challenge = b64url(&Sha256::digest(verifier.as_bytes()));
     let mut state_bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut state_bytes);
+    rand::rng().fill_bytes(&mut state_bytes);
     let state = b64url(&state_bytes);
 
     let authorize = format!(
