@@ -273,6 +273,11 @@ impl App {
             return;
         }
         let scope = model::scope();
+        let mut available = model::provider_grouped(available);
+        // The scoped entries lead the list — what you curated, not a hunt.
+        if let Some(ids) = &scope {
+            available.sort_by_key(|m| !ids.contains(&model::slug(m)));
+        }
         let items: Vec<MenuItem> = available
             .iter()
             .map(|m| {
@@ -449,7 +454,7 @@ impl App {
     /// The picker itself, from the current catalog — no refresh side effects,
     /// so the rebuild-on-refresh arm cannot loop.
     fn build_model_menu(&mut self) {
-        let available = model::available();
+        let available = model::provider_grouped(model::available());
         if available.is_empty() {
             self.notice("no models available — use /login to sign in to a provider".into());
             return;
@@ -1595,10 +1600,16 @@ e -v, --version"
                             .as_ref()
                             .map(|m| m.kind == MenuKind::Scoped)
                             .unwrap_or(false)
-                            && k.code == KeyCode::Char(' ')
-                            && !ctrl
+                            && ((k.code == KeyCode::Char(' ') && !ctrl)
+                                || (ctrl && k.code == KeyCode::Char('x')))
                         {
-                            app.toggle_scoped();
+                            if ctrl {
+                                model::clear_scope();
+                                app.notice("scope cleared — ctrl+p cycles every model again".into());
+                                app.open_scoped_menu();
+                            } else {
+                                app.toggle_scoped();
+                            }
                         } else if app.menu.is_some()
                             && matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc)
                             && !ctrl
