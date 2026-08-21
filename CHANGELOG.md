@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A pasted API key no longer lands in the composer's recall history,
+  where up-arrow would recall it for the rest of the session; it goes to
+  ~/.e/auth.json and nowhere else.
 - The `!` passthrough sent its argument under the wrong key ("cmd" vs
   the tool's "command"), so every `!` command returned an argument error
   instead of running — found reviewing this stack; the smoke that should
