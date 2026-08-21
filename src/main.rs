@@ -14,7 +14,7 @@ use e::ui::transcript::{Block, Kind, Transcript};
 use e::ui::composer::{Editor, EditorResult, Key};
 use e::ui::statusline::{statusline, StatusData, Turn};
 use e::ui::theme::{load_bundled, Theme};
-use e::ui::frame::painter::Screen;
+use e::ui::screen::Screen;
 
 struct App {
     theme: Theme,

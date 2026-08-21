@@ -1,3 +1,10 @@
 #!/bin/sh
-# e launcher. Runs the TypeScript entry directly on Node's type stripping.
-exec node --experimental-strip-types --no-warnings "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../legacy/src/main.ts" "$@"
+# e launcher: runs the release binary, building it if absent.
+self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+root="$(cd "$(dirname "$self")/.." && pwd)"
+bin="$root/target/release/e"
+if [ ! -x "$bin" ]; then
+    echo "building e…" >&2
+    (cd "$root" && cargo build --release --quiet) || exit 1
+fi
+exec "$bin" "$@"

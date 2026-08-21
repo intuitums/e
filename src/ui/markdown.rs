@@ -15,8 +15,8 @@
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthChar;
 
-use crate::ui::style::*;
-use crate::ui::frame::highlight::highlight_line;
+use crate::ui::render::*;
+use crate::ui::highlight::highlight_line;
 use crate::ui::theme::Theme;
 
 fn osc8(url: &str) -> String {

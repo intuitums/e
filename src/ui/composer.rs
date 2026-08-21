@@ -4,7 +4,7 @@
 //! ctrl+a/e/k/u/w, history up/down, shift+enter (or alt+enter) newline.
 //! Anything else waits until asked for.
 
-use crate::ui::frame::markdown::visible_width;
+use crate::ui::markdown::visible_width;
 use crate::ui::theme::Theme;
 
 pub struct Editor {

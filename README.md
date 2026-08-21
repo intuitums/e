@@ -36,7 +36,13 @@ Every visual contract — heading styles, list glyphs, panel geometry, palette,
 activity wording — is pinned by the test suite (`npm test`), so the look cannot
 drift silently.
 
-## What works today
+## Status
+
+The harness is being built milestone by milestone; the frame, renderer, and
+parity suite are in. Providers, the agent loop, tools, and sessions are next.
+The list below is the feature contract the milestones are building toward.
+
+## The contract
 
 - streaming turns: markdown with heading hierarchy, lists, code panels with
   syntax highlighting, quote rails, rules, OSC-8 hyperlinks
@@ -52,33 +58,26 @@ drift silently.
 
 ## Layout
 
-The tree speaks e's own vocabulary:
-
 ```
 src/
-  kernel/     the harness — budgeted (DESIGN.md §3), terminal-free
-  ui/         the frontend
-    frame/    the line machinery: markdown → styled lines, syntax
-              tinting, and the diffing painter
-    composer.rs  transcript.rs  statusline.rs  style.rs  theme.rs
+  core/       the harness — budgeted (DESIGN.md §3), terminal-free
+  ui/         the frontend: render.rs (SGR styling), markdown.rs,
+              highlight.rs, screen.rs (the differ), composer.rs,
+              transcript.rs, statusline.rs, theme.rs
 tests/        the parity suite (the byte-pinned visual contract)
 scripts/      pty capture + replay harness
 themes/       the two palettes
-legacy/       the previous TypeScript frontend, kept as the executable
-              reference until the Rust harness reaches parity
 ```
 
-Tools and the rest of the kernel (providers, agent loop, sessions,
+Tools and the rest of the core (providers, agent loop, sessions,
 permissions) land milestone by milestone.
 
 ## Run
 
 ```
-e            # the TypeScript frontend (current daily driver)
-cargo run    # the Rust harness in progress
+e            # bin/e — runs the release binary, building it if absent
+cargo run    # development
 ```
-
-`~/.local/bin/e` → `bin/e`, which launches `legacy/` until the swap milestone.
 
 ## Roadmap
 
