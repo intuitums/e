@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- Release profile: thin LTO, one codegen unit, stripped symbols,
-  panic=abort — the binary halves (8.02 → 4.32 MiB) with speed unchanged.
+- Release profile: thin LTO, one codegen unit, stripped symbols — a third
+  off the binary (8.02 → 5.18 MiB) with speed unchanged. Unwinding stays
+  on so a panicking tool remains a tool error, not a dead session.
 - `benchmarks/`: a dependency-free suite for the numbers e's identity
   depends on — binary size, cold start, spawn-to-first-frame — with
   timestamped reports under `benchmarks/results/`. First baseline:
