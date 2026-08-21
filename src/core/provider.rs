@@ -2,7 +2,7 @@
 //!
 //! Everything above this module sees `Event`s; everything below is a wire
 //! dialect. Two dialects ship: the chat-completions family and the
-//! ChatGPT-backend responses family (see `completions.rs` / `codex.rs`).
+//! Responses-API family (see `completions.rs` / `responses.rs`).
 //! SSE framing is handled here — one small splitter, tested, shared.
 
 use serde::Serialize;
