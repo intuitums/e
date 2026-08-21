@@ -1,0 +1,64 @@
+# e
+
+**A TUI for coding agents.** A fast, minimal terminal frontend that drives an
+agent engine as a library — same sessions, settings, models, skills, and
+extensions as the engine's own CLI — while owning every pixel of the interface.
+
+```
+𝑒 v0.1.0 · Run /help for commands
+
+┃ what is a TUI?
+
+  A text user interface.
+
+  2s (↑48 ↓42)
+
+┃
+
+deepseek-v4-flash · high · …/repos/e
+```
+
+## Design
+
+Grayscale, typography-first, zero chrome: emphasis is weight and underline, not
+color. The transcript grows down the normal screen into scrollback — no alt
+screen, no bordered panes. A `┃` rail marks your turns and the composer; tool
+calls are single `●` rows; code renders in shrink-wrapped labeled panels; a
+one-line status bar carries model, effort, context, and workspace.
+
+Every visual contract — heading styles, list glyphs, panel geometry, palette,
+activity wording — is pinned by the test suite (`npm test`), so the look cannot
+drift silently.
+
+## What works today
+
+- streaming turns: markdown with heading hierarchy, lists, code panels with
+  syntax highlighting, quote rails, rules, OSC-8 hyperlinks
+- `●` tool rows, live activity line (`Thinking (12s)` →
+  `running | 4 files read … (↑2.2k ↓14)`), per-turn duration/token trailer
+- slash picker with fuzzy filtering; /help /new /clear /resume /rename /copy
+  /compact /model /models /status /version /quit — plus any commands your
+  installed engine extensions register
+- /resume: session picker → switch → full styled replay
+- esc interrupts; ctrl+c twice exits; ctrl+d on empty exits; `-c` continues
+  the most recent session
+- automatic light/dark from the terminal background
+
+## Run
+
+```
+e
+```
+
+Installed at `~/.local/bin/e` → `bin/e` in this repo. Runs on Node ≥ 22.19
+via type stripping; no build step.
+
+## Roadmap
+
+Tool approval flow and permission modes, extension dialog surfaces, full-screen
+catalog menus, queued-prompt review, inline images, transcript expansion,
+compiled packaging.
+
+## License
+
+MIT.

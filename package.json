@@ -1,0 +1,21 @@
+{
+	"name": "e",
+	"version": "0.1.0",
+	"private": true,
+	"description": "e \u2014 a TUI for coding agents",
+	"type": "module",
+	"bin": {
+		"e": "bin/e"
+	},
+	"scripts": {
+		"test": "node --experimental-strip-types --test test/*.test.ts",
+		"start": "node --experimental-strip-types src/main.ts"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"dependencies": {
+		"@earendil-works/pi-coding-agent": "0.84.2",
+		"@earendil-works/pi-tui": "0.84.2"
+	}
+}
