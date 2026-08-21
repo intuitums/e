@@ -5,8 +5,9 @@
 //! the live input row.
 //!
 //! Stages: Choose (account vs API key, the reference flow's wording) →
-//! ApiKey (inline `┃ •••` entry mirroring the composer) or Waiting (browser
-//! authorization in flight).
+//! Account or Key (which provider, labeled by display name) → ApiKey (inline
+//! `┃ •••` entry mirroring the composer) or Waiting (browser authorization
+//! in flight).
 
 use crate::tui::markdown::visible_width;
 use crate::tui::render::bold;
@@ -15,6 +16,10 @@ use crate::tui::theme::Theme;
 pub enum AuthStage {
     /// The method choice; `selected` indexes the two options.
     Choose { selected: usize },
+    /// Which subscription to sign in with.
+    Account { selected: usize },
+    /// Which provider the API key belongs to.
+    Key { selected: usize },
     /// Key entry for a provider; the composer holds the (masked) secret.
     ApiKey { provider: String },
     /// Browser OAuth in flight.
@@ -55,7 +60,7 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
                 theme,
                 *selected == 0,
                 "Sign in with an account",
-                "ChatGPT — opens the browser",
+                "subscription — opens the browser",
                 width,
             ),
             choice_row(
@@ -63,6 +68,48 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
                 *selected == 1,
                 "Sign in with an API key",
                 "stored in ~/.e/auth.json",
+                width,
+            ),
+            String::new(),
+            dim("   ↑↓ Choose · Enter Continue · Esc Cancel"),
+        ],
+        AuthStage::Account { selected } => vec![
+            String::new(),
+            dim("   Sign in with an account"),
+            String::new(),
+            choice_row(
+                theme,
+                *selected == 0,
+                "OpenAI Codex",
+                "ChatGPT — opens the browser",
+                width,
+            ),
+            choice_row(
+                theme,
+                *selected == 1,
+                "xAI",
+                "SuperGrok or X Premium — device code",
+                width,
+            ),
+            String::new(),
+            dim("   ↑↓ Choose · Enter Continue · Esc Cancel"),
+        ],
+        AuthStage::Key { selected } => vec![
+            String::new(),
+            dim("   Sign in with an API key"),
+            String::new(),
+            choice_row(
+                theme,
+                *selected == 0,
+                "OpenCode Go",
+                "zen — stored in ~/.e/auth.json",
+                width,
+            ),
+            choice_row(
+                theme,
+                *selected == 1,
+                "xAI",
+                "console.x.ai — stored in ~/.e/auth.json",
                 width,
             ),
             String::new(),
@@ -86,7 +133,10 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
             };
             vec![
                 String::new(),
-                dim(&format!("   Paste your {provider} API key")),
+                dim(&format!(
+                    "   Paste your {} API key",
+                    crate::core::model::display_name(provider)
+                )),
                 entry,
                 dim("   Enter saves · Esc cancels"),
                 dim("   Saves to ~/.e/auth.json"),

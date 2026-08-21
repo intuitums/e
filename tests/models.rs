@@ -85,3 +85,23 @@ fn trust_gates_project_instructions() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn xai_builtins_carry_their_real_windows() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    std::env::set_var("E_HOME", std::env::temp_dir().join("e-models-none"));
+    let catalog = e::core::model::catalog();
+    let find = |id: &str| {
+        catalog
+            .iter()
+            .find(|m| m.provider == "xai" && m.id == id)
+            .unwrap()
+    };
+    assert_eq!(find("grok-4.3").context_window, 1_000_000);
+    assert_eq!(find("grok-4.6").context_window, 500_000);
+    assert_eq!(find("grok-build-0.1").context_window, 256_000);
+    assert_eq!(find("grok-4.6").base_url, "https://api.x.ai/v1");
+    assert_eq!(e::core::model::display_name("xai"), "xAI");
+    assert_eq!(e::core::model::display_name("opencode-go"), "OpenCode Go");
+    assert_eq!(e::core::model::display_name("openai-codex"), "OpenAI Codex");
+}

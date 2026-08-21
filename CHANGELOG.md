@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- xAI support: sign in with a SuperGrok / X Premium subscription (device
+  code — a code to confirm in the browser) or an API key; grok-4.6,
+  grok-4.3, and grok-build-0.1 join the catalog with their real context
+  windows. Access tokens refresh lazily. `auth.x.ai` and `api.x.ai` join
+  the guard's network allowlist.
+- The sign-in flow now has a provider step per method, labeled with
+  display names: OpenAI Codex, OpenCode Go, xAI.
 - `!<cmd>` runs a shell command directly; the output shows in the
   transcript and is recorded into history, so the model sees what you did.
   The composer rail turns the `bashMode` theme color (green) the moment a

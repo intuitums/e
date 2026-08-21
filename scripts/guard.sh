@@ -13,7 +13,7 @@ bad() { fail=1; say "FAIL: $*"; }
 # 1. Network surface. e talks to its sign-in and model providers and nothing
 #    else. A new host in src/ means a new place user data can go — add it
 #    here deliberately or the build fails.
-allowed_hosts="localhost auth.openai.com api.openai.com chatgpt.com opencode.ai"
+allowed_hosts="localhost auth.openai.com api.openai.com chatgpt.com opencode.ai auth.x.ai api.x.ai"
 found_hosts=$(grep -rhoE 'https?://[A-Za-z0-9.-]+' src/ 2>/dev/null | sed -E 's#https?://##' | sort -u)
 for host in $found_hosts; do
   case " $allowed_hosts " in

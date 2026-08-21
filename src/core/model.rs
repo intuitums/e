@@ -33,6 +33,7 @@ pub fn slug(model: &Model) -> String {
 }
 
 const OPENCODE_BASE: &str = "https://opencode.ai/zen/go/v1";
+const XAI_BASE: &str = "https://api.x.ai/v1";
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api";
 const EFFORTS: &[&str] = &["low", "medium", "high"];
 
@@ -44,6 +45,14 @@ pub fn builtin_catalog() -> Vec<Model> {
         api: Api::Completions,
         efforts: &[],
         context_window: 200_000,
+    };
+    let xai = |id: &str, context_window: u64| Model {
+        provider: "xai".into(),
+        id: id.into(),
+        base_url: XAI_BASE.into(),
+        api: Api::Completions,
+        efforts: &[],
+        context_window,
     };
     let codex = |id: &str| Model {
         provider: "openai-codex".into(),
@@ -69,6 +78,9 @@ pub fn builtin_catalog() -> Vec<Model> {
         codex("gpt-5.6-luna"),
         codex("gpt-5.5"),
         codex("gpt-5.4"),
+        xai("grok-4.6", 500_000),
+        xai("grok-4.3", 1_000_000),
+        xai("grok-build-0.1", 256_000),
     ]
 }
 
@@ -168,4 +180,14 @@ pub fn resolve(query: &str) -> Option<Model> {
         return Some(matches[0].clone());
     }
     None
+}
+
+/// Human name for a provider, for panels: capitalized, no dashes.
+pub fn display_name(provider: &str) -> &str {
+    match provider {
+        "openai-codex" => "OpenAI Codex",
+        "opencode-go" => "OpenCode Go",
+        "xai" => "xAI",
+        other => other,
+    }
 }

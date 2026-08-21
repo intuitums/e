@@ -16,7 +16,27 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     let auth = auth::load();
     let key = match auth.get(request.model.provider.as_str()) {
         Some(Credential::ApiKey { key }) => key.clone(),
-        Some(Credential::OAuth { access, .. }) => access.clone(),
+        Some(Credential::OAuth {
+            access,
+            refresh,
+            expires,
+            ..
+        }) => {
+            // The only OAuth provider on this dialect is xAI; refresh lazily
+            // when the access token is within a minute of expiry.
+            if auth::now_ms() + 60_000 < *expires {
+                access.clone()
+            } else {
+                let fresh = crate::core::login::xai_refresh(refresh)
+                    .await
+                    .map_err(|e| (e, false))?;
+                let _ = auth::set(&request.model.provider, fresh.clone());
+                match fresh {
+                    Credential::OAuth { access, .. } => access,
+                    Credential::ApiKey { key } => key,
+                }
+            }
+        }
         None => {
             return Err((
                 format!("no credentials for {} — run /login", request.model.provider),

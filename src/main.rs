@@ -288,21 +288,37 @@ impl App {
     /// A choice made on the panel. One account provider and one key provider
     /// today, so provider steps collapse straight through.
     fn auth_choose(&mut self, selected: usize) {
+        self.auth = Some(if selected == 0 {
+            AuthStage::Account { selected: 0 }
+        } else {
+            AuthStage::Key { selected: 0 }
+        });
+    }
+
+    /// A subscription picked on the account panel.
+    fn auth_account(&mut self, selected: usize) {
+        self.auth = Some(AuthStage::Waiting);
         if selected == 0 {
-            self.auth = Some(AuthStage::Waiting);
-            self.notice("starting the openai-codex sign-in…".into());
+            self.notice("starting the OpenAI Codex sign-in…".into());
             tokio::spawn(e::core::login::codex_login(
                 "openai-codex".into(),
                 self.jobs.clone(),
             ));
         } else {
-            self.auth = Some(AuthStage::ApiKey {
-                provider: "opencode-go".into(),
-            });
-            self.pending_key = Some("opencode-go".into());
-            self.editor.mask = true;
-            self.editor.set_text("");
+            self.notice("starting the xAI sign-in…".into());
+            tokio::spawn(e::core::login::xai_login(self.jobs.clone()));
         }
+    }
+
+    /// A provider picked on the API-key panel.
+    fn auth_key(&mut self, selected: usize) {
+        let provider = if selected == 0 { "opencode-go" } else { "xai" };
+        self.auth = Some(AuthStage::ApiKey {
+            provider: provider.into(),
+        });
+        self.pending_key = Some(provider.into());
+        self.editor.mask = true;
+        self.editor.set_text("");
     }
 
     fn open_skills_menu(&mut self, query: &str) {
@@ -564,8 +580,11 @@ impl App {
             return;
         }
         if provider == "openai-codex" {
-            self.notice("starting the openai-codex sign-in…".into());
+            self.notice("starting the OpenAI Codex sign-in…".into());
             tokio::spawn(e::core::login::codex_login(provider, self.jobs.clone()));
+        } else if provider == "xai" {
+            self.notice("starting the xAI sign-in…".into());
+            tokio::spawn(e::core::login::xai_login(self.jobs.clone()));
         } else {
             self.notice(format!(
                 "paste the {provider} API key and press enter (esc cancels)"
@@ -1059,6 +1078,20 @@ async fn main() -> std::io::Result<()> {
                                 (AuthStage::Choose { selected }, KeyCode::Enter) => {
                                     let choice = *selected;
                                     app.auth_choose(choice);
+                                }
+                                (
+                                    AuthStage::Account { selected } | AuthStage::Key { selected },
+                                    KeyCode::Up | KeyCode::Down,
+                                ) => {
+                                    *selected = 1 - *selected;
+                                }
+                                (AuthStage::Account { selected }, KeyCode::Enter) => {
+                                    let choice = *selected;
+                                    app.auth_account(choice);
+                                }
+                                (AuthStage::Key { selected }, KeyCode::Enter) => {
+                                    let choice = *selected;
+                                    app.auth_key(choice);
                                 }
                                 (_, KeyCode::Esc) => {
                                     app.auth = None;

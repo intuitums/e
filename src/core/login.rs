@@ -240,3 +240,165 @@ fn urldecode(s: &str) -> String {
     }
     String::from_utf8_lossy(&out).into_owned()
 }
+
+/* ---------- xAI (device-code flow) ---------- */
+
+const XAI_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
+const XAI_SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
+const XAI_DEVICE_CODE_URL: &str = "https://auth.x.ai/oauth2/device/code";
+const XAI_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
+/// Refresh ahead of the reported expiry so a token never dies mid-request.
+const XAI_REFRESH_SKEW_MS: u64 = 5 * 60 * 1000;
+const XAI_DEFAULT_LIFETIME_SECS: u64 = 3600;
+
+/// RFC 8628: ask for a device code, send the user to the verification page,
+/// poll the token endpoint until they approve. The access token then acts as
+/// the API key on api.x.ai.
+pub async fn xai_login(notify: tokio::sync::mpsc::Sender<String>) {
+    let message = match xai_login_inner(&notify).await {
+        Ok(()) => "signed in to xAI — saved to ~/.e/auth.json".to_string(),
+        Err(e) => format!("login failed: {e}"),
+    };
+    let _ = notify.send(message).await;
+}
+
+async fn xai_login_inner(notify: &tokio::sync::mpsc::Sender<String>) -> Result<(), String> {
+    let device: serde_json::Value = crate::core::provider::http()
+        .post(XAI_DEVICE_CODE_URL)
+        .form(&[
+            ("client_id", XAI_CLIENT_ID),
+            ("scope", XAI_SCOPE),
+            ("referrer", "e"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("device authorization failed: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("device authorization returned invalid JSON: {e}"))?;
+
+    let device_code = required(&device, "device_code")?;
+    let user_code = required(&device, "user_code")?;
+    let verify_url = device
+        .get("verification_uri_complete")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or(required(&device, "verification_uri")?);
+    if !verify_url.starts_with("https://") {
+        return Err("untrusted verification URI in xAI response".into());
+    }
+    let mut interval = device
+        .get("interval")
+        .and_then(|v| v.as_u64())
+        .filter(|i| *i > 0)
+        .unwrap_or(5);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(
+            device
+                .get("expires_in")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(600),
+        );
+
+    let _ = notify
+        .send(format!("xAI: confirm code {user_code} in the browser"))
+        .await;
+    let _ = std::process::Command::new("open").arg(&verify_url).spawn();
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+        if std::time::Instant::now() > deadline {
+            return Err("xAI device code expired".into());
+        }
+        let response = crate::core::provider::http()
+            .post(XAI_TOKEN_URL)
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("client_id", XAI_CLIENT_ID),
+                ("device_code", device_code.as_str()),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("token polling failed: {e}"))?;
+        let ok = response.status().is_success();
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("token polling returned invalid JSON: {e}"))?;
+        if ok {
+            let credential = xai_credential(&body, None)?;
+            return crate::core::auth::set("xai", credential).map_err(|e| e.to_string());
+        }
+        match body.get("error").and_then(|v| v.as_str()) {
+            Some("authorization_pending") => {}
+            Some("slow_down") => interval += 5,
+            Some("access_denied") | Some("authorization_denied") => {
+                return Err("xAI device authorization was denied".into())
+            }
+            Some("expired_token") => return Err("xAI device code expired".into()),
+            other => {
+                return Err(format!(
+                    "xAI token polling failed: {}",
+                    other.unwrap_or("unknown error")
+                ))
+            }
+        }
+    }
+}
+
+/// Exchange the refresh token; xAI may omit `refresh_token` when unrotated.
+pub async fn xai_refresh(refresh: &str) -> Result<crate::core::auth::Credential, String> {
+    let response = crate::core::provider::http()
+        .post(XAI_TOKEN_URL)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", XAI_CLIENT_ID),
+            ("refresh_token", refresh),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("xAI token refresh failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "xAI token refresh rejected ({}) — run /login xai again",
+            response.status()
+        ));
+    }
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("xAI token refresh returned invalid JSON: {e}"))?;
+    xai_credential(&body, Some(refresh))
+}
+
+fn xai_credential(
+    body: &serde_json::Value,
+    previous_refresh: Option<&str>,
+) -> Result<crate::core::auth::Credential, String> {
+    let access = required(body, "access_token")?;
+    let refresh = body
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| previous_refresh.map(String::from))
+        .ok_or("xAI response missing refresh_token")?;
+    let lifetime = body
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(XAI_DEFAULT_LIFETIME_SECS);
+    Ok(crate::core::auth::Credential::OAuth {
+        access,
+        refresh,
+        expires: crate::core::auth::now_ms() + lifetime * 1000 - XAI_REFRESH_SKEW_MS,
+        account_id: None,
+    })
+}
+
+fn required(value: &serde_json::Value, field: &str) -> Result<String, String> {
+    value
+        .get(field)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .ok_or_else(|| format!("invalid xAI OAuth response field: {field}"))
+}
