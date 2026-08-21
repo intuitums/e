@@ -92,6 +92,8 @@ struct App {
     held_prompts: Vec<String>,
     /// First visit to this directory: the trust question, until answered.
     trust: Option<TrustStage>,
+    /// Transcript index of the running `!` block, updated on completion.
+    shell_block: Option<usize>,
 }
 
 impl App {
@@ -512,6 +514,7 @@ impl App {
                 self.compacting = false;
                 self.compact_requested = false;
                 self.held_prompts.clear();
+                self.shell_block = None;
                 self.context_tokens = 0;
                 self.agent.clear();
                 self.agent.set_session(None);
@@ -794,8 +797,12 @@ impl App {
             self.notice("busy — run shell commands between turns".into());
             return;
         }
-        self.transcript
-            .push(Block::new(Kind::User, format!("! {cmd}")));
+        if self.shell_block.is_some() {
+            self.notice("a shell command is still running".into());
+            return;
+        }
+        self.transcript.push(Block::new(Kind::Shell, cmd.clone()));
+        self.shell_block = Some(self.transcript.blocks.len() - 1);
         let results = self.results.clone();
         let cwd = self.agent.cwd();
         tokio::spawn(async move {
@@ -973,6 +980,7 @@ async fn main() -> std::io::Result<()> {
         compact_requested: false,
         held_prompts: Vec::new(),
         trust: None,
+        shell_block: None,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
     if e::core::trust::status(&app.agent.cwd()).is_none() {
@@ -1131,6 +1139,7 @@ async fn main() -> std::io::Result<()> {
                                 .map(|m| m.content.len())
                                 .sum();
                             app.context_tokens = (seeded / 4) as u64;
+                            app.shell_block = None;
                             app.transcript.clear();
                             app.transcript.push(Block::new(Kind::Banner, e::VERSION));
                             app.transcript.push(Block::new(Kind::Notice, "compacted — recent messages kept, the full session is under /resume"));
@@ -1149,8 +1158,8 @@ async fn main() -> std::io::Result<()> {
                     }
                     Some(AppJob::CompactFailed(_)) => {}
                     Some(AppJob::Shell { cmd, output }) => {
-                        // Display a trimmed tail; history gets the full
-                        // (tool-truncated) output so the model sees it all.
+                        // Display a trimmed tail in the live block; history
+                        // gets the full (tool-truncated) output.
                         let shown: String = {
                             let lines: Vec<&str> = output.content.lines().collect();
                             let tail = &lines[lines.len().saturating_sub(20)..];
@@ -1160,11 +1169,14 @@ async fn main() -> std::io::Result<()> {
                             }
                             text
                         };
-                        let mut block = Block::new(Kind::Tool, format!("$ {cmd}"));
-                        block.done = true;
-                        block.is_error = output.is_error;
-                        block.detail = Some(shown);
-                        app.transcript.push(block);
+                        if let Some(idx) = app.shell_block.take() {
+                            if let Some(block) = app.transcript.blocks.get_mut(idx) {
+                                block.done = true;
+                                block.is_error = output.is_error;
+                                block.detail = Some(shown);
+                                block.touch();
+                            }
+                        }
                         app.agent.record_user(format!(
                             "I ran `{cmd}` in my shell. Output:\n```\n{}\n```",
                             output.content

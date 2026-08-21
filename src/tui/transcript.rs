@@ -15,6 +15,8 @@ pub enum Kind {
     Assistant,
     Reasoning,
     Tool,
+    /// A `!` shell passthrough: `$ cmd` header, output tail below.
+    Shell,
     Summary,
     Notice,
 }
@@ -101,6 +103,25 @@ impl Block {
                     }
                     _ => format!("  {marker} {}", self.text),
                 }];
+                rows
+            }
+            Kind::Shell => {
+                // The reference look: the command in the bash-mode color, the
+                // output tail muted beneath it.
+                let header = if self.done {
+                    theme.fg(
+                        "bashMode",
+                        &crate::tui::render::bold(&format!("$ {}", self.text)),
+                    )
+                } else {
+                    dim(&format!("$ {}", self.text))
+                };
+                let mut rows = vec![format!("  {header}")];
+                if let Some(output) = &self.detail {
+                    for line in output.lines() {
+                        rows.push(format!("  {}", theme.fg("muted", line)));
+                    }
+                }
                 rows
             }
             Kind::Reasoning => {

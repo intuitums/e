@@ -4,6 +4,9 @@
 
 - `!<cmd>` runs a shell command directly; the output shows in the
   transcript and is recorded into history, so the model sees what you did.
+  The composer rail turns the `bashMode` theme color (green) the moment a
+  draft starts with `!` — the reference convention: color, not words — and
+  the finished block renders `$ cmd` in the same color, output muted.
 - `e ask "prompt"` — one full agent turn without the TUI: styled output on
   a terminal, plain streaming text when piped. The session is saved, so
   `e -c` continues it.

@@ -8,7 +8,8 @@
 		"accent": 252,
 		"comment": 245,
 		"code": 250,
-		"selected": 239
+		"selected": 239,
+		"shell": 71
 	},
 	"colors": {
 		"accent": "accent",
@@ -65,6 +66,6 @@
 		"thinkingHigh": "statusline",
 		"thinkingXhigh": "accent",
 		"thinkingMax": "accent",
-		"bashMode": "accent"
+		"bashMode": "shell"
 	}
 }

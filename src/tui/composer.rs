@@ -206,7 +206,16 @@ impl Editor {
     /// Render the composer band: leading blank, then railed rows with a
     /// reverse-video cursor cell.
     pub fn render(&self, theme: &Theme, width: usize) -> Vec<String> {
-        let rail = format!("{} ", theme.fg("userMessageText", "┃"));
+        // A draft starting with `!` is a shell command: the rail turns the
+        // bash-mode color — the whole indicator, no words (the reference
+        // convention: pi flips its editor border the same way).
+        let rail_token =
+            if !self.mask && self.text.iter().find(|c| !c.is_whitespace()) == Some(&'!') {
+                "bashMode"
+            } else {
+                "userMessageText"
+            };
+        let rail = format!("{} ", theme.fg(rail_token, "┃"));
         let inner = width.saturating_sub(2).max(8);
         let mut rows = vec![String::new()];
 
