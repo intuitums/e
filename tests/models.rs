@@ -102,6 +102,20 @@ fn xai_builtins_carry_their_real_windows() {
     assert_eq!(find("grok-build-0.1").context_window, 256_000);
     assert_eq!(find("grok-4.6").base_url, "https://api.x.ai/v1");
     assert_eq!(e::core::model::display_name("xai"), "xAI");
+    assert_eq!(e::core::model::display_name("openai"), "OpenAI");
+    assert_eq!(e::core::model::display_name("anthropic"), "Anthropic");
+    let anthropic = catalog
+        .iter()
+        .find(|m| m.provider == "anthropic" && m.id == "claude-fable-5")
+        .unwrap();
+    assert_eq!(anthropic.context_window, 1_000_000);
+    assert!(matches!(anthropic.api, e::core::model::Api::Anthropic));
+    let openai = catalog
+        .iter()
+        .find(|m| m.provider == "openai" && m.id == "gpt-5.5-pro")
+        .unwrap();
+    assert_eq!(openai.context_window, 1_050_000);
+    assert!(matches!(openai.api, e::core::model::Api::Responses));
     assert_eq!(e::core::model::display_name("opencode-go"), "OpenCode Go");
     assert_eq!(e::core::model::display_name("openai-codex"), "OpenAI Codex");
 }

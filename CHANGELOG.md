@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- OpenAI and Anthropic API keys: the key panel now lists OpenCode Go, xAI,
+  OpenAI (platform responses dialect at api.openai.com), and Anthropic — a
+  new Messages dialect (`core/anthropic.rs`) with streamed thinking, tool
+  use, prompt caching, and effort mapped to a thinking budget. gpt-5.x and
+  claude-\* models join the catalog with their real context windows.
+  `api.anthropic.com` joins the guard allowlist.
 - xAI support: sign in with a SuperGrok / X Premium subscription (device
   code — a code to confirm in the browser) or an API key; grok-4.6,
   grok-4.3, and grok-build-0.1 join the catalog with their real context

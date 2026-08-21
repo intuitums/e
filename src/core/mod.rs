@@ -1,6 +1,7 @@
 //! The harness core: budgeted (DESIGN.md §3) and terminal-free.
 
 pub mod agent;
+pub mod anthropic;
 pub mod api;
 pub mod auth;
 pub mod compact;

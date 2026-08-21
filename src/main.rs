@@ -312,7 +312,7 @@ impl App {
 
     /// A provider picked on the API-key panel.
     fn auth_key(&mut self, selected: usize) {
-        let provider = if selected == 0 { "opencode-go" } else { "xai" };
+        let provider = ["opencode-go", "xai", "openai", "anthropic"][selected.min(3)];
         self.auth = Some(AuthStage::ApiKey {
             provider: provider.into(),
         });
@@ -1079,11 +1079,14 @@ async fn main() -> std::io::Result<()> {
                                     let choice = *selected;
                                     app.auth_choose(choice);
                                 }
-                                (
-                                    AuthStage::Account { selected } | AuthStage::Key { selected },
-                                    KeyCode::Up | KeyCode::Down,
-                                ) => {
+                                (AuthStage::Account { selected }, KeyCode::Up | KeyCode::Down) => {
                                     *selected = 1 - *selected;
+                                }
+                                (AuthStage::Key { selected }, KeyCode::Up) => {
+                                    *selected = (*selected + 3) % 4;
+                                }
+                                (AuthStage::Key { selected }, KeyCode::Down) => {
+                                    *selected = (*selected + 1) % 4;
                                 }
                                 (AuthStage::Account { selected }, KeyCode::Enter) => {
                                     let choice = *selected;

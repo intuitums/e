@@ -13,6 +13,8 @@ pub enum Api {
     Completions,
     /// The responses dialect behind the ChatGPT backend (OAuth + account id).
     Responses,
+    /// The Anthropic Messages dialect (`/v1/messages`, x-api-key).
+    Anthropic,
 }
 
 #[derive(Clone, Debug)]
@@ -34,6 +36,8 @@ pub fn slug(model: &Model) -> String {
 
 const OPENCODE_BASE: &str = "https://opencode.ai/zen/go/v1";
 const XAI_BASE: &str = "https://api.x.ai/v1";
+const OPENAI_BASE: &str = "https://api.openai.com/v1";
+const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api";
 const EFFORTS: &[&str] = &["low", "medium", "high"];
 
@@ -52,6 +56,22 @@ pub fn builtin_catalog() -> Vec<Model> {
         base_url: XAI_BASE.into(),
         api: Api::Completions,
         efforts: &[],
+        context_window,
+    };
+    let openai = |id: &str, context_window: u64| Model {
+        provider: "openai".into(),
+        id: id.into(),
+        base_url: OPENAI_BASE.into(),
+        api: Api::Responses,
+        efforts: EFFORTS,
+        context_window,
+    };
+    let anthropic = |id: &str, context_window: u64| Model {
+        provider: "anthropic".into(),
+        id: id.into(),
+        base_url: ANTHROPIC_BASE.into(),
+        api: Api::Anthropic,
+        efforts: EFFORTS,
         context_window,
     };
     let codex = |id: &str| Model {
@@ -81,6 +101,16 @@ pub fn builtin_catalog() -> Vec<Model> {
         xai("grok-4.6", 500_000),
         xai("grok-4.3", 1_000_000),
         xai("grok-build-0.1", 256_000),
+        openai("gpt-5.5", 272_000),
+        openai("gpt-5.5-pro", 1_050_000),
+        openai("gpt-5.4", 272_000),
+        openai("gpt-5.3-codex", 400_000),
+        openai("gpt-5.2", 400_000),
+        anthropic("claude-fable-5", 1_000_000),
+        anthropic("claude-opus-5", 1_000_000),
+        anthropic("claude-sonnet-5", 1_000_000),
+        anthropic("claude-opus-4-8", 1_000_000),
+        anthropic("claude-haiku-4-5", 200_000),
     ]
 }
 
@@ -123,7 +153,10 @@ pub fn catalog() -> Vec<Model> {
         if let Ok(file) = serde_json::from_str::<ModelsFile>(&json) {
             for (provider, entry) in file.providers {
                 let api = match entry.api.as_deref() {
-                    Some("codex-responses") => Api::Responses,
+                    Some("codex-responses") | Some("responses") | Some("openai-responses") => {
+                        Api::Responses
+                    }
+                    Some("anthropic") | Some("anthropic-messages") => Api::Anthropic,
                     _ => Api::Completions,
                 };
                 let base = entry
@@ -186,6 +219,8 @@ pub fn resolve(query: &str) -> Option<Model> {
 pub fn display_name(provider: &str) -> &str {
     match provider {
         "openai-codex" => "OpenAI Codex",
+        "openai" => "OpenAI",
+        "anthropic" => "Anthropic",
         "opencode-go" => "OpenCode Go",
         "xai" => "xAI",
         other => other,

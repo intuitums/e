@@ -78,9 +78,18 @@ async fn fresh_access(provider: &str) -> Result<(String, String), String> {
 type RunError = (String, bool); // (message, delivered)
 
 pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
-    let (access, account) = fresh_access(&request.model.provider)
-        .await
-        .map_err(|e| (e, false))?;
+    // A plain API key means the standard platform mount (`{base}/responses`,
+    // bearer only); OAuth means the ChatGPT backend (`{base}/codex/responses`
+    // plus the account header), with lazy refresh.
+    let (access, account) = match auth::load().get(request.model.provider.as_str()) {
+        Some(Credential::ApiKey { key }) => (key.clone(), None),
+        _ => {
+            let (access, account) = fresh_access(&request.model.provider)
+                .await
+                .map_err(|e| (e, false))?;
+            (access, Some(account))
+        }
+    };
     let session_id = uuid::Uuid::new_v4().to_string();
 
     // Responses-API items: messages, function calls, and their outputs.
@@ -134,15 +143,20 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         body["tools"] = json!(request.tools);
     }
 
-    let response = http()
-        .post(format!("{}/codex/responses", request.model.base_url))
+    let mut builder = match &account {
+        Some(account) => http()
+            .post(format!("{}/codex/responses", request.model.base_url))
+            .header("chatgpt-account-id", account)
+            .header("originator", "e")
+            .header("OpenAI-Beta", "responses=experimental")
+            .header("session-id", &session_id)
+            .header("x-client-request-id", &session_id),
+        None => http().post(format!("{}/responses", request.model.base_url)),
+    };
+    builder = builder
         .bearer_auth(&access)
-        .header("chatgpt-account-id", &account)
-        .header("originator", "e")
-        .header("OpenAI-Beta", "responses=experimental")
-        .header("accept", "text/event-stream")
-        .header("session-id", &session_id)
-        .header("x-client-request-id", &session_id)
+        .header("accept", "text/event-stream");
+    let response = builder
         .json(&body)
         .send()
         .await

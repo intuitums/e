@@ -1,0 +1,213 @@
+//! The Anthropic Messages dialect: `{base}/v1/messages`, `x-api-key` auth.
+//!
+//! Same event grammar as the reference client: SSE data payloads carry a
+//! `type` — content_block_start/delta/stop stream text, thinking, and
+//! tool_use input JSON; message_start/message_delta carry usage. Effort maps
+//! to an extended-thinking token budget.
+
+use futures::StreamExt;
+use serde_json::json;
+use tokio::sync::mpsc;
+
+use crate::core::auth::{self, Credential};
+use crate::core::provider::{http, Event, Request, SseSplitter, ToolCall};
+
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// Output ceiling per reply; every cataloged model allows at least this.
+const MAX_TOKENS: u64 = 32_000;
+
+/// Extended-thinking budgets per effort; each stays under MAX_TOKENS.
+fn thinking_budget(effort: &str) -> u64 {
+    match effort {
+        "low" => 4_000,
+        "high" => 24_000,
+        _ => 12_000,
+    }
+}
+
+type RunError = (String, bool); // (message, delivered)
+
+pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
+    let auth = auth::load();
+    let key = match auth.get(request.model.provider.as_str()) {
+        Some(Credential::ApiKey { key }) => key.clone(),
+        Some(Credential::OAuth { access, .. }) => access.clone(),
+        None => {
+            return Err((
+                format!("no credentials for {} — run /login", request.model.provider),
+                false,
+            ))
+        }
+    };
+
+    // History → content blocks. Tool results ride user turns.
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    for m in &request.messages {
+        match m.role.as_str() {
+            "assistant" => {
+                let mut content = Vec::new();
+                if !m.content.is_empty() {
+                    content.push(json!({"type": "text", "text": m.content}));
+                }
+                for call in &m.tool_calls {
+                    let input: serde_json::Value =
+                        serde_json::from_str(&call.arguments).unwrap_or(json!({}));
+                    content.push(json!({
+                        "type": "tool_use", "id": call.id, "name": call.name, "input": input,
+                    }));
+                }
+                if !content.is_empty() {
+                    messages.push(json!({"role": "assistant", "content": content}));
+                }
+            }
+            "tool" => messages.push(json!({
+                "role": "user",
+                "content": [{"type": "tool_result",
+                             "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                             "content": m.content}],
+            })),
+            _ => messages.push(json!({
+                "role": "user",
+                "content": [{"type": "text", "text": m.content}],
+            })),
+        }
+    }
+
+    let mut body = json!({
+        "model": request.model.id,
+        "max_tokens": MAX_TOKENS,
+        "stream": true,
+        "system": [{"type": "text", "text": request.system,
+                    "cache_control": {"type": "ephemeral"}}],
+        "messages": messages,
+    });
+    if !request.tools.is_empty() {
+        // OpenAI-shaped schemas → Anthropic tool declarations.
+        let tools: Vec<serde_json::Value> = request
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t["function"]["name"],
+                    "description": t["function"]["description"],
+                    "input_schema": t["function"]["parameters"],
+                })
+            })
+            .collect();
+        body["tools"] = json!(tools);
+    }
+    if let Some(effort) = &request.effort {
+        body["thinking"] = json!({
+            "type": "enabled",
+            "budget_tokens": thinking_budget(effort),
+        });
+    }
+
+    let response = http()
+        .post(format!("{}/v1/messages", request.model.base_url))
+        .header("x-api-key", &key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header("accept", "text/event-stream")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| (format!("request failed: {e}"), false))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err((
+            format!("{status}: {}", text.chars().take(300).collect::<String>()),
+            true,
+        ));
+    }
+
+    let mut splitter = SseSplitter::new();
+    let mut stream = response.bytes_stream();
+    // Tool input JSON streams in fragments per content block index.
+    let mut open_tool: Option<(ToolCall, usize)> = None;
+    let mut input_tokens = 0u64;
+    let mut cache_read = 0u64;
+    let mut output_tokens = 0u64;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| (format!("stream failed: {e}"), true))?;
+        for payload in splitter.feed(&String::from_utf8_lossy(&chunk)) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                continue;
+            };
+            match value["type"].as_str().unwrap_or("") {
+                "message_start" => {
+                    let usage = &value["message"]["usage"];
+                    input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
+                    cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                }
+                "content_block_start" => {
+                    let index = value["index"].as_u64().unwrap_or(0) as usize;
+                    let block = &value["content_block"];
+                    if block["type"] == "tool_use" {
+                        open_tool = Some((
+                            ToolCall {
+                                id: block["id"].as_str().unwrap_or("").to_string(),
+                                name: block["name"].as_str().unwrap_or("").to_string(),
+                                arguments: String::new(),
+                            },
+                            index,
+                        ));
+                    }
+                }
+                "content_block_delta" => match value["delta"]["type"].as_str().unwrap_or("") {
+                    "text_delta" => {
+                        if let Some(text) = value["delta"]["text"].as_str() {
+                            let _ = tx.send(Event::TextDelta(text.to_string())).await;
+                        }
+                    }
+                    "thinking_delta" => {
+                        if let Some(text) = value["delta"]["thinking"].as_str() {
+                            let _ = tx.send(Event::ReasoningDelta(text.to_string())).await;
+                        }
+                    }
+                    "input_json_delta" => {
+                        if let Some((call, _)) = &mut open_tool {
+                            call.arguments
+                                .push_str(value["delta"]["partial_json"].as_str().unwrap_or(""));
+                        }
+                    }
+                    _ => {}
+                },
+                "content_block_stop" => {
+                    if let Some((mut call, _)) = open_tool.take() {
+                        if call.arguments.is_empty() {
+                            call.arguments = "{}".into();
+                        }
+                        let _ = tx.send(Event::ToolCall(call)).await;
+                    }
+                }
+                "message_delta" => {
+                    if let Some(out) = value["usage"]["output_tokens"].as_u64() {
+                        output_tokens = out;
+                    }
+                }
+                "message_stop" => {
+                    let _ = tx
+                        .send(Event::Usage {
+                            input: input_tokens,
+                            output: output_tokens,
+                            cache_read,
+                        })
+                        .await;
+                    return Ok(());
+                }
+                "error" => {
+                    let message = value["error"]["message"]
+                        .as_str()
+                        .unwrap_or("unknown provider error")
+                        .to_string();
+                    return Err((message, true));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}

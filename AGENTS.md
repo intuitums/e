@@ -23,7 +23,7 @@ test.
 src/core/    the harness, terminal-free
   agent.rs        the turn loop: request → stream → run tools → repeat; steering
   provider.rs     the seam — one Request, one Event stream, the SSE splitter
-  completions.rs · responses.rs    the two wire dialects
+  completions.rs · responses.rs · anthropic.rs    the three wire dialects
   tools/          read · write · edit · ls · grep · bash · skill
   api/            the extension host: subprocesses over a JSONL line
                   protocol (docs/extensions.md) — tools, commands, hooks
