@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The model picker shows only models from signed-in providers; `/model`
+  resolution works on the same set, so a pick is always usable. The default
+  model follows availability instead of sticking (a configured model whose
+  provider is signed out falls back, with a notice). Signed out entirely, e
+  says so at launch — "use /login" — the reference behavior; after a login,
+  a stranded model switches to an available one automatically.
 - OpenAI and Anthropic API keys: the key panel now lists OpenCode Go, xAI,
   OpenAI (platform responses dialect at api.openai.com), and Anthropic — a
   new Messages dialect (`core/anthropic.rs`) with streamed thinking, tool

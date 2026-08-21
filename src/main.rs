@@ -263,8 +263,13 @@ impl App {
     }
 
     fn open_model_menu(&mut self) {
+        let available = model::available();
+        if available.is_empty() {
+            self.notice("no models available — use /login to sign in to a provider".into());
+            return;
+        }
         let current = self.agent.model_slug();
-        let items = model::catalog()
+        let items = available
             .iter()
             .map(|m| {
                 let slug = model::slug(m);
@@ -515,7 +520,9 @@ impl App {
                 self.notice(format!("model set to {}", model::slug(&found)));
                 self.agent.model = found;
             } else {
-                self.notice(format!("no model matches {query:?} — see `e models`"));
+                self.notice(format!(
+                    "no available model matches {query:?} — sign in to its provider with /login"
+                ));
             }
             return;
         }
@@ -1005,6 +1012,18 @@ async fn main() -> std::io::Result<()> {
     if e::core::trust::status(&app.agent.cwd()).is_none() {
         app.trust = Some(TrustStage { selected: 0 });
     }
+    if e::core::auth::load().is_empty() {
+        app.notice(
+            "no provider signed in — use /login to sign in with an account or API key".into(),
+        );
+    } else if let Some(wanted) = e::core::settings::get_string("model") {
+        let current = app.agent.model_slug();
+        if wanted != current {
+            app.notice(format!(
+                "{wanted} is unavailable (provider not signed in) — using {current}"
+            ));
+        }
+    }
     // -c continues this workspace's most recent session.
     let continue_flag = args.iter().any(|a| a == "-c" || a == "--continue");
     let message_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
@@ -1227,6 +1246,14 @@ async fn main() -> std::io::Result<()> {
                         || message.contains("login failed")
                     {
                         app.auth = None;
+                    }
+                    if message.contains("signed in")
+                        && !e::core::auth::load().contains_key(&app.agent.model.provider)
+                    {
+                        if let Some(m) = e::core::model::available().into_iter().next() {
+                            app.notice(format!("model set to {}", e::core::model::slug(&m)));
+                            app.agent.model = m;
+                        }
                     }
                     app.notice(message);
                 }

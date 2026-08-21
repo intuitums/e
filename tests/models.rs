@@ -119,3 +119,33 @@ fn xai_builtins_carry_their_real_windows() {
     assert_eq!(e::core::model::display_name("opencode-go"), "OpenCode Go");
     assert_eq!(e::core::model::display_name("openai-codex"), "OpenAI Codex");
 }
+
+#[test]
+fn only_signed_in_providers_are_available() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("e-avail-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+
+    // Signed out: nothing is available and nothing resolves.
+    assert!(e::core::model::available().is_empty());
+    assert!(e::core::model::resolve("grok-4.6").is_none());
+
+    // Anthropic only: claude models appear, everyone else stays hidden.
+    std::fs::write(dir.join("auth.json"), r#"{"anthropic":{"key":"k"}}"#).unwrap();
+    let available = e::core::model::available();
+    assert!(available.iter().all(|m| m.provider == "anthropic"));
+    assert!(e::core::model::resolve("claude-fable-5").is_some());
+    assert!(e::core::model::resolve("grok-4.6").is_none());
+
+    // A configured model whose provider is signed out falls back to an
+    // available one instead of sticking.
+    std::fs::write(
+        dir.join("settings.json"),
+        r#"{"model":"opencode-go/deepseek-v4-flash"}"#,
+    )
+    .unwrap();
+    assert_eq!(e::core::model::default_model().provider, "anthropic");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

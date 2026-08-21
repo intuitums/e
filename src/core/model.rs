@@ -193,22 +193,48 @@ struct Settings {
 
 pub const DEFAULT_MODEL: &str = "opencode-go/deepseek-v4-flash";
 
+/// The catalog cut to providers with credentials — the models e can
+/// actually serve. Everything user-facing (the picker, resolution, the
+/// default) works on this set; the full catalog is data, not a menu.
+pub fn available() -> Vec<Model> {
+    let auth = crate::core::auth::load();
+    catalog()
+        .into_iter()
+        .filter(|m| auth.contains_key(&m.provider))
+        .collect()
+}
+
+/// The configured model if its provider is signed in; otherwise the first
+/// available model; with no credentials at all, the catalog default (the
+/// startup warning covers that state).
 pub fn default_model() -> Model {
     let wanted = std::fs::read_to_string(home::settings_path())
         .ok()
         .and_then(|s| serde_json::from_str::<Settings>(&s).ok())
-        .and_then(|s| s.model)
-        .unwrap_or_else(|| DEFAULT_MODEL.into());
-    resolve(&wanted).unwrap_or_else(|| resolve(DEFAULT_MODEL).expect("builtin default"))
+        .and_then(|s| s.model);
+    if let Some(wanted) = &wanted {
+        if let Some(m) = resolve(wanted) {
+            return m;
+        }
+    }
+    available()
+        .into_iter()
+        .next()
+        .or_else(|| resolve_in(&catalog(), DEFAULT_MODEL))
+        .expect("builtin default")
 }
 
-/// Resolve `provider/id`, a bare id, or a unique substring.
+/// Resolve `provider/id`, a bare id, or a unique substring — among the
+/// available models only, so a pick is always usable.
 pub fn resolve(query: &str) -> Option<Model> {
-    let cat = catalog();
-    if let Some(m) = cat.iter().find(|m| slug(m) == query || m.id == query) {
+    resolve_in(&available(), query)
+}
+
+fn resolve_in(models: &[Model], query: &str) -> Option<Model> {
+    if let Some(m) = models.iter().find(|m| slug(m) == query || m.id == query) {
         return Some(m.clone());
     }
-    let matches: Vec<&Model> = cat.iter().filter(|m| slug(m).contains(query)).collect();
+    let matches: Vec<&Model> = models.iter().filter(|m| slug(m).contains(query)).collect();
     if matches.len() == 1 {
         return Some(matches[0].clone());
     }
