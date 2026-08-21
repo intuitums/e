@@ -5,8 +5,11 @@
 - Self-update: `e update` fetches the latest release for this platform,
   verifies its checksum, and swaps the binary atomically; the TUI does the
   same silently in the background at launch and notices "e X.Y.Z
-  installed — restart to use it". Opt out with the Auto-update setting in
-  /settings. Dev builds (under `target/`) are always exempt, and
+  installed — /reload to switch to it now": with an update on disk,
+  /reload exits through the normal cleanup and execs the new binary with
+  -c, resuming the same session in place — no manual restart. The
+  Auto-update setting in /settings opts out of the launch check only;
+  `e update` always works. Dev builds (under `target/`) are always exempt, and
   `api.github.com`/`github.com` join the guard allowlist for it.
 - The rest of the reference tool surfaces: command rows preview their
   output beneath the row (first four `│` lines, a `│ … N lines more

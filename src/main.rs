@@ -70,6 +70,8 @@ enum AppJob {
     },
     /// A /reload finished: the restarted extension host.
     Reloaded(std::sync::Arc<e::core::api::ExtensionHost>),
+    /// The background updater installed a new version.
+    Updated(String),
 }
 
 struct App {
@@ -116,6 +118,10 @@ struct App {
     outputs: Vec<(String, String)>,
     /// The ctrl+o full-detail viewer, when open.
     viewer: Option<Viewer>,
+    /// A new version is installed on disk; /reload switches to it.
+    update_installed: Option<String>,
+    /// Exit the loop and exec the (updated) binary with -c.
+    relaunch: bool,
 }
 
 impl App {
@@ -1099,6 +1105,14 @@ impl App {
         if self.reloading {
             return;
         }
+        // With a freshly installed update on disk, /reload becomes the
+        // switch: exit through the normal cleanup and exec the new binary
+        // with -c, which resumes this session.
+        if self.update_installed.is_some() {
+            self.relaunch = true;
+            self.should_quit = true;
+            return;
+        }
         self.reloading = true;
         self.notice("reloading…".into());
         let old = self.host.clone();
@@ -1346,6 +1360,8 @@ e -v, --version"
         reloading: false,
         outputs: Vec::new(),
         viewer: None,
+        update_installed: None,
+        relaunch: false,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
     if e::core::config::trust::status(&app.agent.cwd()).is_none() {
@@ -1355,14 +1371,10 @@ e -v, --version"
     // launch, install it silently, and say so — the running session is
     // untouched until a restart. Dev builds and the opt-out are exempt.
     if !e::core::update::is_dev_build() && e::core::config::settings::auto_update() {
-        let jobs = app.jobs.clone();
+        let results = app.results.clone();
         tokio::spawn(async move {
             if let Ok(Some(version)) = e::core::update::self_update().await {
-                let _ = jobs
-                    .send(format!(
-                        "e {version} installed — restart to use it (your session is saved; `e -c` continues it)"
-                    ))
-                    .await;
+                let _ = results.send(AppJob::Updated(version)).await;
             }
         });
     }
@@ -1633,6 +1645,12 @@ e -v, --version"
                         }
                     }
                     Some(AppJob::CompactFailed(_)) => {}
+                    Some(AppJob::Updated(version)) => {
+                        app.notice(format!(
+                            "e {version} installed — /reload to switch to it now"
+                        ));
+                        app.update_installed = Some(version);
+                    }
                     Some(AppJob::Reloaded(host)) => {
                         app.reloading = false;
                         app.host = host.clone();
@@ -1732,6 +1750,15 @@ e -v, --version"
     let mut out = std::io::stdout();
     write!(out, "\r\n\x1b[?25h")?;
     out.flush()?;
+    if app.relaunch {
+        // The terminal is restored and the host is down: replace this
+        // process with the updated binary, continuing the same session.
+        use std::os::unix::process::CommandExt;
+        if let Ok(exe) = std::env::current_exe() {
+            let err = std::process::Command::new(exe).arg("-c").exec();
+            eprintln!("relaunch failed: {err} — start e again by hand");
+        }
+    }
     Ok(())
 }
 
