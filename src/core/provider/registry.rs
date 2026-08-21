@@ -71,7 +71,7 @@ pub fn all() -> &'static [Provider] {
     REGISTRY.get_or_init(|| {
         [
             include_str!("providers/opencode-go.json"),
-            include_str!("providers/opencode.json"),
+            include_str!("providers/opencode-zen.json"),
             include_str!("providers/openai-codex.json"),
             include_str!("providers/xai.json"),
             include_str!("providers/openai.json"),

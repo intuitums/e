@@ -225,17 +225,46 @@ fn zen_and_go_are_distinct_providers() {
         .iter()
         .find(|m| m.provider == "opencode-go")
         .unwrap();
-    let zen = catalog.iter().find(|m| m.provider == "opencode").unwrap();
+    let zen = catalog
+        .iter()
+        .find(|m| m.provider == "opencode-zen")
+        .unwrap();
     assert_eq!(go.base_url, "https://opencode.ai/zen/go/v1");
     assert_eq!(zen.base_url, "https://opencode.ai/zen/v1");
     assert_eq!(
-        e::core::provider::catalog::display_name("opencode"),
+        e::core::provider::catalog::display_name("opencode-zen"),
         "OpenCode Zen"
     );
     assert_eq!(
         e::core::provider::catalog::display_name("opencode-go"),
         "OpenCode Go"
     );
+}
+
+#[test]
+fn legacy_opencode_auth_keys_still_sign_in() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("e-legacy-auth-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+    for provider in e::core::provider::registry::all() {
+        if let Some(env) = &provider.auth.key_env {
+            std::env::remove_var(env);
+        }
+    }
+
+    // An auth.json written before the rename still signs Zen in.
+    std::fs::write(dir.join("auth.json"), r#"{"opencode":{"key":"sk-old"}}"#).unwrap();
+    let auth = e::core::auth::load();
+    assert!(
+        matches!(auth.get("opencode-zen"), Some(e::core::auth::Credential::ApiKey { key }) if key == "sk-old"),
+        "legacy key not honored"
+    );
+    assert!(e::core::provider::catalog::available()
+        .iter()
+        .any(|m| m.provider == "opencode-zen"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // The env lock is deliberately held across awaits: E_HOME must stay ours and

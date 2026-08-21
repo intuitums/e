@@ -43,6 +43,13 @@ pub fn load() -> AuthFile {
             out.insert(provider, cred);
         }
     }
+    // The Zen provider was once id'd `opencode`; honor old auth.json keys
+    // under the new name. Read-only — the file stays as the user left it.
+    if !out.contains_key("opencode-zen") {
+        if let Some(cred) = out.remove("opencode") {
+            out.insert("opencode-zen".into(), cred);
+        }
+    }
     for provider in crate::core::provider::registry::all() {
         if out.contains_key(&provider.name) {
             continue;

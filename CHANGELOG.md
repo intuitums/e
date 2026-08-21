@@ -2,6 +2,12 @@
 
 ## Unreleased
 
++- The Zen provider's id is `opencode-zen`, matching its display name and
++  `opencode-go` — the two OpenCode gateways now read as a pair. Auth.json
++  keys written under the old `opencode` id still sign in (read-only
++  alias, the file is untouched); a saved `opencode/…` model slug falls
++  back to the picker once, then persists under the new id.
+
 +- The catalog splits along its one real seam: `catalog/mod.rs` decides
 +  which models exist (registry projection, models.json overrides,
 +  resolution, scope) and `catalog/remote.rs` owns the live sync (the

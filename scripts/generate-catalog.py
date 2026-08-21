@@ -16,7 +16,7 @@ import json, pathlib, sys, urllib.request
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROVIDERS = ROOT / "src" / "core" / "provider" / "providers"
 # models.dev ids for e's provider names, where they differ.
-DEV_IDS = {"opencode-go": "opencode-go", "opencode": "opencode",
+DEV_IDS = {"opencode-go": "opencode-go", "opencode-zen": "opencode",
            "xai": "xai", "openai": "openai", "anthropic": "anthropic",
            "openai-codex": "openai"}
 

@@ -1,5 +1,5 @@
 {
-	"name": "opencode",
+	"name": "opencode-zen",
 	"display": "OpenCode Zen",
 	"base_url": "https://opencode.ai/zen/v1",
 	"api": "openai-completions",
