@@ -608,7 +608,17 @@ impl App {
             self.auth = None;
             self.editor.mask = false;
             match e::core::auth::login::save_api_key(&secret_for, &trimmed) {
-                Ok(()) => self.notice(format!("{secret_for}: key saved to ~/.e/auth.json")),
+                Ok(()) => {
+                    self.notice(format!("{secret_for}: key saved to ~/.e/auth.json"));
+                    // An API-key sign-in is a sign-in: emit the same typed
+                    // outcome the OAuth flows send, so the stranded-model
+                    // re-pick happens here too, not only for browser logins.
+                    let _ = self
+                        .logins
+                        .try_send(e::core::auth::login::Outcome::SignedIn {
+                            provider: secret_for.clone(),
+                        });
+                }
                 Err(e) => self.notice(format!("{secret_for}: {e}")),
             }
             return;
