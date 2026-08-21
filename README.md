@@ -83,13 +83,5 @@ More in [DESIGN.md](DESIGN.md).
 ---
 
 <div align="center">
-<sub>
-
-The interface is modeled on **[fx](https://github.com/vercel-labs/fx)** by Vercel —
-its design is the whole basis for how 𝑒 looks and feels.
-Reimplemented in Rust, pinned to fx's own tests.
-
-[MIT](LICENSE)
-
-</sub>
+<sub>Interface based on <b><a href="https://github.com/vercel-labs/fx">fx</a></b> by Vercel · <a href="LICENSE">MIT</a></sub>
 </div>
