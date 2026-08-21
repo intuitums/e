@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `e -r` / `--resume` launches straight into the session picker (the
+  reference behavior); `e -c` continues the directory's latest session as
+  before. `e --help` documents the CLI surface.
 - The home is now created lazily (the reference behavior): no seeded
   skeleton — directories appear the first time something is written, so a
   fresh boot-and-quit leaves no `~/.e` at all.
