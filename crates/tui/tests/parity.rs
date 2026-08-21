@@ -1,0 +1,90 @@
+//! The conformance suite: byte-pinned against the reference design's own
+//! test literals. Ported from `test/parity.test.ts`, which remains the
+//! executable TypeScript twin until the swap milestone.
+
+use e_tui::app::fmt::{compact_model_label, format_duration, format_tokens};
+use e_tui::render::ansi::heading_style;
+use e_tui::render::theme::Theme;
+
+#[test]
+fn heading_styles_match_the_level_table() {
+    assert_eq!(heading_style(1, "Workspace overview"), "\x1b[1m\x1b[4mWorkspace overview\x1b[24m\x1b[22m");
+    assert_eq!(heading_style(2, "Installation"), "\x1b[1mInstallation\x1b[22m");
+    assert_eq!(heading_style(3, "macOS"), "\x1b[4mmacOS\x1b[24m");
+    assert_eq!(heading_style(4, "Shell setup"), "\x1b[1m\x1b[2mShell setup\x1b[22m");
+    assert_eq!(heading_style(5, "Optional tools"), "\x1b[2m\x1b[4mOptional tools\x1b[24m\x1b[22m");
+    assert_eq!(heading_style(6, "Troubleshooting"), "\x1b[2mTroubleshooting\x1b[22m");
+}
+
+#[test]
+fn token_counts_use_the_compact_form() {
+    assert_eq!(format_tokens(42), "42");
+    assert_eq!(format_tokens(999), "999");
+    assert_eq!(format_tokens(9600), "9.6k");
+    assert_eq!(format_tokens(15000), "15k");
+    assert_eq!(format_tokens(999000), "999k");
+}
+
+#[test]
+fn durations_use_the_compact_form() {
+    assert_eq!(format_duration(4_000), "4s");
+    assert_eq!(format_duration(130_000), "2m 10s");
+    assert_eq!(format_duration(362_000), "6m 2s");
+    assert_eq!(format_duration(3_660_000), "1h 01m");
+}
+
+#[test]
+fn model_labels_shorten_the_reference_way() {
+    assert_eq!(compact_model_label("anthropic/claude-opus-4.7"), "opus 4.7");
+    assert_eq!(compact_model_label("openai/gpt-4o"), "gpt-4o");
+    assert_eq!(compact_model_label("zai/glm-5.2"), "glm-5.2");
+}
+
+fn read_theme(name: &str) -> (Theme, serde_json::Value) {
+    let path = format!("{}/../../themes/{name}.json", env!("CARGO_MANIFEST_DIR"));
+    let json = std::fs::read_to_string(&path).expect("theme file");
+    (Theme::from_json(&json).expect("parse"), serde_json::from_str(&json).unwrap())
+}
+
+#[test]
+fn the_two_themes_are_structural_mirrors() {
+    let (_, light) = read_theme("light");
+    let (_, dark) = read_theme("dark");
+    let (lc, dc) = (&light["colors"], &dark["colors"]);
+    let l_keys: Vec<_> = lc.as_object().unwrap().keys().collect();
+    let d_keys: Vec<_> = dc.as_object().unwrap().keys().collect();
+    assert_eq!(l_keys, d_keys);
+    for key in l_keys {
+        assert_eq!(lc[key], dc[key], "token {key} is not mirrored");
+    }
+    // A var nothing references is dead weight that hides drift.
+    for theme in [&light, &dark] {
+        let used: Vec<String> = theme["colors"]
+            .as_object().unwrap().values()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        for var in theme["vars"].as_object().unwrap().keys() {
+            assert!(used.contains(var), "unused var {var}");
+        }
+    }
+}
+
+#[test]
+fn the_palette_carries_the_reference_values() {
+    let (light, _) = read_theme("light");
+    let (dark, _) = read_theme("dark");
+    let expected: &[(&str, i64, i64)] = &[
+        ("ink", 235, 255),
+        ("statusline", 241, 245),
+        ("dim", 247, 245),
+        ("divider", 250, 240),
+        ("accent", 238, 252),
+        ("comment", 243, 245),
+        ("code", 241, 250),
+        ("selected", 251, 239),
+    ];
+    for (name, l, d) in expected {
+        assert_eq!(light.vars.get(*name), Some(l), "light var {name}");
+        assert_eq!(dark.vars.get(*name), Some(d), "dark var {name}");
+    }
+}
