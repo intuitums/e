@@ -89,7 +89,7 @@ impl App {
                 self.context_tokens = 0;
                 self.agent.clear();
                 self.transcript.clear();
-                self.transcript.push(Block::new(Kind::Banner, banner_path()));
+                self.transcript.push(Block::new(Kind::Banner, e::VERSION));
             }
             _ if trimmed.starts_with('/') => {
                 self.notice(format!("unknown command {trimmed}"));
@@ -172,8 +172,8 @@ impl App {
     }
 }
 
-/// The banner's path: the working directory, home-relative.
-fn banner_path() -> String {
+/// The tab title's path: the working directory, home-relative.
+fn title_path() -> String {
     let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
     let home = std::env::var("HOME").unwrap_or_default();
     if !home.is_empty() && cwd.starts_with(&home) {
@@ -283,12 +283,18 @@ async fn main() -> std::io::Result<()> {
         should_quit: false,
         context_tokens: 0,
     };
-    app.transcript.push(Block::new(Kind::Banner, banner_path()));
+    app.transcript.push(Block::new(Kind::Banner, e::VERSION));
     // A message on the command line becomes the first prompt.
     let initial: String = args.join(" ");
 
     terminal::enable_raw_mode()?;
     let _guard = RawGuard;
+    // Terminal tab title: the custom glyph, a dot, the path.
+    {
+        let mut out = std::io::stdout();
+        write!(out, "]0;𝑒 · {}", title_path())?;
+        out.flush()?;
+    }
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
 
