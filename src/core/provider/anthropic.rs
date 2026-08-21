@@ -25,7 +25,7 @@ fn thinking_budget(effort: &str) -> u64 {
     }
 }
 
-type RunError = (String, bool); // (message, delivered)
+type RunError = (String, crate::core::provider::ErrorKind);
 
 pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
     let auth = auth::load();
@@ -35,7 +35,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         None => {
             return Err((
                 format!("no credentials for {} — run /login", request.model.provider),
-                false,
+                crate::core::provider::ErrorKind::Auth,
             ))
         }
     };
@@ -113,14 +113,19 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         .json(&body)
         .send()
         .await
-        .map_err(|e| (format!("request failed: {e}"), false))?;
+        .map_err(|e| {
+            (
+                format!("request failed: {e}"),
+                crate::core::provider::ErrorKind::Transient,
+            )
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         return Err((
             format!("{status}: {}", text.chars().take(300).collect::<String>()),
-            true,
+            crate::core::provider::ErrorKind::Delivered,
         ));
     }
 
@@ -133,7 +138,12 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     let mut output_tokens = 0u64;
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| (format!("stream failed: {e}"), true))?;
+        let chunk = chunk.map_err(|e| {
+            (
+                format!("stream failed: {e}"),
+                crate::core::provider::ErrorKind::Delivered,
+            )
+        })?;
         for payload in splitter.feed(&String::from_utf8_lossy(&chunk)) {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
                 continue;
@@ -205,7 +215,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                         .as_str()
                         .unwrap_or("unknown provider error")
                         .to_string();
-                    return Err((message, true));
+                    return Err((message, crate::core::provider::ErrorKind::Delivered));
                 }
                 _ => {}
             }

@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use crate::core::auth::{self, Credential};
 use crate::core::provider::{http, Event, Request, SseSplitter, ToolCall};
 
-type RunError = (String, bool); // (message, delivered)
+type RunError = (String, crate::core::provider::ErrorKind);
 
 pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
     let auth = auth::load();
@@ -29,7 +29,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
             } else {
                 let fresh = crate::core::auth::login::xai_refresh(refresh)
                     .await
-                    .map_err(|e| (e, false))?;
+                    .map_err(|e| (e, crate::core::provider::ErrorKind::Auth))?;
                 let _ = auth::set(&request.model.provider, fresh.clone());
                 match fresh {
                     Credential::OAuth { access, .. } => access,
@@ -40,7 +40,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         None => {
             return Err((
                 format!("no credentials for {} — run /login", request.model.provider),
-                false,
+                crate::core::provider::ErrorKind::Auth,
             ))
         }
     };
@@ -91,14 +91,19 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         .json(&body)
         .send()
         .await
-        .map_err(|e| (format!("request failed: {e}"), false))?;
+        .map_err(|e| {
+            (
+                format!("request failed: {e}"),
+                crate::core::provider::ErrorKind::Transient,
+            )
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         return Err((
             format!("{status}: {}", text.chars().take(300).collect::<String>()),
-            true,
+            crate::core::provider::ErrorKind::Delivered,
         ));
     }
 
@@ -119,7 +124,12 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     let mut splitter = SseSplitter::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| (format!("stream error: {e}"), true))?;
+        let chunk = chunk.map_err(|e| {
+            (
+                format!("stream error: {e}"),
+                crate::core::provider::ErrorKind::Delivered,
+            )
+        })?;
         for payload in splitter.feed(&String::from_utf8_lossy(&chunk)) {
             if payload == "[DONE]" {
                 flush(&mut pending, tx).await;

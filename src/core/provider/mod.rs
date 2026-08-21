@@ -61,6 +61,20 @@ impl ChatMessage {
     }
 }
 
+/// Why a request failed — the retry decision hangs off this, never off
+/// matching the message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// Credentials are missing or were rejected. Retrying cannot help; the
+    /// user must sign in.
+    Auth,
+    /// The request never left: connection or setup failure. Safe to retry.
+    Transient,
+    /// The provider saw the request and failed (HTTP status, broken stream,
+    /// an error frame). Retrying could double-bill or double-run tools.
+    Delivered,
+}
+
 #[derive(Debug)]
 pub enum Event {
     TextDelta(String),
@@ -78,11 +92,10 @@ pub enum Event {
     /// stores it in history and the dialect replays it.
     ReasoningItem(String),
     Done,
-    /// `delivered`: whether the request may have reached the provider —
-    /// only definitely-unsent failures are safe to auto-retry.
+    /// `kind` says whether the failure is retryable — see ErrorKind.
     Error {
         message: String,
-        delivered: bool,
+        kind: ErrorKind,
     },
 }
 
@@ -110,8 +123,8 @@ pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHand
             Ok(()) => {
                 let _ = tx.send(Event::Done).await;
             }
-            Err((message, delivered)) => {
-                let _ = tx.send(Event::Error { message, delivered }).await;
+            Err((message, kind)) => {
+                let _ = tx.send(Event::Error { message, kind }).await;
             }
         }
     });
@@ -183,9 +196,14 @@ fn skip_separator(buf: &str, pos: usize) -> usize {
     }
 }
 
-pub fn http() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent(format!("e/{}", crate::VERSION))
-        .build()
-        .expect("http client")
+/// The shared client: one pool for every request, so connections (and their
+/// TLS handshakes) are reused across turns and tool steps.
+pub fn http() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(format!("e/{}", crate::VERSION))
+            .build()
+            .expect("http client")
+    })
 }
