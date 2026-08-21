@@ -27,3 +27,19 @@ built-in's provider and id replaces it — the file wins, like themes.
 - Credentials: `/login <provider>` stores an API key for any provider name.
 - Only models whose provider has credentials appear in `/models`; scope a
   cycling shortlist with `/scoped-models` (ctrl+p cycles).
+
+## Credentials
+
+`/login` stores keys in `~/.e/auth.json`. A provider with no stored
+credential falls back to its conventional environment variable —
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `OPENCODE_API_KEY`,
+`OPENCODE_GO_API_KEY` — which is what CI and scripts want. `auth.json`
+wins when both exist.
+
+## The catalog is live
+
+Signed-in providers are asked for their model list (`GET {base}/models`)
+in the background — at launch, after a sign-in, and when `/models` opens —
+so a model a gateway ships today appears today, no e release involved.
+Windows the gateway reports win; otherwise new models default to 200k,
+correctable here in `models.json` (which always wins a name clash).
