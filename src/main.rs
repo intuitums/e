@@ -10,11 +10,11 @@ use futures::StreamExt;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use e::ui::transcript::{Block, Kind, Transcript};
-use e::ui::composer::{Editor, EditorResult, Key};
-use e::ui::statusline::{statusline, StatusData, Turn};
-use e::ui::theme::{load_bundled, Theme};
-use e::ui::screen::Screen;
+use e::tui::transcript::{Block, Kind, Transcript};
+use e::tui::composer::{Editor, EditorResult, Key};
+use e::tui::statusline::{statusline, StatusData, Turn};
+use e::tui::theme::{load_bundled, Theme};
+use e::tui::screen::Screen;
 
 struct App {
     theme: Theme,

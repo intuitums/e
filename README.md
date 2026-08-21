@@ -61,7 +61,7 @@ The list below is the feature contract the milestones are building toward.
 ```
 src/
   core/       the harness — budgeted (DESIGN.md §3), terminal-free
-  ui/         the frontend: render.rs (SGR styling), markdown.rs,
+  tui/        the terminal frontend: render.rs (SGR styling), markdown.rs,
               highlight.rs, screen.rs (the differ), composer.rs,
               transcript.rs, statusline.rs, theme.rs
 tests/        the parity suite (the byte-pinned visual contract)

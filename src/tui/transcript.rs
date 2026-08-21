@@ -4,9 +4,9 @@
 //! runs of tool rows contiguous. Blocks render (and cache) their final lines
 //! at a given width; streaming touches only the tail block.
 
-use crate::ui::render::{bold, dim};
-use crate::ui::markdown::{render_markdown, wrap_styled};
-use crate::ui::theme::Theme;
+use crate::tui::render::{bold, dim};
+use crate::tui::markdown::{render_markdown, wrap_styled};
+use crate::tui::theme::Theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {

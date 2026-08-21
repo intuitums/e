@@ -4,8 +4,8 @@
 //! ctrl+a/e/k/u/w, history up/down, shift+enter (or alt+enter) newline.
 //! Anything else waits until asked for.
 
-use crate::ui::markdown::visible_width;
-use crate::ui::theme::Theme;
+use crate::tui::markdown::visible_width;
+use crate::tui::theme::Theme;
 
 pub struct Editor {
     text: Vec<char>,

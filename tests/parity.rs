@@ -3,8 +3,8 @@
 //! executable TypeScript twin until the swap milestone.
 
 use e::core::output::{compact_model_label, format_duration, format_tokens};
-use e::ui::render::heading_style;
-use e::ui::theme::Theme;
+use e::tui::render::heading_style;
+use e::tui::theme::Theme;
 
 #[test]
 fn heading_styles_match_the_level_table() {
@@ -89,7 +89,7 @@ fn the_palette_carries_the_reference_values() {
     }
 }
 
-use e::ui::markdown::{code_panel, render_markdown};
+use e::tui::markdown::{code_panel, render_markdown};
 
 fn dark() -> Theme {
     read_theme("dark").0

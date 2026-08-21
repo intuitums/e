@@ -1,8 +1,8 @@
 //! Activity row and status line — pure projections of app state.
 
 use crate::core::output::{compact_model_label, format_tokens};
-use crate::ui::markdown::visible_width;
-use crate::ui::theme::Theme;
+use crate::tui::markdown::visible_width;
+use crate::tui::theme::Theme;
 use std::collections::BTreeMap;
 
 /// Per-turn activity: verb, tool tally, token flow, clock.
