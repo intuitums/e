@@ -8,13 +8,16 @@ use crate::tui::markdown::{render_markdown, wrap_styled};
 use crate::tui::render::{bold, dim};
 use crate::tui::theme::Theme;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Banner,
     User,
     Assistant,
     Reasoning,
     Tool,
+    /// Finished consecutive tool calls, collapsed to the reference group
+    /// shape: a tallied header, `├` children, `└` last.
+    ToolGroup,
     /// A `!` shell passthrough: `$ cmd` header, output tail below.
     Shell,
     Summary,
@@ -31,6 +34,8 @@ pub struct Block {
     /// A finished tool's outcome summary ("exit 7", "timeout 5s"); rendered
     /// as a continuation line only on failure — the reference convention.
     pub result: Option<String>,
+    /// ToolGroup children, plain "Verb target" per call, in order.
+    pub children: Vec<String>,
     cache: Option<(usize, Vec<String>)>,
 }
 
@@ -43,6 +48,7 @@ impl Block {
             is_error: false,
             detail: None,
             result: None,
+            children: Vec::new(),
             cache: None,
         }
     }
@@ -124,6 +130,18 @@ impl Block {
                 }
                 rows
             }
+            Kind::ToolGroup => {
+                let mut rows = vec![format!("  ● {}", self.text)];
+                for (i, child) in self.children.iter().enumerate() {
+                    let connector = if i + 1 == self.children.len() {
+                        "└"
+                    } else {
+                        "├"
+                    };
+                    rows.push(format!("  {} {child}", theme.fg("muted", connector)));
+                }
+                rows
+            }
             Kind::Shell => {
                 // The reference look: the command in the bash-mode color, the
                 // output tail muted beneath it.
@@ -166,6 +184,66 @@ impl Block {
     }
 }
 
+/// The reference's tally label for a verb; only "command" pluralizes
+/// ("2 read", "1 edit", "3 commands" — the reference's own literals).
+fn flush_run(out: &mut Vec<Block>, run: &mut Vec<Block>) {
+    if run.len() < 2 {
+        out.append(run);
+        return;
+    }
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    let mut failed = 0usize;
+    let mut children = Vec::with_capacity(run.len());
+    for block in run.iter() {
+        if block.is_error {
+            failed += 1;
+        }
+        let verb = block.text.clone();
+        if let Some(entry) = counts.iter_mut().find(|(v, _)| *v == verb) {
+            entry.1 += 1;
+        } else {
+            counts.push((verb.clone(), 1));
+        }
+        children.push(match &block.detail {
+            Some(target) if !target.is_empty() => format!("{verb} {target}"),
+            _ => verb,
+        });
+    }
+    let mut header = format!(
+        "{} tool call{}",
+        run.len(),
+        if run.len() == 1 { "" } else { "s" }
+    );
+    for (verb, count) in &counts {
+        header.push_str(&format!(" · {}", tally_label(verb, *count)));
+    }
+    if failed > 0 {
+        header.push_str(&format!(" · {failed} failed"));
+    }
+    let mut group = Block::new(Kind::ToolGroup, header);
+    group.done = true;
+    group.children = children;
+    out.push(group);
+    run.clear();
+}
+
+fn tally_label(verb: &str, count: usize) -> String {
+    let label = match verb {
+        "Read" => "read",
+        "Wrote" => "write",
+        "Edited" => "edit",
+        "Ran" | "Running" => "command",
+        "Searched" => "search",
+        "Listed" => "list",
+        other => return format!("{count} {}", other.to_lowercase()),
+    };
+    if label == "command" && count > 1 {
+        format!("{count} commands")
+    } else {
+        format!("{count} {label}")
+    }
+}
+
 fn gap(prev: Kind, next: Kind) -> usize {
     if prev == Kind::Tool && next == Kind::Tool {
         0
@@ -196,6 +274,25 @@ impl Transcript {
         for b in &mut self.blocks {
             b.touch();
         }
+    }
+
+    /// Collapse every run of two or more finished tool rows into the
+    /// reference group: `● N tool calls · tallies [· N failed]` over `├`/`└`
+    /// children. Idempotent — groups never re-collapse; a still-running row
+    /// ends its run and stays live.
+    pub fn collapse_tools(&mut self) {
+        let mut out: Vec<Block> = Vec::with_capacity(self.blocks.len());
+        let mut run: Vec<Block> = Vec::new();
+        for block in self.blocks.drain(..) {
+            if block.kind == Kind::Tool && block.done {
+                run.push(block);
+                continue;
+            }
+            flush_run(&mut out, &mut run);
+            out.push(block);
+        }
+        flush_run(&mut out, &mut run);
+        self.blocks = out;
     }
 
     pub fn render(&mut self, theme: &Theme, width: usize) -> Vec<String> {

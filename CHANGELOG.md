@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Finished tool runs collapse into the reference group when the turn
+  ends: a tallied header (`● 3 tool calls · 2 read · 1 command · 1
+  failed`, with the reference's own pluralization) over `├` children and
+  a `└` last — the dot-and-connectors shape. Live calls stay individual
+  rows until then.
 - Tool rows wear the reference grammar: a finished row is just the row —
   no "(done)" — and a failed tool turns its marker to the error token
   with a `│ <outcome>` continuation line (`│ exit 128`) beneath.

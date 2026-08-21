@@ -875,6 +875,9 @@ impl App {
             }
             SessionEvent::TurnEnd { aborted } => {
                 self.agent.on_turn_end();
+                // The reference collapse: finished tool runs fold into their
+                // tallied group once the turn is over.
+                self.transcript.collapse_tools();
                 let Some(s) = self.active.take() else { return };
                 let tokens = if s.turn.input == 0 && s.turn.output == 0 {
                     String::new()

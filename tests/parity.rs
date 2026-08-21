@@ -209,3 +209,79 @@ fn reasoning_renders_inline_markdown() {
         "2 ** 3 and a ` alone"
     );
 }
+
+#[test]
+fn finished_tool_runs_collapse_to_the_reference_group() {
+    use e::tui::transcript::{Block, Kind, Transcript};
+    let theme = e::tui::theme::resolve("dark", false);
+
+    let mut transcript = Transcript::default();
+    transcript.push(Block::new(Kind::User, "go"));
+    let mut read = Block::new(Kind::Tool, "Read");
+    read.detail = Some("runtime.rs".into());
+    read.done = true;
+    let mut edit = Block::new(Kind::Tool, "Edited");
+    edit.detail = Some("main.rs".into());
+    edit.done = true;
+    let mut ran = Block::new(Kind::Tool, "Ran");
+    ran.detail = Some("cargo build".into());
+    ran.done = true;
+    ran.is_error = true;
+    ran.result = Some("exit 1".into());
+    transcript.push(read);
+    transcript.push(edit);
+    transcript.push(ran);
+    transcript.collapse_tools();
+
+    // The reference's own literal shape, e's verbs: header with tallies
+    // ("1 read · 1 edit · 1 command · 1 failed"), ├ children, └ last.
+    assert_eq!(transcript.blocks.len(), 2);
+    let group = &transcript.blocks[1];
+    assert_eq!(group.kind, Kind::ToolGroup);
+    let rows = group.lines_for_test(&theme, 80);
+    let plain: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let mut out = String::new();
+            let mut chars = r.chars();
+            while let Some(c) = chars.next() {
+                if c == '\x1b' {
+                    for e in chars.by_ref() {
+                        if e.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                out.push(c);
+            }
+            out
+        })
+        .collect();
+    assert_eq!(
+        plain[0],
+        "  ● 3 tool calls · 1 read · 1 edit · 1 command · 1 failed"
+    );
+    assert_eq!(plain[1], "  ├ Read runtime.rs");
+    assert_eq!(plain[2], "  ├ Edited main.rs");
+    assert_eq!(plain[3], "  └ Ran cargo build");
+
+    // The reference pluralization: "3 commands", but "2 read".
+    let mut t2 = Transcript::default();
+    for cmd in ["a", "b", "c"] {
+        let mut b = Block::new(Kind::Tool, "Ran");
+        b.detail = Some(cmd.into());
+        b.done = true;
+        t2.push(b);
+    }
+    t2.collapse_tools();
+    assert!(t2.blocks[0].text.starts_with("3 tool calls · 3 commands"));
+
+    // A single call never groups; a still-running row ends the run.
+    let mut t3 = Transcript::default();
+    let mut single = Block::new(Kind::Tool, "Read");
+    single.done = true;
+    t3.push(single);
+    t3.collapse_tools();
+    assert_eq!(t3.blocks[0].kind, Kind::Tool);
+}
