@@ -18,9 +18,16 @@ pub const AUTH_BASE: &str = "https://auth.openai.com";
 
 /// Refresh when within a minute of expiry; persist the rotated pair.
 async fn fresh_access(provider: &str) -> Result<(String, String), String> {
-
-    let Some(Credential::OAuth { access, refresh, expires, account_id }) = auth::load().get(provider).cloned() else {
-        return Err(format!("no OAuth credentials for {provider} — run `e auth {provider}`"));
+    let Some(Credential::OAuth {
+        access,
+        refresh,
+        expires,
+        account_id,
+    }) = auth::load().get(provider).cloned()
+    else {
+        return Err(format!(
+            "no OAuth credentials for {provider} — run `e auth {provider}`"
+        ));
     };
     let account = account_id
         .or_else(|| auth::account_id_from_jwt(&access))
@@ -42,7 +49,9 @@ async fn fresh_access(provider: &str) -> Result<(String, String), String> {
         .map_err(|e| format!("token refresh failed: {e}"))?;
     if !response.status().is_success() {
         let status = response.status();
-        return Err(format!("token refresh rejected ({status}) — run `e auth {provider}` again"));
+        return Err(format!(
+            "token refresh rejected ({status}) — run `e auth {provider}` again"
+        ));
     }
     let tokens: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
     let (Some(access), Some(refresh), Some(expires_in)) = (
@@ -69,7 +78,9 @@ async fn fresh_access(provider: &str) -> Result<(String, String), String> {
 type RunError = (String, bool); // (message, delivered)
 
 pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
-    let (access, account) = fresh_access(&request.model.provider).await.map_err(|e| (e, false))?;
+    let (access, account) = fresh_access(&request.model.provider)
+        .await
+        .map_err(|e| (e, false))?;
     let session_id = uuid::Uuid::new_v4().to_string();
 
     // Responses-API items: messages, function calls, and their outputs.
@@ -140,7 +151,10 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err((format!("{status}: {}", text.chars().take(300).collect::<String>()), true));
+        return Err((
+            format!("{status}: {}", text.chars().take(300).collect::<String>()),
+            true,
+        ));
     }
 
     let mut splitter = SseSplitter::new();
@@ -171,32 +185,52 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                 "response.output_item.added" => {
                     let item = &value["item"];
                     if item["type"].as_str() == Some("function_call") {
-                        let key = item["id"].as_str().or(item["call_id"].as_str()).unwrap_or("").to_string();
-                        pending.insert(key, ToolCall {
-                            id: item["call_id"].as_str().unwrap_or("").into(),
-                            name: item["name"].as_str().unwrap_or("").into(),
-                            arguments: item["arguments"].as_str().unwrap_or("").into(),
-                        });
+                        let key = item["id"]
+                            .as_str()
+                            .or(item["call_id"].as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        pending.insert(
+                            key,
+                            ToolCall {
+                                id: item["call_id"].as_str().unwrap_or("").into(),
+                                name: item["name"].as_str().unwrap_or("").into(),
+                                arguments: item["arguments"].as_str().unwrap_or("").into(),
+                            },
+                        );
                     }
                 }
                 "response.function_call_arguments.delta" => {
                     let key = value["item_id"].as_str().unwrap_or("").to_string();
                     if let Some(call) = pending.get_mut(&key) {
-                        call.arguments.push_str(value["delta"].as_str().unwrap_or(""));
+                        call.arguments
+                            .push_str(value["delta"].as_str().unwrap_or(""));
                     }
                 }
                 "response.output_item.done" => {
                     let item = &value["item"];
                     if item["type"].as_str() == Some("function_call") {
-                        let key = item["id"].as_str().or(item["call_id"].as_str()).unwrap_or("").to_string();
+                        let key = item["id"]
+                            .as_str()
+                            .or(item["call_id"].as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let mut call = pending.remove(&key).unwrap_or(ToolCall {
-                            id: String::new(), name: String::new(), arguments: String::new(),
+                            id: String::new(),
+                            name: String::new(),
+                            arguments: String::new(),
                         });
                         // The done item carries the authoritative fields.
-                        if let Some(id) = item["call_id"].as_str() { call.id = id.into(); }
-                        if let Some(name) = item["name"].as_str() { call.name = name.into(); }
+                        if let Some(id) = item["call_id"].as_str() {
+                            call.id = id.into();
+                        }
+                        if let Some(name) = item["name"].as_str() {
+                            call.name = name.into();
+                        }
                         if let Some(args) = item["arguments"].as_str() {
-                            if !args.is_empty() { call.arguments = args.into(); }
+                            if !args.is_empty() {
+                                call.arguments = args.into();
+                            }
                         }
                         if !call.name.is_empty() {
                             let _ = tx.send(Event::ToolCall(call)).await;
@@ -206,7 +240,9 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                 "response.completed" | "response.done" | "response.incomplete" => {
                     let usage = &value["response"]["usage"];
                     if usage.is_object() {
-                        let cached = usage["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
+                        let cached = usage["input_tokens_details"]["cached_tokens"]
+                            .as_u64()
+                            .unwrap_or(0);
                         let _ = tx
                             .send(Event::Usage {
                                 input: usage["input_tokens"].as_u64().unwrap_or(0),

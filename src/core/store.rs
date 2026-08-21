@@ -44,11 +44,18 @@ pub fn read_object(path: &Path) -> Map<String, Value> {
 
 /// Merge changes into the file, preserving every other key. `mutate` sees the
 /// current on-disk object and edits it in place. Written atomically.
-pub fn update<F: FnOnce(&mut Map<String, Value>)>(path: &Path, mode: u32, mutate: F) -> io::Result<()> {
+pub fn update<F: FnOnce(&mut Map<String, Value>)>(
+    path: &Path,
+    mode: u32,
+    mutate: F,
+) -> io::Result<()> {
     home::ensure()?;
     let mut object = read_object(path);
     mutate(&mut object);
-    let text = format!("{}\n", serde_json::to_string_pretty(&Value::Object(object))?);
+    let text = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&Value::Object(object))?
+    );
     write_atomic(path, &text, mode)
 }
 

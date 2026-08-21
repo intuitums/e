@@ -71,7 +71,11 @@ async fn completions_stream_parses_deltas_and_usage() {
         match event {
             Event::TextDelta(d) => text.push_str(&d),
             Event::ReasoningDelta(d) => reasoning.push_str(&d),
-            Event::Usage { input, output, cache_read } => usage = Some((input, output, cache_read)),
+            Event::Usage {
+                input,
+                output,
+                cache_read,
+            } => usage = Some((input, output, cache_read)),
             Event::Done => {
                 done = true;
                 break;

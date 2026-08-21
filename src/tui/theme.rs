@@ -87,7 +87,11 @@ pub const LIGHT_JSON: &str = include_str!("theme_light.json");
 pub const DARK_JSON: &str = include_str!("theme_dark.json");
 
 pub fn bundled_json(light: bool) -> &'static str {
-    if light { LIGHT_JSON } else { DARK_JSON }
+    if light {
+        LIGHT_JSON
+    } else {
+        DARK_JSON
+    }
 }
 
 /// Load one of the two bundled palettes.
@@ -107,7 +111,11 @@ pub fn load_user(name: &str) -> Option<Theme> {
 /// `light`/`dark` are overridable — falling back to the embedded pair.
 pub fn resolve(selection: &str, detected_light: bool) -> Theme {
     let name = if selection == "auto" {
-        if detected_light { "light" } else { "dark" }
+        if detected_light {
+            "light"
+        } else {
+            "dark"
+        }
     } else {
         selection
     };

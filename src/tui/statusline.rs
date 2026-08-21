@@ -23,9 +23,21 @@ const TOOLS: &[(&str, &str, &str, &str, &str)] = &[
     ("bash", "running", "command", "commands", "started"),
 ];
 
+impl Default for Turn {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Turn {
     pub fn new() -> Self {
-        Turn { counts: BTreeMap::new(), last_verb: None, input: 0, output: 0, started_at: std::time::Instant::now() }
+        Turn {
+            counts: BTreeMap::new(),
+            last_verb: None,
+            input: 0,
+            output: 0,
+            started_at: std::time::Instant::now(),
+        }
     }
 
     /// Count a tool by the display verb the agent already resolved.
@@ -58,11 +70,19 @@ impl Turn {
         let tokens = if self.input == 0 && self.output == 0 {
             String::new()
         } else {
-            format!(" (↑{} ↓{})", format_tokens(self.input), format_tokens(self.output))
+            format!(
+                " (↑{} ↓{})",
+                format_tokens(self.input),
+                format_tokens(self.output)
+            )
         };
         match self.last_verb {
             None => {
-                let clock = if elapsed_secs >= 3 { format!(" ({elapsed_secs}s)") } else { String::new() };
+                let clock = if elapsed_secs >= 3 {
+                    format!(" ({elapsed_secs}s)")
+                } else {
+                    String::new()
+                };
                 format!("Thinking{clock}{tokens}")
             }
             Some(verb) => {
@@ -97,16 +117,34 @@ pub struct StatusData {
 /// The bottom row: blank spacer, then dot-joined segments; the leading one
 /// brighter. A transient overlay (armed-exit, menu hints) replaces the right
 /// or the whole row.
-pub fn statusline(theme: &Theme, data: &StatusData, overlay: Option<&str>, hint: Option<&str>, width: usize) -> Vec<String> {
+pub fn statusline(
+    theme: &Theme,
+    data: &StatusData,
+    overlay: Option<&str>,
+    hint: Option<&str>,
+    width: usize,
+) -> Vec<String> {
     if let Some(hint) = hint {
         return vec![String::new(), theme.fg("muted", hint)];
     }
     let mut segments = Vec::new();
-    if data.queued > 0 { segments.push(format!("queued {}", data.queued)); }
+    if data.queued > 0 {
+        segments.push(format!("queued {}", data.queued));
+    }
     segments.push(compact_model_label(&data.model));
-    if let Some(e) = &data.effort { if e != "off" { segments.push(e.clone()); } }
-    if let Some(n) = &data.session_name { segments.push(n.clone()); }
-    if let Some(p) = data.context_percent { if p >= 1 { segments.push(format!("{p}%")); } }
+    if let Some(e) = &data.effort {
+        if e != "off" {
+            segments.push(e.clone());
+        }
+    }
+    if let Some(n) = &data.session_name {
+        segments.push(n.clone());
+    }
+    if let Some(p) = data.context_percent {
+        if p >= 1 {
+            segments.push(format!("{p}%"));
+        }
+    }
 
     let (head, rest) = segments.split_first().unwrap();
     let mut line = theme.fg("accent", head);

@@ -51,7 +51,10 @@ async fn agent_runs_a_tool_then_replies() {
         let n = b.read(&mut buf2).unwrap();
         let sent = String::from_utf8_lossy(&buf2[..n]);
         // The tool result must have been fed back.
-        assert!(sent.contains("line one"), "tool result not sent back to model");
+        assert!(
+            sent.contains("line one"),
+            "tool result not sent back to model"
+        );
         let second = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"the file has two lines\"}}]}\n\n",
             "data: [DONE]\n\n",
@@ -76,10 +79,17 @@ async fn agent_runs_a_tool_then_replies() {
     while let Some(event) = rx.recv().await {
         match event {
             SessionEvent::TurnStart => order.push("start"),
-            SessionEvent::ToolStart { verb, .. } => order.push(if verb == "Read" { "tool" } else { "tool?" }),
-            SessionEvent::ToolEnd { is_error, .. } => { tool_ok = !is_error; }
+            SessionEvent::ToolStart { verb, .. } => {
+                order.push(if verb == "Read" { "tool" } else { "tool?" })
+            }
+            SessionEvent::ToolEnd { is_error, .. } => {
+                tool_ok = !is_error;
+            }
             SessionEvent::TextDelta(d) => reply.push_str(&d),
-            SessionEvent::TurnEnd { .. } => { order.push("end"); break; }
+            SessionEvent::TurnEnd { .. } => {
+                order.push("end");
+                break;
+            }
             _ => {}
         }
     }

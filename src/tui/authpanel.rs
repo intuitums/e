@@ -23,7 +23,13 @@ pub enum AuthStage {
 
 const DESCRIPTION_COL: usize = 34;
 
-fn choice_row(theme: &Theme, selected: bool, label: &str, description: &str, width: usize) -> String {
+fn choice_row(
+    theme: &Theme,
+    selected: bool,
+    label: &str,
+    description: &str,
+    width: usize,
+) -> String {
     let caret = if selected { "   › " } else { "     " };
     let head = format!("{caret}{label}");
     let mut row = if selected {
@@ -45,8 +51,20 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
             String::new(),
             dim("   Sign in"),
             String::new(),
-            choice_row(theme, *selected == 0, "Sign in with an account", "ChatGPT — opens the browser", width),
-            choice_row(theme, *selected == 1, "Sign in with an API key", "stored in ~/.e/auth.json", width),
+            choice_row(
+                theme,
+                *selected == 0,
+                "Sign in with an account",
+                "ChatGPT — opens the browser",
+                width,
+            ),
+            choice_row(
+                theme,
+                *selected == 1,
+                "Sign in with an API key",
+                "stored in ~/.e/auth.json",
+                width,
+            ),
             String::new(),
             dim("   ↑↓ Choose · Enter Continue · Esc Cancel"),
         ],
@@ -60,7 +78,10 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
             } else {
                 bold(&theme.fg(
                     "userMessageText",
-                    &format!("   ┃ {}", "•".repeat(mask_count.min(width.saturating_sub(6)))),
+                    &format!(
+                        "   ┃ {}",
+                        "•".repeat(mask_count.min(width.saturating_sub(6)))
+                    ),
                 ))
             };
             vec![

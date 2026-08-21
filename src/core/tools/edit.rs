@@ -19,8 +19,14 @@ pub fn schema() -> Value {
 }
 
 pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
-    let err = |m: String| ToolOutput { content: m, is_error: true, summary: "error".into() };
-    let Some(path) = args["path"].as_str() else { return err("edit: missing path".into()) };
+    let err = |m: String| ToolOutput {
+        content: m,
+        is_error: true,
+        summary: "error".into(),
+    };
+    let Some(path) = args["path"].as_str() else {
+        return err("edit: missing path".into());
+    };
     let (Some(old), Some(new)) = (args["old_string"].as_str(), args["new_string"].as_str()) else {
         return err("edit: missing old_string or new_string".into());
     };
@@ -34,13 +40,19 @@ pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
         return err(format!("edit {path}: old_string not found"));
     }
     if occurrences > 1 {
-        return err(format!("edit {path}: old_string occurs {occurrences} times; make it unique"));
+        return err(format!(
+            "edit {path}: old_string occurs {occurrences} times; make it unique"
+        ));
     }
     let updated = text.replacen(old, new, 1);
     match std::fs::write(&full, &updated) {
         Ok(()) => {
             let delta = updated.lines().count() as isize - text.lines().count() as isize;
-            ToolOutput { content: format!("edited {path}"), is_error: false, summary: format!("{delta:+} lines") }
+            ToolOutput {
+                content: format!("edited {path}"),
+                is_error: false,
+                summary: format!("{delta:+} lines"),
+            }
         }
         Err(e) => err(format!("edit {path}: {e}")),
     }

@@ -19,14 +19,18 @@ fn settings_write_preserves_unknown_keys() {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let h = home("settings");
     // A user hand-added a key e knows nothing about.
-    std::fs::write(h.join("settings.json"), r#"{"theme":"dark","my_custom":{"deep":42}}"#).unwrap();
+    std::fs::write(
+        h.join("settings.json"),
+        r#"{"theme":"dark","my_custom":{"deep":42}}"#,
+    )
+    .unwrap();
 
     e::core::settings::set_string("effort", "low");
 
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(h.join("settings.json")).unwrap()).unwrap();
-    assert_eq!(after["effort"], "low");        // our change landed
-    assert_eq!(after["theme"], "dark");        // untouched
+    assert_eq!(after["effort"], "low"); // our change landed
+    assert_eq!(after["theme"], "dark"); // untouched
     assert_eq!(after["my_custom"]["deep"], 42); // the unknown key survived
 }
 
@@ -50,8 +54,8 @@ fn auth_write_preserves_an_unparseable_entry() {
 
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(h.join("auth.json")).unwrap()).unwrap();
-    assert_eq!(after["xai"]["key"], "z");                       // added
-    assert_eq!(after["opencode-go"]["key"], "k");              // kept
+    assert_eq!(after["xai"]["key"], "z"); // added
+    assert_eq!(after["opencode-go"]["key"], "k"); // kept
     assert_eq!(after["future-provider"]["scheme"], "totally-new"); // NOT wiped
 }
 

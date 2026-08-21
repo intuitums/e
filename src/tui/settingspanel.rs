@@ -17,9 +17,18 @@ pub struct SettingsPanel {
 const VALUE_COL: usize = 20;
 pub const HINT: &str = "↑↓ Navigate     ←→ Change     Esc Close";
 
+impl Default for SettingsPanel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SettingsPanel {
     pub fn new() -> Self {
-        SettingsPanel { settings: settings::all(), selected: 0 }
+        SettingsPanel {
+            settings: settings::all(),
+            selected: 0,
+        }
     }
 
     pub fn step(&mut self, delta: isize) {

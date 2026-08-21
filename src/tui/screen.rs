@@ -21,7 +21,11 @@ pub struct Screen {
 
 impl Screen {
     pub fn new(cols: u16, rows: u16) -> Self {
-        Screen { prev: Vec::new(), cols, rows }
+        Screen {
+            prev: Vec::new(),
+            cols,
+            rows,
+        }
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -39,9 +43,15 @@ impl Screen {
         }
         if std::env::var("E_DEBUG_FRAMES").is_ok() {
             use std::io::Write as _;
-            let mut f = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/e-frames.log").unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/e-frames.log")
+                .unwrap();
             let _ = writeln!(f, "== frame {} rows ==", lines.len());
-            for l in lines { let _ = writeln!(f, "{:?}", l); }
+            for l in lines {
+                let _ = writeln!(f, "{:?}", l);
+            }
         }
         let mut out = io::stdout().lock();
         write!(out, "\x1b[?2026h\x1b[?25l")?;
@@ -67,7 +77,12 @@ impl Screen {
             }
         } else {
             let viewport = self.rows.saturating_sub(1) as usize;
-            let common = self.prev.iter().zip(lines.iter()).take_while(|(a, b)| a == b).count();
+            let common = self
+                .prev
+                .iter()
+                .zip(lines.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
             // Rows above the viewport window are scrollback: unreachable.
             let window_start = self.prev.len().saturating_sub(viewport);
             let start = common.max(window_start).min(lines.len());

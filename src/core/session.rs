@@ -19,7 +19,12 @@ use crate::core::provider::ChatMessage;
 #[serde(tag = "type")]
 enum Entry {
     #[serde(rename = "session")]
-    Header { id: String, cwd: String, created: u64, model: String },
+    Header {
+        id: String,
+        cwd: String,
+        created: u64,
+        model: String,
+    },
     #[serde(rename = "message")]
     Message { message: ChatMessage },
 }
@@ -62,7 +67,9 @@ impl Session {
     }
 
     pub fn append(&mut self, message: &ChatMessage) {
-        if let Ok(line) = serde_json::to_string(&Entry::Message { message: message.clone() }) {
+        if let Ok(line) = serde_json::to_string(&Entry::Message {
+            message: message.clone(),
+        }) {
             let _ = writeln!(self.file, "{line}");
         }
     }
@@ -87,7 +94,10 @@ impl Session {
     /// Re-open an existing session for appending.
     pub fn reopen(path: &Path) -> std::io::Result<Session> {
         let file = OpenOptions::new().append(true).open(path)?;
-        Ok(Session { path: path.to_path_buf(), file })
+        Ok(Session {
+            path: path.to_path_buf(),
+            file,
+        })
     }
 }
 
@@ -101,13 +111,15 @@ pub struct SessionInfo {
 /// List this workspace's sessions, newest first.
 pub fn list(cwd: &Path) -> Vec<SessionInfo> {
     let dir = home::sessions_dir().join(cwd_slug(cwd));
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
     let mut sessions: Vec<SessionInfo> = entries
         .flatten()
         .filter(|e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false))
         .filter_map(|e| info(&e.path()))
         .collect();
-    sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
     sessions
 }
 
@@ -130,12 +142,21 @@ fn info(path: &Path) -> Option<SessionInfo> {
         .find(|m| m.role == "user")
         .map(|m| title_of(&m.content))
         .unwrap_or_else(|| "Untitled".into());
-    Some(SessionInfo { path: path.to_path_buf(), title, modified, message_count: messages.len() })
+    Some(SessionInfo {
+        path: path.to_path_buf(),
+        title,
+        modified,
+        message_count: messages.len(),
+    })
 }
 
 fn title_of(content: &str) -> String {
     let first_line = content.lines().next().unwrap_or("");
     let words: Vec<&str> = first_line.split_whitespace().take(8).collect();
     let title = words.join(" ");
-    if title.len() > 60 { title.chars().take(60).collect() } else { title }
+    if title.len() > 60 {
+        title.chars().take(60).collect()
+    } else {
+        title
+    }
 }

@@ -6,10 +6,18 @@ use std::path::Path;
 use super::{resolve, schema_object, truncate, ToolOutput};
 
 fn ok(content: String, summary: String) -> ToolOutput {
-    ToolOutput { content, is_error: false, summary }
+    ToolOutput {
+        content,
+        is_error: false,
+        summary,
+    }
 }
 fn err(message: String) -> ToolOutput {
-    ToolOutput { content: message, is_error: true, summary: "error".into() }
+    ToolOutput {
+        content: message,
+        is_error: true,
+        summary: "error".into(),
+    }
 }
 
 pub fn read_schema() -> Value {
@@ -26,7 +34,9 @@ pub fn read_schema() -> Value {
 }
 
 pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
-    let Some(path) = args["path"].as_str() else { return err("read: missing path".into()) };
+    let Some(path) = args["path"].as_str() else {
+        return err("read: missing path".into());
+    };
     let full = resolve(cwd, path);
     let text = match std::fs::read_to_string(&full) {
         Ok(t) => t,
@@ -57,14 +67,19 @@ pub fn write_schema() -> Value {
 }
 
 pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
-    let Some(path) = args["path"].as_str() else { return err("write: missing path".into()) };
+    let Some(path) = args["path"].as_str() else {
+        return err("write: missing path".into());
+    };
     let content = args["content"].as_str().unwrap_or("");
     let full = resolve(cwd, path);
     if let Some(parent) = full.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     match std::fs::write(&full, content) {
-        Ok(()) => ok(format!("wrote {path}"), format!("{} lines", content.lines().count())),
+        Ok(()) => ok(
+            format!("wrote {path}"),
+            format!("{} lines", content.lines().count()),
+        ),
         Err(e) => err(format!("write {path}: {e}")),
     }
 }
@@ -89,7 +104,11 @@ pub fn ls(args: &Value, cwd: &Path) -> ToolOutput {
         .flatten()
         .map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            if e.path().is_dir() { format!("{name}/") } else { name }
+            if e.path().is_dir() {
+                format!("{name}/")
+            } else {
+                name
+            }
         })
         .collect();
     names.sort();
@@ -110,7 +129,9 @@ pub fn grep_schema() -> Value {
 }
 
 pub fn grep(args: &Value, cwd: &Path) -> ToolOutput {
-    let Some(pattern) = args["pattern"].as_str() else { return err("grep: missing pattern".into()) };
+    let Some(pattern) = args["pattern"].as_str() else {
+        return err("grep: missing pattern".into());
+    };
     let re = match regex::Regex::new(pattern) {
         Ok(r) => r,
         Err(e) => return err(format!("grep: bad pattern: {e}")),
@@ -142,14 +163,21 @@ fn walk(dir: &Path, cwd: &Path, re: &regex::Regex, hits: &mut Vec<String>, count
         if *count >= 200 {
             return;
         }
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if name.starts_with('.') || SKIP.contains(&name.as_str()) {
             continue;
         }
         if path.is_dir() {
             walk(&path, cwd, re, hits, count);
         } else if let Ok(text) = std::fs::read_to_string(&path) {
-            let rel = path.strip_prefix(cwd).unwrap_or(&path).display().to_string();
+            let rel = path
+                .strip_prefix(cwd)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
             for (n, line) in text.lines().enumerate() {
                 if re.is_match(line) {
                     hits.push(format!("{rel}:{}: {}", n + 1, line.trim()));

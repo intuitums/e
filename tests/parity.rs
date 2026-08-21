@@ -8,12 +8,27 @@ use e::tui::theme::Theme;
 
 #[test]
 fn heading_styles_match_the_level_table() {
-    assert_eq!(heading_style(1, "Workspace overview"), "\x1b[1m\x1b[4mWorkspace overview\x1b[24m\x1b[22m");
-    assert_eq!(heading_style(2, "Installation"), "\x1b[1mInstallation\x1b[22m");
+    assert_eq!(
+        heading_style(1, "Workspace overview"),
+        "\x1b[1m\x1b[4mWorkspace overview\x1b[24m\x1b[22m"
+    );
+    assert_eq!(
+        heading_style(2, "Installation"),
+        "\x1b[1mInstallation\x1b[22m"
+    );
     assert_eq!(heading_style(3, "macOS"), "\x1b[4mmacOS\x1b[24m");
-    assert_eq!(heading_style(4, "Shell setup"), "\x1b[1m\x1b[2mShell setup\x1b[22m");
-    assert_eq!(heading_style(5, "Optional tools"), "\x1b[2m\x1b[4mOptional tools\x1b[24m\x1b[22m");
-    assert_eq!(heading_style(6, "Troubleshooting"), "\x1b[2mTroubleshooting\x1b[22m");
+    assert_eq!(
+        heading_style(4, "Shell setup"),
+        "\x1b[1m\x1b[2mShell setup\x1b[22m"
+    );
+    assert_eq!(
+        heading_style(5, "Optional tools"),
+        "\x1b[2m\x1b[4mOptional tools\x1b[24m\x1b[22m"
+    );
+    assert_eq!(
+        heading_style(6, "Troubleshooting"),
+        "\x1b[2mTroubleshooting\x1b[22m"
+    );
 }
 
 #[test]
@@ -42,7 +57,10 @@ fn model_labels_shorten_the_reference_way() {
 
 fn read_theme(name: &str) -> (Theme, serde_json::Value) {
     let json = e::tui::theme::bundled_json(name == "light");
-    (Theme::from_json(json).expect("parse"), serde_json::from_str(json).unwrap())
+    (
+        Theme::from_json(json).expect("parse"),
+        serde_json::from_str(json).unwrap(),
+    )
 }
 
 #[test]
@@ -59,7 +77,9 @@ fn the_two_themes_are_structural_mirrors() {
     // A var nothing references is dead weight that hides drift.
     for theme in [&light, &dark] {
         let used: Vec<String> = theme["colors"]
-            .as_object().unwrap().values()
+            .as_object()
+            .unwrap()
+            .values()
             .filter_map(|v| v.as_str().map(String::from))
             .collect();
         for var in theme["vars"].as_object().unwrap().keys() {
@@ -101,7 +121,10 @@ fn code_panel_geometry_matches_the_reference() {
         code_panel(&t, "x", "zig", 80),
         vec!["┌ \x1b[2mzig\x1b[22m ─┐", "│ x    │", "└──────┘"]
     );
-    assert_eq!(code_panel(&t, "x", "", 80), vec!["┌────┐", "│ x  │", "└────┘"]);
+    assert_eq!(
+        code_panel(&t, "x", "", 80),
+        vec!["┌────┐", "│ x  │", "└────┘"]
+    );
     // Label truncated to panel_width - 5 when the terminal is narrow.
     assert_eq!(
         code_panel(&t, "x", "typescript", 8),
@@ -130,11 +153,19 @@ fn rules_and_blockquotes_match_byte_for_byte() {
 #[test]
 fn inline_spans_match_the_reference() {
     let t = dark();
-    let out = render_markdown(&t, "One **bold** with `code` and a [link](https://x.dev).\n", 80).join("\n");
+    let out = render_markdown(
+        &t,
+        "One **bold** with `code` and a [link](https://x.dev).\n",
+        80,
+    )
+    .join("\n");
     assert!(out.contains("\x1b[1mbold\x1b[22m"));
     // Inline code: the palette's dedicated inline-code gray (dim var = 245 dark).
     assert!(out.contains("\x1b[38;5;245mcode\x1b[39m"), "{out:?}");
     // Links: underline only, OSC 8 wrapped, no printed URL.
-    assert!(out.contains("\x1b]8;;https://x.dev\x1b\\\x1b[4mlink\x1b[24m\x1b]8;;\x1b\\"), "{out:?}");
+    assert!(
+        out.contains("\x1b]8;;https://x.dev\x1b\\\x1b[4mlink\x1b[24m\x1b]8;;\x1b\\"),
+        "{out:?}"
+    );
     assert!(!out.contains("(https://x.dev)"));
 }

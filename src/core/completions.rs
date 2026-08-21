@@ -145,7 +145,9 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                 flush(&mut pending, tx).await;
             }
             if let Some(usage) = value.get("usage").filter(|u| !u.is_null()) {
-                let cached = usage["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
+                let cached = usage["prompt_tokens_details"]["cached_tokens"]
+                    .as_u64()
+                    .unwrap_or(0);
                 let _ = tx
                     .send(Event::Usage {
                         input: usage["prompt_tokens"].as_u64().unwrap_or(0),

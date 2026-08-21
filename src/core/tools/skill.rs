@@ -17,13 +17,27 @@ pub fn schema() -> Value {
 
 pub fn run(args: &Value, _cwd: &Path) -> ToolOutput {
     let Some(name) = args["name"].as_str() else {
-        return ToolOutput { content: "skill: missing name".into(), is_error: true, summary: "error".into() };
+        return ToolOutput {
+            content: "skill: missing name".into(),
+            is_error: true,
+            summary: "error".into(),
+        };
     };
     match skills::get(name) {
-        Some(skill) if !skill.disable_model_invocation => {
-            ToolOutput { content: truncate(skill.body), is_error: false, summary: name.into() }
-        }
-        Some(_) => ToolOutput { content: format!("skill '{name}' is user-only"), is_error: true, summary: "denied".into() },
-        None => ToolOutput { content: format!("no skill named '{name}'"), is_error: true, summary: "not found".into() },
+        Some(skill) if !skill.disable_model_invocation => ToolOutput {
+            content: truncate(skill.body),
+            is_error: false,
+            summary: name.into(),
+        },
+        Some(_) => ToolOutput {
+            content: format!("skill '{name}' is user-only"),
+            is_error: true,
+            summary: "denied".into(),
+        },
+        None => ToolOutput {
+            content: format!("no skill named '{name}'"),
+            is_error: true,
+            summary: "not found".into(),
+        },
     }
 }

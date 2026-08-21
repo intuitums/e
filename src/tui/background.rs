@@ -29,7 +29,11 @@ fn osc11_luminance() -> Option<f32> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
     loop {
         let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
-        let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        let mut fds = libc::pollfd {
+            fd: 0,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         let ready = unsafe { libc::poll(&mut fds, 1, remaining.as_millis() as i32) };
         if ready <= 0 {
             return None;

@@ -31,13 +31,28 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn user(content: impl Into<String>) -> Self {
-        ChatMessage { role: "user".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None }
+        ChatMessage {
+            role: "user".into(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
     }
     pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
-        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls, tool_call_id: None }
+        ChatMessage {
+            role: "assistant".into(),
+            content: content.into(),
+            tool_calls,
+            tool_call_id: None,
+        }
     }
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
-        ChatMessage { role: "tool".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: Some(call_id.into()) }
+        ChatMessage {
+            role: "tool".into(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(call_id.into()),
+        }
     }
 }
 
@@ -48,11 +63,18 @@ pub enum Event {
     /// A completed tool request (dialects accumulate the argument deltas).
     ToolCall(ToolCall),
     /// input, output, cache_read tokens from the terminal usage frame.
-    Usage { input: u64, output: u64, cache_read: u64 },
+    Usage {
+        input: u64,
+        output: u64,
+        cache_read: u64,
+    },
     Done,
     /// `delivered`: whether the request may have reached the provider —
     /// only definitely-unsent failures are safe to auto-retry.
-    Error { message: String, delivered: bool },
+    Error {
+        message: String,
+        delivered: bool,
+    },
 }
 
 pub struct Request {
@@ -93,9 +115,17 @@ pub struct SseSplitter {
     buffer: String,
 }
 
+impl Default for SseSplitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SseSplitter {
     pub fn new() -> Self {
-        SseSplitter { buffer: String::new() }
+        SseSplitter {
+            buffer: String::new(),
+        }
     }
 
     pub fn feed(&mut self, chunk: &str) -> Vec<String> {
@@ -103,7 +133,10 @@ impl SseSplitter {
         let mut events = Vec::new();
         // Events are separated by a blank line.
         while let Some(pos) = find_event_end(&self.buffer) {
-            let (raw, rest_at) = (self.buffer[..pos].to_string(), skip_separator(&self.buffer, pos));
+            let (raw, rest_at) = (
+                self.buffer[..pos].to_string(),
+                skip_separator(&self.buffer, pos),
+            );
             self.buffer.drain(..rest_at);
             let mut data = String::new();
             for line in raw.lines() {

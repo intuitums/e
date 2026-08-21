@@ -20,7 +20,9 @@ pub struct Skill {
 
 pub fn list() -> Vec<Skill> {
     let dir = home::skills_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
     let mut skills: Vec<Skill> = entries
         .flatten()
         .filter_map(|e| load(&e.path().join("SKILL.md")))
@@ -40,7 +42,9 @@ fn load(path: &PathBuf) -> Option<Skill> {
     let mut description = String::new();
     let mut disable = false;
     for line in frontmatter.lines() {
-        let Some((key, value)) = line.split_once(':') else { continue };
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
         let value = value.trim().trim_matches('"');
         match key.trim() {
             "name" => name = value.to_string(),
@@ -49,7 +53,12 @@ fn load(path: &PathBuf) -> Option<Skill> {
             _ => {}
         }
     }
-    Some(Skill { name, description, body: body.trim().to_string(), disable_model_invocation: disable })
+    Some(Skill {
+        name,
+        description,
+        body: body.trim().to_string(),
+        disable_model_invocation: disable,
+    })
 }
 
 fn split_frontmatter(text: &str) -> (String, String) {
@@ -64,7 +73,10 @@ fn split_frontmatter(text: &str) -> (String, String) {
 
 /// The catalog line for the system prompt (auto-invocable skills only).
 pub fn catalog() -> Option<String> {
-    let auto: Vec<Skill> = list().into_iter().filter(|s| !s.disable_model_invocation).collect();
+    let auto: Vec<Skill> = list()
+        .into_iter()
+        .filter(|s| !s.disable_model_invocation)
+        .collect();
     if auto.is_empty() {
         return None;
     }

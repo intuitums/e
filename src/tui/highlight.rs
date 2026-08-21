@@ -9,20 +9,134 @@
 use crate::tui::theme::Theme;
 
 const KEYWORDS_COMMON: &[&str] = &[
-    "if", "else", "for", "while", "return", "break", "continue", "match",
-    "switch", "case", "default", "try", "catch", "finally", "throw", "new",
-    "in", "of", "do", "not", "and", "or",
+    "if", "else", "for", "while", "return", "break", "continue", "match", "switch", "case",
+    "default", "try", "catch", "finally", "throw", "new", "in", "of", "do", "not", "and", "or",
 ];
 
 fn keywords_for(lang: &str) -> Vec<&'static str> {
     let extra: &[&str] = match lang {
-        "rust" | "rs" => &["fn", "let", "mut", "pub", "impl", "struct", "enum", "trait", "use", "mod", "async", "await", "loop", "self", "Self", "const", "static", "where", "dyn", "ref", "move", "unsafe", "crate", "super", "type"],
-        "ts" | "tsx" | "typescript" | "js" | "jsx" | "javascript" => &["const", "let", "var", "function", "class", "extends", "implements", "interface", "type", "enum", "import", "export", "from", "async", "await", "yield", "this", "super", "static", "public", "private", "protected", "readonly", "typeof", "instanceof", "void", "delete", "null", "undefined", "true", "false"],
-        "py" | "python" => &["def", "class", "import", "from", "as", "with", "lambda", "yield", "global", "nonlocal", "pass", "raise", "assert", "del", "is", "None", "True", "False", "elif", "except", "async", "await", "self"],
-        "go" | "golang" => &["func", "package", "import", "type", "struct", "interface", "map", "chan", "go", "defer", "select", "range", "var", "const", "fallthrough", "nil", "true", "false"],
-        "zig" => &["fn", "pub", "const", "var", "comptime", "inline", "defer", "errdefer", "struct", "enum", "union", "test", "usingnamespace", "try", "orelse", "unreachable", "null", "undefined", "true", "false"],
-        "sh" | "bash" | "zsh" | "shell" => &["echo", "export", "local", "function", "then", "fi", "elif", "done", "esac", "source", "exit", "cd", "set"],
-        "c" | "h" | "cpp" | "cc" | "hpp" => &["int", "char", "void", "long", "short", "unsigned", "signed", "float", "double", "struct", "union", "enum", "typedef", "sizeof", "static", "extern", "inline", "const", "goto", "auto", "bool", "true", "false", "NULL", "nullptr", "class", "namespace", "template", "public", "private", "using"],
+        "rust" | "rs" => &[
+            "fn", "let", "mut", "pub", "impl", "struct", "enum", "trait", "use", "mod", "async",
+            "await", "loop", "self", "Self", "const", "static", "where", "dyn", "ref", "move",
+            "unsafe", "crate", "super", "type",
+        ],
+        "ts" | "tsx" | "typescript" | "js" | "jsx" | "javascript" => &[
+            "const",
+            "let",
+            "var",
+            "function",
+            "class",
+            "extends",
+            "implements",
+            "interface",
+            "type",
+            "enum",
+            "import",
+            "export",
+            "from",
+            "async",
+            "await",
+            "yield",
+            "this",
+            "super",
+            "static",
+            "public",
+            "private",
+            "protected",
+            "readonly",
+            "typeof",
+            "instanceof",
+            "void",
+            "delete",
+            "null",
+            "undefined",
+            "true",
+            "false",
+        ],
+        "py" | "python" => &[
+            "def", "class", "import", "from", "as", "with", "lambda", "yield", "global",
+            "nonlocal", "pass", "raise", "assert", "del", "is", "None", "True", "False", "elif",
+            "except", "async", "await", "self",
+        ],
+        "go" | "golang" => &[
+            "func",
+            "package",
+            "import",
+            "type",
+            "struct",
+            "interface",
+            "map",
+            "chan",
+            "go",
+            "defer",
+            "select",
+            "range",
+            "var",
+            "const",
+            "fallthrough",
+            "nil",
+            "true",
+            "false",
+        ],
+        "zig" => &[
+            "fn",
+            "pub",
+            "const",
+            "var",
+            "comptime",
+            "inline",
+            "defer",
+            "errdefer",
+            "struct",
+            "enum",
+            "union",
+            "test",
+            "usingnamespace",
+            "try",
+            "orelse",
+            "unreachable",
+            "null",
+            "undefined",
+            "true",
+            "false",
+        ],
+        "sh" | "bash" | "zsh" | "shell" => &[
+            "echo", "export", "local", "function", "then", "fi", "elif", "done", "esac", "source",
+            "exit", "cd", "set",
+        ],
+        "c" | "h" | "cpp" | "cc" | "hpp" => &[
+            "int",
+            "char",
+            "void",
+            "long",
+            "short",
+            "unsigned",
+            "signed",
+            "float",
+            "double",
+            "struct",
+            "union",
+            "enum",
+            "typedef",
+            "sizeof",
+            "static",
+            "extern",
+            "inline",
+            "const",
+            "goto",
+            "auto",
+            "bool",
+            "true",
+            "false",
+            "NULL",
+            "nullptr",
+            "class",
+            "namespace",
+            "template",
+            "public",
+            "private",
+            "using",
+        ],
         "json" => &["true", "false", "null"],
         _ => &[],
     };
@@ -60,7 +174,13 @@ pub fn highlight_line(theme: &Theme, lang: &str, line: &str) -> String {
         // Comment to end of line.
         if line[byte_at(&chars, i)..].starts_with(comment_marker) {
             let rest: String = chars[i..].iter().collect();
-            if com.is_empty() { out.push_str(&rest); } else { out.push_str(com); out.push_str(&rest); out.push_str(RESET); }
+            if com.is_empty() {
+                out.push_str(&rest);
+            } else {
+                out.push_str(com);
+                out.push_str(&rest);
+                out.push_str(RESET);
+            }
             break;
         }
         // Strings.
@@ -69,29 +189,53 @@ pub fn highlight_line(theme: &Theme, lang: &str, line: &str) -> String {
             let start = i;
             i += 1;
             while i < chars.len() {
-                if chars[i] == '\\' { i += 2; continue; }
-                if chars[i] == quote { i += 1; break; }
+                if chars[i] == '\\' {
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == quote {
+                    i += 1;
+                    break;
+                }
                 i += 1;
             }
             let tok: String = chars[start..i.min(chars.len())].iter().collect();
-            if strn.is_empty() { out.push_str(&tok); } else { out.push_str(strn); out.push_str(&tok); out.push_str(RESET); }
+            if strn.is_empty() {
+                out.push_str(&tok);
+            } else {
+                out.push_str(strn);
+                out.push_str(&tok);
+                out.push_str(RESET);
+            }
             continue;
         }
         // Numbers.
         if c.is_ascii_digit() && (i == 0 || !is_word_char(chars[i - 1])) {
             let start = i;
-            while i < chars.len() && (is_word_char(chars[i]) || chars[i] == '.') { i += 1; }
+            while i < chars.len() && (is_word_char(chars[i]) || chars[i] == '.') {
+                i += 1;
+            }
             let tok: String = chars[start..i].iter().collect();
-            if strn.is_empty() { out.push_str(&tok); } else { out.push_str(strn); out.push_str(&tok); out.push_str(RESET); }
+            if strn.is_empty() {
+                out.push_str(&tok);
+            } else {
+                out.push_str(strn);
+                out.push_str(&tok);
+                out.push_str(RESET);
+            }
             continue;
         }
         // Words → maybe keywords.
         if is_word_char(c) {
             let start = i;
-            while i < chars.len() && is_word_char(chars[i]) { i += 1; }
+            while i < chars.len() && is_word_char(chars[i]) {
+                i += 1;
+            }
             let tok: String = chars[start..i].iter().collect();
             if !kw.is_empty() && keywords.contains(&tok.as_str()) {
-                out.push_str(kw); out.push_str(&tok); out.push_str(RESET);
+                out.push_str(kw);
+                out.push_str(&tok);
+                out.push_str(RESET);
             } else {
                 out.push_str(&tok);
             }

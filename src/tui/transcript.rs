@@ -4,8 +4,8 @@
 //! runs of tool rows contiguous. Blocks render (and cache) their final lines
 //! at a given width; streaming touches only the tail block.
 
-use crate::tui::render::{bold, dim};
 use crate::tui::markdown::{render_markdown, wrap_styled};
+use crate::tui::render::{bold, dim};
 use crate::tui::theme::Theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -31,7 +31,14 @@ pub struct Block {
 
 impl Block {
     pub fn new(kind: Kind, text: impl Into<String>) -> Self {
-        Block { kind, text: text.into(), done: false, is_error: false, detail: None, cache: None }
+        Block {
+            kind,
+            text: text.into(),
+            done: false,
+            is_error: false,
+            detail: None,
+            cache: None,
+        }
     }
 
     pub fn touch(&mut self) {
@@ -53,7 +60,10 @@ impl Block {
             Kind::Banner => vec![format!(
                 "{}{}",
                 bold(&theme.fg("userMessageText", "𝑒")),
-                theme.fg("muted", &format!(" v{} · Run /help for commands", self.text))
+                theme.fg(
+                    "muted",
+                    &format!(" v{} · Run /help for commands", self.text)
+                )
             )],
             Kind::User => {
                 let rail = format!("{} ", theme.fg("userMessageText", "┃"));
@@ -80,7 +90,11 @@ impl Block {
                     .collect()
             }
             Kind::Tool => {
-                let marker = if self.done { "●".to_string() } else { dim("●") };
+                let marker = if self.done {
+                    "●".to_string()
+                } else {
+                    dim("●")
+                };
                 let rows = vec![match &self.detail {
                     Some(target) if !target.is_empty() => {
                         format!("  {marker} {} {}", self.text, theme.fg("muted", target))
@@ -91,7 +105,9 @@ impl Block {
             }
             Kind::Reasoning => {
                 let text = self.text.trim();
-                if text.is_empty() { return Vec::new(); }
+                if text.is_empty() {
+                    return Vec::new();
+                }
                 // Dimmed, gutter-indented, italicized thinking.
                 crate::tui::markdown::wrap_styled(text, width.saturating_sub(2).max(8))
                     .into_iter()
@@ -108,7 +124,11 @@ impl Block {
 }
 
 fn gap(prev: Kind, next: Kind) -> usize {
-    if prev == Kind::Tool && next == Kind::Tool { 0 } else { 1 }
+    if prev == Kind::Tool && next == Kind::Tool {
+        0
+    } else {
+        1
+    }
 }
 
 // (reasoning uses the default one-row gap before the reply that follows it)

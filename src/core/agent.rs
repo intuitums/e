@@ -52,16 +52,33 @@ pub enum SessionEvent {
     TextDelta(String),
     ReasoningDelta(String),
     /// A tool is about to run: display verb + target.
-    ToolStart { id: u64, verb: String, target: String },
+    ToolStart {
+        id: u64,
+        verb: String,
+        target: String,
+    },
     /// A tool finished: its one-line summary and whether it errored.
-    ToolEnd { id: u64, summary: String, is_error: bool },
-    Usage { input: u64, output: u64, cache_read: u64 },
+    ToolEnd {
+        id: u64,
+        summary: String,
+        is_error: bool,
+    },
+    Usage {
+        input: u64,
+        output: u64,
+        cache_read: u64,
+    },
     Error(String),
     /// A transient failure is being retried.
-    Retry { attempt: u32, message: String },
+    Retry {
+        attempt: u32,
+        message: String,
+    },
     /// A steering message was accepted mid-turn (for display as a user block).
     Steered(String),
-    TurnEnd { aborted: bool },
+    TurnEnd {
+        aborted: bool,
+    },
 }
 
 pub struct Agent {
@@ -109,7 +126,11 @@ impl Agent {
         slug(&self.model)
     }
     pub fn effort(&self) -> Option<String> {
-        if self.model.efforts.is_empty() { None } else { Some(crate::core::settings::effort()) }
+        if self.model.efforts.is_empty() {
+            None
+        } else {
+            Some(crate::core::settings::effort())
+        }
     }
     pub fn history_snapshot(&self) -> Vec<ChatMessage> {
         self.history.lock().unwrap().clone()
@@ -139,12 +160,16 @@ impl Agent {
             self.pending.lock().unwrap().push(text);
             return true;
         }
-        commit(&self.history, &self.session, &self.cwd, &self.model, ChatMessage::user(text));
+        commit(
+            &self.history,
+            &self.session,
+            &self.cwd,
+            &self.model,
+            ChatMessage::user(text),
+        );
         self.start(system);
         false
     }
-
-
 
     fn start(&mut self, system: String) {
         self.running = true;
@@ -206,8 +231,18 @@ impl Agent {
                             let _ = events.send(SessionEvent::ReasoningDelta(d)).await;
                         }
                         ProviderEvent::ToolCall(call) => calls.push(call),
-                        ProviderEvent::Usage { input, output, cache_read } => {
-                            let _ = events.send(SessionEvent::Usage { input, output, cache_read }).await;
+                        ProviderEvent::Usage {
+                            input,
+                            output,
+                            cache_read,
+                        } => {
+                            let _ = events
+                                .send(SessionEvent::Usage {
+                                    input,
+                                    output,
+                                    cache_read,
+                                })
+                                .await;
                         }
                         ProviderEvent::Error { message, delivered } => {
                             // Only a definitely-unsent failure is safe to retry
@@ -218,9 +253,13 @@ impl Agent {
                                 && !message.contains("run /login");
                             if retryable && text.is_empty() && calls.is_empty() && attempt < 2 {
                                 attempt += 1;
-                                let backoff = std::time::Duration::from_millis(500 * attempt as u64);
+                                let backoff =
+                                    std::time::Duration::from_millis(500 * attempt as u64);
                                 let _ = events
-                                    .send(SessionEvent::Retry { attempt, message: message.clone() })
+                                    .send(SessionEvent::Retry {
+                                        attempt,
+                                        message: message.clone(),
+                                    })
                                     .await;
                                 tokio::time::sleep(backoff).await;
                                 let (nrx, nhandle) = provider::stream(clone_request(&request));
@@ -239,7 +278,13 @@ impl Agent {
                 }
 
                 // Commit the assistant turn (text + any calls).
-                commit(&history, &session, &cwd, &model, ChatMessage::assistant(text, calls.clone()));
+                commit(
+                    &history,
+                    &session,
+                    &cwd,
+                    &model,
+                    ChatMessage::assistant(text, calls.clone()),
+                );
 
                 if calls.is_empty() {
                     // A plain reply would end the turn — but a message that
@@ -258,18 +303,31 @@ impl Agent {
                     let (verb, target) = tools::present(&call.name, &args);
                     tool_seq += 1;
                     let id = tool_seq;
-                    let _ = events.send(SessionEvent::ToolStart { id, verb, target }).await;
+                    let _ = events
+                        .send(SessionEvent::ToolStart { id, verb, target })
+                        .await;
 
                     let output = run_tool(&host, &call.name, &call.arguments, &cwd).await;
                     let _ = events
-                        .send(SessionEvent::ToolEnd { id, summary: output.summary.clone(), is_error: output.is_error })
+                        .send(SessionEvent::ToolEnd {
+                            id,
+                            summary: output.summary.clone(),
+                            is_error: output.is_error,
+                        })
                         .await;
-                    commit(&history, &session, &cwd, &model, ChatMessage::tool_result(call.id, output.content));
+                    commit(
+                        &history,
+                        &session,
+                        &cwd,
+                        &model,
+                        ChatMessage::tool_result(call.id, output.content),
+                    );
                 }
             };
             let _ = events.send(SessionEvent::TurnEnd { aborted }).await;
             if let Some(h) = &host {
-                h.event("turn_end", serde_json::json!({"aborted": aborted})).await;
+                h.event("turn_end", serde_json::json!({"aborted": aborted}))
+                    .await;
             }
         });
     }
@@ -282,7 +340,9 @@ impl Agent {
     pub fn interrupt(&mut self) {
         self.cancel.store(true, Ordering::SeqCst);
         if !self.running {
-            let _ = self.events.try_send(SessionEvent::TurnEnd { aborted: true });
+            let _ = self
+                .events
+                .try_send(SessionEvent::TurnEnd { aborted: true });
         }
     }
 }
@@ -293,7 +353,7 @@ async fn run_tool(
     host: &Option<std::sync::Arc<crate::core::api::ExtensionHost>>,
     name: &str,
     arguments: &str,
-    cwd: &PathBuf,
+    cwd: &std::path::Path,
 ) -> tools::ToolOutput {
     if let Some(h) = host {
         if let Some(reason) = h.hook_tool_call(name, arguments).await {
@@ -308,14 +368,22 @@ async fn run_tool(
             return tools::ToolOutput {
                 content: result.content,
                 is_error: result.is_error,
-                summary: if result.is_error { "error".into() } else { "done".into() },
+                summary: if result.is_error {
+                    "error".into()
+                } else {
+                    "done".into()
+                },
             };
         }
     }
     let name = name.to_string();
     let arguments = arguments.to_string();
-    let cwd = cwd.clone();
-    tokio::task::spawn_blocking(move || tools::run(&name, &arguments, &cwd)).await.unwrap_or(
-        tools::ToolOutput { content: "tool panicked".into(), is_error: true, summary: "error".into() },
-    )
+    let cwd = cwd.to_path_buf();
+    tokio::task::spawn_blocking(move || tools::run(&name, &arguments, &cwd))
+        .await
+        .unwrap_or(tools::ToolOutput {
+            content: "tool panicked".into(),
+            is_error: true,
+            summary: "error".into(),
+        })
 }

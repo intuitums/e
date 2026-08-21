@@ -30,7 +30,11 @@ pub fn auth_status() {
         match credential {
             Credential::ApiKey { .. } => println!("{provider}: api key"),
             Credential::OAuth { expires, .. } => {
-                let state = if auth::now_ms() < *expires { "valid" } else { "expired (will refresh)" };
+                let state = if auth::now_ms() < *expires {
+                    "valid"
+                } else {
+                    "expired (will refresh)"
+                };
                 println!("{provider}: oauth, access {state}");
             }
         }
@@ -43,7 +47,13 @@ pub fn save_api_key(provider: &str, key: &str) -> Result<(), String> {
     if key.is_empty() {
         return Err("empty key".into());
     }
-    auth::set(provider, Credential::ApiKey { key: key.to_string() }).map_err(|e| e.to_string())
+    auth::set(
+        provider,
+        Credential::ApiKey {
+            key: key.to_string(),
+        },
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// The browser PKCE flow, reporting progress through `notify` so the TUI can
@@ -77,8 +87,9 @@ async fn codex_login_inner(
     );
 
     // Listener first, so the redirect can never race us.
-    let listener = TcpListener::bind("127.0.0.1:1455")
-        .map_err(|e| format!("cannot listen on localhost:1455 ({e}) — is another login running?"))?;
+    let listener = TcpListener::bind("127.0.0.1:1455").map_err(|e| {
+        format!("cannot listen on localhost:1455 ({e}) — is another login running?")
+    })?;
 
     let _ = notify.send("opening the browser to sign in…".into()).await;
     let _ = std::process::Command::new("open").arg(&authorize).spawn();
@@ -103,7 +114,10 @@ async fn codex_login_inner(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("token exchange rejected ({status}): {}", body.chars().take(200).collect::<String>()));
+        return Err(format!(
+            "token exchange rejected ({status}): {}",
+            body.chars().take(200).collect::<String>()
+        ));
     }
     let tokens: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
     let (Some(access), Some(refresh), Some(expires_in)) = (
@@ -134,7 +148,9 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
         let mut stream = incoming.map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
         let mut request_line = String::new();
-        reader.read_line(&mut request_line).map_err(|e| e.to_string())?;
+        reader
+            .read_line(&mut request_line)
+            .map_err(|e| e.to_string())?;
         // Drain headers so the browser sees a complete exchange.
         let mut line = String::new();
         while reader.read_line(&mut line).map_err(|e| e.to_string())? > 2 {
@@ -170,7 +186,8 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
 
 fn respond(stream: &mut std::net::TcpStream, status: u16, message: &str) {
     let reason = if status == 200 { "OK" } else { "Error" };
-    let body = format!("<html><body style=\"font-family:sans-serif\"><p>{message}</p></body></html>");
+    let body =
+        format!("<html><body style=\"font-family:sans-serif\"><p>{message}</p></body></html>");
     let _ = write!(
         stream,
         "HTTP/1.1 {status} {reason}\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -187,7 +204,9 @@ fn urlencode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }

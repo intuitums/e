@@ -15,8 +15,8 @@
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthChar;
 
-use crate::tui::render::*;
 use crate::tui::highlight::highlight_line;
+use crate::tui::render::*;
 use crate::tui::theme::Theme;
 
 fn osc8(url: &str) -> String {
@@ -34,14 +34,21 @@ pub fn visible_width(styled: &str) -> usize {
                 Some('[') => {
                     while let Some(&n) = chars.peek() {
                         chars.next();
-                        if n.is_ascii_alphabetic() { break; }
+                        if n.is_ascii_alphabetic() {
+                            break;
+                        }
                     }
                 }
                 Some(']') => {
                     // OSC … terminated by BEL or ST (ESC \)
                     while let Some(n) = chars.next() {
-                        if n == '\x07' { break; }
-                        if n == '\x1b' { chars.next(); break; }
+                        if n == '\x07' {
+                            break;
+                        }
+                        if n == '\x1b' {
+                            chars.next();
+                            break;
+                        }
                     }
                 }
                 _ => {}
@@ -76,7 +83,9 @@ pub fn wrap_styled(styled: &str, width: usize) -> Vec<String> {
         }
         rows.push(row);
     }
-    if rows.is_empty() { rows.push(String::new()); }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
     rows
 }
 
@@ -98,24 +107,36 @@ fn hard_wrap(line: &str, width: usize) -> Vec<String> {
             while let Some(&n) = chars.peek() {
                 seq.push(n);
                 chars.next();
-                if n.is_ascii_alphabetic() { break; }
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
             }
-            open = if RESETS.contains(&seq.as_str()) { None } else { Some(seq.clone()) };
+            open = if RESETS.contains(&seq.as_str()) {
+                None
+            } else {
+                Some(seq.clone())
+            };
             row.push_str(&seq);
             continue;
         }
         let w = c.width().unwrap_or(0);
         if row_width + w > width {
-            if open.is_some() { row.push_str("\x1b[0m"); }
+            if open.is_some() {
+                row.push_str("\x1b[0m");
+            }
             rows.push(std::mem::take(&mut row));
-            if let Some(o) = &open { row.push_str(o); }
+            if let Some(o) = &open {
+                row.push_str(o);
+            }
             row_width = 0;
         }
         row.push(c);
         row_width += w;
     }
     if row_width > 0 || rows.is_empty() {
-        if open.is_some() { row.push_str("\x1b[0m"); }
+        if open.is_some() {
+            row.push_str("\x1b[0m");
+        }
         rows.push(row);
     }
     rows
@@ -127,18 +148,32 @@ pub fn code_panel(theme: &Theme, code: &str, language: &str, cols: usize) -> Vec
     let lines: Vec<String> = if language.is_empty() {
         source.split('\n').map(String::from).collect()
     } else {
-        source.split('\n').map(|l| highlight_line(theme, language, l)).collect()
+        source
+            .split('\n')
+            .map(|l| highlight_line(theme, language, l))
+            .collect()
     };
 
     let max_code_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
-    let label_width = if language.is_empty() { 0 } else { language.chars().count().min(cols.saturating_sub(5)) };
+    let label_width = if language.is_empty() {
+        0
+    } else {
+        language.chars().count().min(cols.saturating_sub(5))
+    };
     let panel_width = (max_code_width + 4).max(label_width + 5).max(6).min(cols);
     let inner_width = panel_width - 4;
 
     let mut out = Vec::new();
     if label_width > 0 {
-        let label: String = language.chars().take(panel_width.saturating_sub(5)).collect();
-        let label = if label.is_empty() { "?".to_string() } else { label };
+        let label: String = language
+            .chars()
+            .take(panel_width.saturating_sub(5))
+            .collect();
+        let label = if label.is_empty() {
+            "?".to_string()
+        } else {
+            label
+        };
         let edge = "─".repeat(panel_width.saturating_sub(4 + label.chars().count()));
         out.push(format!("┌ {DIM_ON}{label}{WEIGHT_OFF} {edge}┐"));
     } else {
@@ -163,7 +198,9 @@ struct ListState {
 fn flush_item(rows: &mut Vec<String>, lists: &mut [ListState], inline: &mut String, width: usize) {
     let depth = lists.len().saturating_sub(1);
     let pad = "  ".repeat(depth);
-    let Some(state) = lists.last_mut() else { return };
+    let Some(state) = lists.last_mut() else {
+        return;
+    };
     let (glyph, glyph_width) = match &mut state.ordered {
         Some(n) => {
             let g = format!("{n}. ");
@@ -174,10 +211,18 @@ fn flush_item(rows: &mut Vec<String>, lists: &mut [ListState], inline: &mut Stri
         None => (format!("{}{}", dim("•"), " "), 2),
     };
     let hanging = format!("{pad}{}", " ".repeat(glyph_width));
-    let body_width = width.saturating_sub(pad.chars().count() + glyph_width).max(8);
-    for (i, row) in wrap_styled(inline.trim_end(), body_width).into_iter().enumerate() {
-        if i == 0 { rows.push(format!("{pad}{glyph}{row}")); }
-        else { rows.push(format!("{hanging}{row}")); }
+    let body_width = width
+        .saturating_sub(pad.chars().count() + glyph_width)
+        .max(8);
+    for (i, row) in wrap_styled(inline.trim_end(), body_width)
+        .into_iter()
+        .enumerate()
+    {
+        if i == 0 {
+            rows.push(format!("{pad}{glyph}{row}"));
+        } else {
+            rows.push(format!("{hanging}{row}"));
+        }
     }
     inline.clear();
 }
@@ -191,8 +236,12 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
 
     let mut out: Vec<String> = Vec::new();
     let push_block = |out: &mut Vec<String>, lines: Vec<String>| {
-        if lines.is_empty() { return; }
-        if !out.is_empty() { out.push(String::new()); }
+        if lines.is_empty() {
+            return;
+        }
+        if !out.is_empty() {
+            out.push(String::new());
+        }
         out.extend(lines);
     };
 
@@ -201,7 +250,7 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
     let mut heading: Option<u8> = None;
     let mut lists: Vec<ListState> = Vec::new();
     let mut item_first_lines: Vec<String> = Vec::new(); // rendered rows of current list block
-    // One flag per open item: has its own inline text been emitted yet?
+                                                        // One flag per open item: has its own inline text been emitted yet?
     let mut item_stack: Vec<bool> = Vec::new();
     let mut quote_depth = 0usize;
     let mut code: Option<(String, String)> = None; // (lang, buffer)
@@ -211,8 +260,12 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 heading = Some(match level {
-                    HeadingLevel::H1 => 1, HeadingLevel::H2 => 2, HeadingLevel::H3 => 3,
-                    HeadingLevel::H4 => 4, HeadingLevel::H5 => 5, HeadingLevel::H6 => 6,
+                    HeadingLevel::H1 => 1,
+                    HeadingLevel::H2 => 2,
+                    HeadingLevel::H3 => 3,
+                    HeadingLevel::H4 => 4,
+                    HeadingLevel::H5 => 5,
+                    HeadingLevel::H6 => 6,
                 });
                 inline.clear();
             }
@@ -228,8 +281,10 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
                 } else if quote_depth > 0 {
                     let body_width = width.saturating_sub(2).max(8);
                     let rail = quote_rail();
-                    let rows: Vec<String> =
-                        wrap_styled(&inline, body_width).into_iter().map(|r| format!("{rail}{r}")).collect();
+                    let rows: Vec<String> = wrap_styled(&inline, body_width)
+                        .into_iter()
+                        .map(|r| format!("{rail}{r}"))
+                        .collect();
                     push_block(&mut out, rows);
                     inline.clear();
                 } else if table.is_none() {
@@ -237,8 +292,12 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
                     inline.clear();
                 }
             }
-            Event::Start(Tag::BlockQuote(_)) => { quote_depth += 1; }
-            Event::End(TagEnd::BlockQuote(_)) => { quote_depth = quote_depth.saturating_sub(1); }
+            Event::Start(Tag::BlockQuote(_)) => {
+                quote_depth += 1;
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                quote_depth = quote_depth.saturating_sub(1);
+            }
             Event::Start(Tag::List(start)) => {
                 // A list opening inside an item means the item's own text is
                 // done — emit it now so children render below their parent.
@@ -249,7 +308,9 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
                     }
                 }
                 lists.push(ListState { ordered: start });
-                if lists.len() == 1 { item_first_lines.clear(); }
+                if lists.len() == 1 {
+                    item_first_lines.clear();
+                }
             }
             Event::End(TagEnd::List(_)) => {
                 lists.pop();
@@ -257,7 +318,10 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
                     push_block(&mut out, std::mem::take(&mut item_first_lines));
                 }
             }
-            Event::Start(Tag::Item) => { item_stack.push(false); inline.clear(); }
+            Event::Start(Tag::Item) => {
+                item_stack.push(false);
+                inline.clear();
+            }
             Event::End(TagEnd::Item) => {
                 let flushed = item_stack.pop().unwrap_or(false);
                 if !flushed {
@@ -267,7 +331,9 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
             }
             Event::Start(Tag::CodeBlock(kind)) => {
                 let lang = match kind {
-                    pulldown_cmark::CodeBlockKind::Fenced(l) => l.split_whitespace().next().unwrap_or("").to_string(),
+                    pulldown_cmark::CodeBlockKind::Fenced(l) => {
+                        l.split_whitespace().next().unwrap_or("").to_string()
+                    }
                     _ => String::new(),
                 };
                 code = Some((lang, String::new()));
@@ -277,15 +343,34 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
                     push_block(&mut out, code_panel(theme, &buffer, &lang, width));
                 }
             }
-            Event::Start(Tag::Table(_)) => { table = Some((Vec::new(), Vec::new(), false)); }
-            Event::Start(Tag::TableHead) => { if let Some(t) = &mut table { t.2 = true; } }
-            Event::End(TagEnd::TableHead) => { if let Some(t) = &mut table { t.2 = false; } }
-            Event::Start(Tag::TableRow) => { if let Some(t) = &mut table { if !t.2 { t.1.push(Vec::new()); } } }
+            Event::Start(Tag::Table(_)) => {
+                table = Some((Vec::new(), Vec::new(), false));
+            }
+            Event::Start(Tag::TableHead) => {
+                if let Some(t) = &mut table {
+                    t.2 = true;
+                }
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let Some(t) = &mut table {
+                    t.2 = false;
+                }
+            }
+            Event::Start(Tag::TableRow) => {
+                if let Some(t) = &mut table {
+                    if !t.2 {
+                        t.1.push(Vec::new());
+                    }
+                }
+            }
             Event::Start(Tag::TableCell) => inline.clear(),
             Event::End(TagEnd::TableCell) => {
                 if let Some((header, rows, in_header)) = &mut table {
-                    if *in_header { header.push(std::mem::take(&mut inline)); }
-                    else if let Some(last) = rows.last_mut() { last.push(std::mem::take(&mut inline)); }
+                    if *in_header {
+                        header.push(std::mem::take(&mut inline));
+                    } else if let Some(last) = rows.last_mut() {
+                        last.push(std::mem::take(&mut inline));
+                    }
                 }
             }
             Event::End(TagEnd::Table) => {
@@ -310,8 +395,11 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
             }
             Event::Code(text) => inline.push_str(&theme.fg("mdCode", &text)),
             Event::Text(text) => {
-                if let Some((_, buffer)) = &mut code { buffer.push_str(&text); }
-                else { inline.push_str(&text); }
+                if let Some((_, buffer)) = &mut code {
+                    buffer.push_str(&text);
+                } else {
+                    inline.push_str(&text);
+                }
             }
             Event::SoftBreak => inline.push(' '),
             Event::HardBreak => inline.push('\n'),
@@ -328,18 +416,41 @@ fn render_table(header: &[String], rows: &[Vec<String>]) -> Vec<String> {
     let mut widths: Vec<usize> = header.iter().map(|h| visible_width(h)).collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
-            if i < cols { widths[i] = widths[i].max(visible_width(cell)); }
+            if i < cols {
+                widths[i] = widths[i].max(visible_width(cell));
+            }
         }
     }
     let line = |cells: &[String], bold_row: bool| -> String {
-        cells.iter().enumerate().map(|(i, c)| {
-            let pad = " ".repeat(widths.get(i).copied().unwrap_or(0).saturating_sub(visible_width(c)));
-            let cell = format!("{c}{pad}");
-            if bold_row { bold(&cell) } else { cell }
-        }).collect::<Vec<_>>().join(&format!(" {} ", dim("│")))
+        cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let pad = " ".repeat(
+                    widths
+                        .get(i)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_sub(visible_width(c)),
+                );
+                let cell = format!("{c}{pad}");
+                if bold_row {
+                    bold(&cell)
+                } else {
+                    cell
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(&format!(" {} ", dim("│")))
     };
     let mut out = vec![line(header, true)];
-    out.push(dim(&widths.iter().map(|w| "─".repeat(*w)).collect::<Vec<_>>().join("─┼─")));
-    for row in rows { out.push(line(row, false)); }
+    out.push(dim(&widths
+        .iter()
+        .map(|w| "─".repeat(*w))
+        .collect::<Vec<_>>()
+        .join("─┼─")));
+    for row in rows {
+        out.push(line(row, false));
+    }
     out
 }

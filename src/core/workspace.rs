@@ -6,7 +6,14 @@
 
 use std::path::Path;
 
-const SKIP: &[&str] = &[".git", "target", "node_modules", "dist", ".cache", "__pycache__"];
+const SKIP: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    "dist",
+    ".cache",
+    "__pycache__",
+];
 const MAX_FILES: usize = 2000;
 const MAX_DEPTH: usize = 6;
 
@@ -21,7 +28,9 @@ fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
     if depth > MAX_DEPTH || out.len() >= MAX_FILES {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         if out.len() >= MAX_FILES {
             return;

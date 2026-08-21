@@ -59,6 +59,9 @@ mod tempdir {
     }
 }
 
+// The env lock is deliberately held across the awaits: E_HOME must stay ours
+// for the whole test, and each #[tokio::test] runs on its own runtime.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn extension_round_trip() {
     let _lock = ENV_LOCK.lock().unwrap();
@@ -67,16 +70,28 @@ async fn extension_round_trip() {
     let host = ExtensionHost::start(notices).await;
 
     // Discovery + manifest.
-    assert!(!host.is_empty(), "fake.sh should be discovered and initialized");
+    assert!(
+        !host.is_empty(),
+        "fake.sh should be discovered and initialized"
+    );
     assert!(host.owns_tool("greet"));
-    assert_eq!(host.commands(), vec![("ping".to_string(), "pong".to_string())]);
+    assert_eq!(
+        host.commands(),
+        vec![("ping".to_string(), "pong".to_string())]
+    );
 
     // The extension's tools join the schema set, and "bash" overrides the built-in.
     let schemas = host.merged_tool_schemas();
-    let names: Vec<&str> = schemas.iter().filter_map(|s| s["function"]["name"].as_str()).collect();
+    let names: Vec<&str> = schemas
+        .iter()
+        .filter_map(|s| s["function"]["name"].as_str())
+        .collect();
     assert!(names.contains(&"greet"));
     assert_eq!(names.iter().filter(|n| **n == "bash").count(), 1);
-    let bash = schemas.iter().find(|s| s["function"]["name"] == "bash").unwrap();
+    let bash = schemas
+        .iter()
+        .find(|s| s["function"]["name"] == "bash")
+        .unwrap();
     assert_eq!(bash["function"]["description"], "my bash");
 
     // Tool call round-trip.
@@ -90,7 +105,12 @@ async fn extension_round_trip() {
     assert_eq!(out.prompt, None);
 
     // Hook: explicit block wins, everything else is allowed.
-    assert_eq!(host.hook_tool_call("bash", r#"{"cmd":"danger"}"#).await.as_deref(), Some("nope"));
+    assert_eq!(
+        host.hook_tool_call("bash", r#"{"cmd":"danger"}"#)
+            .await
+            .as_deref(),
+        Some("nope")
+    );
     assert_eq!(host.hook_tool_call("bash", r#"{"cmd":"ls"}"#).await, None);
 
     host.shutdown().await;

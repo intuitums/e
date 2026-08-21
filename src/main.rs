@@ -5,8 +5,8 @@
 //! aborts the in-flight request; history is in-memory until sessions land.
 
 use crossterm::event::{
-    Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers,
-    EnableBracketedPaste, DisableBracketedPaste,
+    DisableBracketedPaste, EnableBracketedPaste, Event as TermEvent, EventStream, KeyCode,
+    KeyEvent, KeyModifiers,
 };
 use crossterm::{execute, terminal};
 use futures::StreamExt;
@@ -16,13 +16,13 @@ use std::time::{Duration, Instant};
 use e::core::agent::{Agent, SessionEvent};
 use e::core::model::{self, Model};
 use e::core::output::{format_duration, format_tokens};
-use e::tui::composer::{Editor, EditorResult, Key};
-use e::tui::statusline::{statusline, StatusData, Turn};
 use e::tui::authpanel::{self, AuthStage};
+use e::tui::composer::{Editor, EditorResult, Key};
 use e::tui::menu::{Menu, MenuItem, MenuKind, HINT_USE};
+use e::tui::screen::Screen;
+use e::tui::statusline::{statusline, StatusData, Turn};
 use e::tui::theme::Theme;
 use e::tui::transcript::{Block, Kind, Transcript};
-use e::tui::screen::Screen;
 
 /// Per-turn frontend bookkeeping; the engine state lives in the Agent.
 struct ActiveTurn {
@@ -77,14 +77,22 @@ impl App {
         let mut lines = self.transcript.render(&self.theme, width);
         if let Some(s) = &self.active {
             lines.push(String::new());
-            lines.push(format!(" • {}", s.turn.label(s.started.elapsed().as_secs())));
+            lines.push(format!(
+                " • {}",
+                s.turn.label(s.started.elapsed().as_secs())
+            ));
         }
         let entering_key = matches!(self.auth, Some(AuthStage::ApiKey { .. }));
         if !entering_key {
             lines.extend(self.editor.render(&self.theme, width));
         }
         if let Some(stage) = &self.auth {
-            lines.extend(authpanel::render(stage, &self.theme, width, self.editor.text().chars().count()));
+            lines.extend(authpanel::render(
+                stage,
+                &self.theme,
+                width,
+                self.editor.text().chars().count(),
+            ));
         } else if let Some(panel) = &self.settings {
             lines.extend(panel.render(&self.theme, width));
         } else if let Some(menu) = &self.menu {
@@ -104,7 +112,13 @@ impl App {
             .as_ref()
             .map(|_| e::tui::settingspanel::HINT)
             .or_else(|| self.menu.as_ref().map(|m| m.hint));
-        lines.extend(statusline(&self.theme, &data, self.overlay.as_deref(), hint, width));
+        lines.extend(statusline(
+            &self.theme,
+            &data,
+            self.overlay.as_deref(),
+            hint,
+            width,
+        ));
         lines
     }
 
@@ -112,7 +126,11 @@ impl App {
 
     fn command_items(&self) -> Vec<MenuItem> {
         let mut items = vec![
-            MenuItem::new("/login", "sign in to a provider — account or API key", "/login"),
+            MenuItem::new(
+                "/login",
+                "sign in to a provider — account or API key",
+                "/login",
+            ),
             MenuItem::new("/model", "switch the model", "/model"),
             MenuItem::new("/resume", "resume a saved session", "/resume"),
             MenuItem::new("/new", "start a fresh session", "/new"),
@@ -135,7 +153,11 @@ impl App {
             .into_iter()
             .map(|info| {
                 let mut item = MenuItem::new(
-                    if info.title.is_empty() { "(untitled)" } else { &info.title },
+                    if info.title.is_empty() {
+                        "(untitled)"
+                    } else {
+                        &info.title
+                    },
                     "",
                     &info.path.to_string_lossy(),
                 );
@@ -170,19 +192,25 @@ impl App {
         self.transcript.push(Block::new(Kind::Banner, e::VERSION));
         for m in &messages {
             match m.role.as_str() {
-                "user" => { self.transcript.push(Block::new(Kind::User, m.content.clone())); }
+                "user" => {
+                    self.transcript
+                        .push(Block::new(Kind::User, m.content.clone()));
+                }
                 "assistant" if !m.content.trim().is_empty() => {
-                    self.transcript.push(Block::new(Kind::Assistant, m.content.clone()));
+                    self.transcript
+                        .push(Block::new(Kind::Assistant, m.content.clone()));
                 }
                 _ => {}
             }
         }
         self.agent.load_history(messages);
-        match e::core::session::Session::reopen(&path) {
-            Ok(s) => self.agent.set_session(Some(s)),
-            Err(_) => {}
-        }
-        self.notice(format!("resumed {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+        if let Ok(s) = e::core::session::Session::reopen(&path) { self.agent.set_session(Some(s)) }
+        self.notice(format!(
+            "resumed {}",
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ));
     }
 
     fn open_settings(&mut self) {
@@ -219,9 +247,14 @@ impl App {
         if selected == 0 {
             self.auth = Some(AuthStage::Waiting);
             self.notice("starting the openai-codex sign-in…".into());
-            tokio::spawn(e::core::login::codex_login("openai-codex".into(), self.jobs.clone()));
+            tokio::spawn(e::core::login::codex_login(
+                "openai-codex".into(),
+                self.jobs.clone(),
+            ));
         } else {
-            self.auth = Some(AuthStage::ApiKey { provider: "opencode-go".into() });
+            self.auth = Some(AuthStage::ApiKey {
+                provider: "opencode-go".into(),
+            });
             self.pending_key = Some("opencode-go".into());
             self.editor.mask = true;
             self.editor.set_text("");
@@ -265,7 +298,12 @@ impl App {
             match &mut self.menu {
                 Some(m) if m.kind == MenuKind::Commands => m.set_query(&query),
                 _ => {
-                    let mut menu = Menu::new(MenuKind::Commands, "Commands", HINT_USE, self.command_items());
+                    let mut menu = Menu::new(
+                        MenuKind::Commands,
+                        "Commands",
+                        HINT_USE,
+                        self.command_items(),
+                    );
                     menu.set_query(&query);
                     self.menu = Some(menu);
                 }
@@ -273,7 +311,11 @@ impl App {
             return;
         }
         // File picker: the last token starts with '@'.
-        if let Some(token) = text.split_whitespace().last().filter(|t| t.starts_with('@')) {
+        if let Some(token) = text
+            .split_whitespace()
+            .last()
+            .filter(|t| t.starts_with('@'))
+        {
             let query = token[1..].to_string();
             match &mut self.menu {
                 Some(m) if m.kind == MenuKind::Files => m.set_query(&query),
@@ -282,7 +324,11 @@ impl App {
             return;
         }
         // Skills picker: the last token starts with '$'.
-        if let Some(token) = text.split_whitespace().last().filter(|t| t.starts_with('$')) {
+        if let Some(token) = text
+            .split_whitespace()
+            .last()
+            .filter(|t| t.starts_with('$'))
+        {
             let query = token[1..].to_string();
             match &mut self.menu {
                 Some(m) if m.kind == MenuKind::Skills => m.set_query(&query),
@@ -349,7 +395,6 @@ impl App {
                     self.agent.model = found;
                 }
             }
-
         }
         true
     }
@@ -457,7 +502,9 @@ impl App {
             self.notice("starting the openai-codex sign-in…".into());
             tokio::spawn(e::core::login::codex_login(provider, self.jobs.clone()));
         } else {
-            self.notice(format!("paste the {provider} API key and press enter (esc cancels)"));
+            self.notice(format!(
+                "paste the {provider} API key and press enter (esc cancels)"
+            ));
             self.pending_key = Some(provider);
             self.editor.mask = true;
         }
@@ -544,7 +591,11 @@ impl App {
                     s.tool_blocks.insert(id, idx);
                 }
             }
-            SessionEvent::ToolEnd { id, summary, is_error } => {
+            SessionEvent::ToolEnd {
+                id,
+                summary,
+                is_error,
+            } => {
                 if let Some(s) = &mut self.active {
                     if let Some(&idx) = s.tool_blocks.get(&id) {
                         if let Some(b) = self.transcript.blocks.get_mut(idx) {
@@ -559,7 +610,11 @@ impl App {
                     }
                 }
             }
-            SessionEvent::Usage { input, output, cache_read } => {
+            SessionEvent::Usage {
+                input,
+                output,
+                cache_read,
+            } => {
                 self.context_tokens = input + cache_read;
                 if let Some(s) = &mut self.active {
                     s.turn.input += input + cache_read;
@@ -582,12 +637,21 @@ impl App {
                 let tokens = if s.turn.input == 0 && s.turn.output == 0 {
                     String::new()
                 } else {
-                    format!(" (↑{} ↓{})", format_tokens(s.turn.input), format_tokens(s.turn.output))
+                    format!(
+                        " (↑{} ↓{})",
+                        format_tokens(s.turn.input),
+                        format_tokens(s.turn.output)
+                    )
                 };
                 let mark = if aborted { " · interrupted" } else { "" };
                 self.transcript.push(Block::new(
                     Kind::Summary,
-                    format!("{}{}{}", format_duration(s.started.elapsed().as_millis() as u64), tokens, mark),
+                    format!(
+                        "{}{}{}",
+                        format_duration(s.started.elapsed().as_millis() as u64),
+                        tokens,
+                        mark
+                    ),
                 ));
                 if let Some(message) = s.error {
                     self.notice(format!("error: {message}"));
@@ -615,7 +679,11 @@ impl App {
                         c.wait()
                     })
                     .is_ok();
-                self.notice(if ok { "copied the last reply".into() } else { "copy failed (no pbcopy)".into() });
+                self.notice(if ok {
+                    "copied the last reply".into()
+                } else {
+                    "copy failed (no pbcopy)".into()
+                });
             }
             None => self.notice("nothing to copy yet".into()),
         }
@@ -635,7 +703,9 @@ impl App {
 
 /// The tab title's path: the working directory, home-relative.
 fn title_path() -> String {
-    let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     let home = std::env::var("HOME").unwrap_or_default();
     if !home.is_empty() && cwd.starts_with(&home) {
         format!("~{}", &cwd[home.len()..])
@@ -645,12 +715,20 @@ fn title_path() -> String {
 }
 
 fn ago(ms: u64) -> String {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     let secs = now.saturating_sub(ms) / 1000;
-    if secs < 60 { format!("{secs}s") }
-    else if secs < 3600 { format!("{}m", secs / 60) }
-    else if secs < 86400 { format!("{}h", secs / 3600) }
-    else { format!("{}d", secs / 86400) }
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
 }
 
 fn system_prompt() -> String {
@@ -741,7 +819,11 @@ async fn main() -> std::io::Result<()> {
     // -c continues this workspace's most recent session.
     let continue_flag = args.iter().any(|a| a == "-c" || a == "--continue");
     let message_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-    let initial: String = message_args.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
+    let initial: String = message_args
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
     if continue_flag {
         app.resume_recent();
     }

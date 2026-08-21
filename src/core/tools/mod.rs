@@ -47,15 +47,38 @@ pub fn schemas() -> Vec<Value> {
 
 /// Present a tool call for the transcript: `Verb target`.
 pub fn present(name: &str, args: &Value) -> (String, String) {
-    let base = |p: &str| Path::new(p).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| p.into());
+    let base = |p: &str| {
+        Path::new(p)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.into())
+    };
     match name {
         "read" => ("Read".into(), base(args["path"].as_str().unwrap_or(""))),
         "write" => ("Wrote".into(), base(args["path"].as_str().unwrap_or(""))),
         "edit" => ("Edited".into(), base(args["path"].as_str().unwrap_or(""))),
-        "bash" => ("Ran".into(), args["command"].as_str().unwrap_or("").lines().next().unwrap_or("").to_string()),
-        "grep" => ("Searched".into(), args["pattern"].as_str().unwrap_or("").to_string()),
-        "ls" => ("Listed".into(), args["path"].as_str().unwrap_or(".").to_string()),
-        "skill" => ("Skill".into(), args["name"].as_str().unwrap_or("").to_string()),
+        "bash" => (
+            "Ran".into(),
+            args["command"]
+                .as_str()
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string(),
+        ),
+        "grep" => (
+            "Searched".into(),
+            args["pattern"].as_str().unwrap_or("").to_string(),
+        ),
+        "ls" => (
+            "Listed".into(),
+            args["path"].as_str().unwrap_or(".").to_string(),
+        ),
+        "skill" => (
+            "Skill".into(),
+            args["name"].as_str().unwrap_or("").to_string(),
+        ),
         other => (other.to_string(), String::new()),
     }
 }
@@ -67,13 +90,41 @@ struct Spec {
 }
 
 static SPECS: &[Spec] = &[
-    Spec { name: "read", schema: fs::read_schema, run: fs::read },
-    Spec { name: "write", schema: fs::write_schema, run: fs::write },
-    Spec { name: "edit", schema: edit::schema, run: edit::run },
-    Spec { name: "ls", schema: fs::ls_schema, run: fs::ls },
-    Spec { name: "grep", schema: fs::grep_schema, run: fs::grep },
-    Spec { name: "bash", schema: bash::schema, run: bash::run },
-    Spec { name: "skill", schema: skill::schema, run: skill::run },
+    Spec {
+        name: "read",
+        schema: fs::read_schema,
+        run: fs::read,
+    },
+    Spec {
+        name: "write",
+        schema: fs::write_schema,
+        run: fs::write,
+    },
+    Spec {
+        name: "edit",
+        schema: edit::schema,
+        run: edit::run,
+    },
+    Spec {
+        name: "ls",
+        schema: fs::ls_schema,
+        run: fs::ls,
+    },
+    Spec {
+        name: "grep",
+        schema: fs::grep_schema,
+        run: fs::grep,
+    },
+    Spec {
+        name: "bash",
+        schema: bash::schema,
+        run: bash::run,
+    },
+    Spec {
+        name: "skill",
+        schema: skill::schema,
+        run: skill::run,
+    },
 ];
 
 /// Execute a named tool. `cwd` is the workspace root.
@@ -92,7 +143,11 @@ pub fn run(name: &str, arguments: &str, cwd: &Path) -> ToolOutput {
 /// Resolve a possibly-relative path against the workspace root.
 fn resolve(cwd: &Path, p: &str) -> PathBuf {
     let path = Path::new(p);
-    if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) }
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
 }
 
 fn schema_object(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {

@@ -84,22 +84,39 @@ pub struct HookVerdict {
 /// One parsed line arriving from an extension.
 #[derive(Debug)]
 pub enum Incoming {
-    Response { id: u64, result: Result<Value, String> },
-    Notify { message: String },
+    Response {
+        id: u64,
+        result: Result<Value, String>,
+    },
+    Notify {
+        message: String,
+    },
 }
 
 pub fn parse_incoming(line: &str) -> Option<Incoming> {
     let value: Value = serde_json::from_str(line).ok()?;
     if let Some(id) = value.get("id").and_then(Value::as_u64) {
         if let Some(err) = value.get("error") {
-            let message = err.as_str().map(String::from).unwrap_or_else(|| err.to_string());
-            return Some(Incoming::Response { id, result: Err(message) });
+            let message = err
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| err.to_string());
+            return Some(Incoming::Response {
+                id,
+                result: Err(message),
+            });
         }
         let result = value.get("result").cloned().unwrap_or(Value::Null);
-        return Some(Incoming::Response { id, result: Ok(result) });
+        return Some(Incoming::Response {
+            id,
+            result: Ok(result),
+        });
     }
     if value.get("method").and_then(Value::as_str) == Some("notify") {
-        let message = value["params"]["message"].as_str().unwrap_or("").to_string();
+        let message = value["params"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
         if !message.is_empty() {
             return Some(Incoming::Notify { message });
         }

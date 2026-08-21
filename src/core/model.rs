@@ -97,7 +97,10 @@ pub fn catalog() -> Vec<Model> {
                     Some("codex-responses") => Api::Responses,
                     _ => Api::Completions,
                 };
-                let base = entry.base_url.clone().unwrap_or_else(|| OPENCODE_BASE.into());
+                let base = entry
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| OPENCODE_BASE.into());
                 for id in entry.models {
                     if !models.iter().any(|m| m.provider == provider && m.id == id) {
                         models.push(Model {

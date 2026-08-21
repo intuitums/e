@@ -15,18 +15,41 @@ pub fn home() -> PathBuf {
     PathBuf::from(base).join(".e")
 }
 
-pub fn settings_path() -> PathBuf { home().join("settings.json") }
-pub fn auth_path() -> PathBuf { home().join("auth.json") }
-pub fn agents_md_path() -> PathBuf { home().join("AGENTS.md") }
-pub fn sessions_dir() -> PathBuf { home().join("sessions") }
-pub fn extensions_dir() -> PathBuf { home().join("extensions") }
-pub fn skills_dir() -> PathBuf { home().join("skills") }
-pub fn prompts_dir() -> PathBuf { home().join("prompts") }
-pub fn themes_dir() -> PathBuf { home().join("themes") }
+pub fn settings_path() -> PathBuf {
+    home().join("settings.json")
+}
+pub fn auth_path() -> PathBuf {
+    home().join("auth.json")
+}
+pub fn agents_md_path() -> PathBuf {
+    home().join("AGENTS.md")
+}
+pub fn sessions_dir() -> PathBuf {
+    home().join("sessions")
+}
+pub fn extensions_dir() -> PathBuf {
+    home().join("extensions")
+}
+pub fn skills_dir() -> PathBuf {
+    home().join("skills")
+}
+pub fn prompts_dir() -> PathBuf {
+    home().join("prompts")
+}
+pub fn themes_dir() -> PathBuf {
+    home().join("themes")
+}
 
 /// Create the home skeleton if absent. Idempotent; never touches contents.
 pub fn ensure() -> std::io::Result<()> {
-    for dir in [home(), sessions_dir(), skills_dir(), prompts_dir(), themes_dir(), extensions_dir()] {
+    for dir in [
+        home(),
+        sessions_dir(),
+        skills_dir(),
+        prompts_dir(),
+        themes_dir(),
+        extensions_dir(),
+    ] {
         std::fs::create_dir_all(dir)?;
     }
     Ok(())

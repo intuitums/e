@@ -90,7 +90,12 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<usize> {
 }
 
 impl Menu {
-    pub fn new(kind: MenuKind, title: &'static str, hint: &'static str, items: Vec<MenuItem>) -> Self {
+    pub fn new(
+        kind: MenuKind,
+        title: &'static str,
+        hint: &'static str,
+        items: Vec<MenuItem>,
+    ) -> Self {
         let mut menu = Menu {
             kind,
             title,
@@ -133,6 +138,10 @@ impl Menu {
 
     pub fn len(&self) -> usize {
         self.filtered.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.filtered.is_empty()
     }
 
     pub fn current(&self) -> Option<&MenuItem> {
@@ -216,7 +225,11 @@ impl Menu {
             }
             let mut line = format!("  {row}");
             if visible_width(&line) > width {
-                line = line.chars().take(width.saturating_sub(1)).collect::<String>() + "…";
+                line = line
+                    .chars()
+                    .take(width.saturating_sub(1))
+                    .collect::<String>()
+                    + "…";
             }
             body.push(line);
         }

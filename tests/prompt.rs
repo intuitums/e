@@ -20,12 +20,16 @@ fn with_home<F: FnOnce()>(name: &str, f: F) {
 fn default_prompt_has_pi_structure() {
     with_home("default", || {
         let prompt = system_prompt(Path::new("/tmp/proj"));
-        assert!(prompt.starts_with("You are an expert coding assistant operating inside e, a coding agent harness."));
+        assert!(prompt.starts_with(
+            "You are an expert coding assistant operating inside e, a coding agent harness."
+        ));
         assert!(prompt.contains("Available tools:"));
         assert!(prompt.contains("- read:") && prompt.contains("- bash:"));
         assert!(prompt.contains("Guidelines:"));
         assert!(prompt.contains("- Be concise in your responses"));
-        assert!(prompt.trim_end().ends_with("Current working directory: /tmp/proj"));
+        assert!(prompt
+            .trim_end()
+            .ends_with("Current working directory: /tmp/proj"));
         // AGENTS.md is bare by default — no project_context.
         assert!(!prompt.contains("<project_context>"));
     });

@@ -23,12 +23,16 @@ pub fn schema() -> Value {
 
 pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
     let Some(command) = args["command"].as_str() else {
-        return ToolOutput { content: "bash: missing command".into(), is_error: true, summary: "error".into() };
+        return ToolOutput {
+            content: "bash: missing command".into(),
+            is_error: true,
+            summary: "error".into(),
+        };
     };
     let timeout = args["timeout"].as_u64().unwrap_or(120).clamp(1, 600);
 
     // A wrapper enforces the timeout without a watcher thread.
-    let wrapped = format!("{command}");
+    let wrapped = command.to_string();
     let child = Command::new("bash")
         .arg("-lc")
         .arg(&wrapped)
@@ -49,9 +53,21 @@ pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
             }
             let code = out.status.code().unwrap_or(-1);
             let is_error = !out.status.success();
-            let summary = if is_error { format!("exit {code}") } else { "done".into() };
-            ToolOutput { content: truncate(combined.trim_end().to_string()), is_error, summary }
+            let summary = if is_error {
+                format!("exit {code}")
+            } else {
+                "done".into()
+            };
+            ToolOutput {
+                content: truncate(combined.trim_end().to_string()),
+                is_error,
+                summary,
+            }
         }
-        Err(e) => ToolOutput { content: format!("bash: {e}"), is_error: true, summary: "error".into() },
+        Err(e) => ToolOutput {
+            content: format!("bash: {e}"),
+            is_error: true,
+            summary: "error".into(),
+        },
     }
 }

@@ -22,7 +22,9 @@ pub enum Credential {
         #[serde(skip_serializing_if = "Option::is_none")]
         account_id: Option<String>,
     },
-    ApiKey { key: String },
+    ApiKey {
+        key: String,
+    },
 }
 
 pub type AuthFile = BTreeMap<String, Credential>;
@@ -60,7 +62,9 @@ pub fn now_ms() -> u64 {
 pub fn account_id_from_jwt(access: &str) -> Option<String> {
     use base64::Engine;
     let payload = access.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
     let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     json.get("https://api.openai.com/auth")?
         .get("chatgpt_account_id")?

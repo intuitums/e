@@ -13,13 +13,31 @@ use crate::core::home;
 
 /// One-line description of each tool, for the Available tools list.
 const TOOL_SNIPPETS: &[(&str, &str)] = &[
-    ("read", "Read the contents of a file. Use offset/limit for large files."),
-    ("write", "Write content to a file, creating it if needed, overwriting if it exists."),
-    ("edit", "Replace an exact string in a file; the old text must match once."),
+    (
+        "read",
+        "Read the contents of a file. Use offset/limit for large files.",
+    ),
+    (
+        "write",
+        "Write content to a file, creating it if needed, overwriting if it exists.",
+    ),
+    (
+        "edit",
+        "Replace an exact string in a file; the old text must match once.",
+    ),
     ("ls", "List the entries of a directory."),
-    ("grep", "Search file contents by regular expression across the workspace."),
-    ("bash", "Execute a bash command in the working directory. Returns combined output."),
-    ("skill", "Load a skill's instructions by name when a listed skill fits the task."),
+    (
+        "grep",
+        "Search file contents by regular expression across the workspace.",
+    ),
+    (
+        "bash",
+        "Execute a bash command in the working directory. Returns combined output.",
+    ),
+    (
+        "skill",
+        "Load a skill's instructions by name when a listed skill fits the task.",
+    ),
 ];
 
 const GUIDELINES: &[&str] = &[
@@ -36,7 +54,11 @@ fn default_base() -> String {
         .map(|(name, snippet)| format!("- {name}: {snippet}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let guidelines = GUIDELINES.iter().map(|g| format!("- {g}")).collect::<Vec<_>>().join("\n");
+    let guidelines = GUIDELINES
+        .iter()
+        .map(|g| format!("- {g}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         "You are an expert coding assistant operating inside e, a coding agent \
 harness. You help users by reading files, executing commands, editing code, \
@@ -78,7 +100,8 @@ pub fn system_prompt(cwd: &Path) -> String {
         context_files.push((cwd.join("AGENTS.md").to_string_lossy().into_owned(), rules));
     }
     if !context_files.is_empty() {
-        prompt.push_str("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n");
+        prompt
+            .push_str("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n");
         for (path, content) in context_files {
             prompt.push_str(&format!(
                 "<project_instructions path=\"{}\">\n{content}\n</project_instructions>\n\n",
@@ -95,9 +118,16 @@ pub fn system_prompt(cwd: &Path) -> String {
 fn read_trimmed(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let trimmed = text.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
