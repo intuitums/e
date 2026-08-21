@@ -61,6 +61,37 @@ pub fn visible_width(styled: &str) -> usize {
 }
 
 /// Word-wrap a styled string; ANSI runs travel with the word they precede.
+/// Clip a styled line to `max` visible columns, passing escape sequences
+/// through untouched. A clipped line gets a reset so an unclosed SGR run
+/// cannot bleed into whatever the terminal paints next.
+pub fn clip_styled(styled: &str, max: usize) -> String {
+    if visible_width(styled) <= max {
+        return styled.to_string();
+    }
+    let mut out = String::new();
+    let mut visible = 0usize;
+    let mut chars = styled.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            out.push(c);
+            for e in chars.by_ref() {
+                out.push(e);
+                if e.is_ascii_alphabetic() || e == '\\' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if visible >= max {
+            break;
+        }
+        out.push(c);
+        visible += 1;
+    }
+    out.push_str("\x1b[m");
+    out
+}
+
 pub fn wrap_styled(styled: &str, width: usize) -> Vec<String> {
     let mut rows = Vec::new();
     for hard in styled.split('\n') {

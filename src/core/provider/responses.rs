@@ -140,7 +140,23 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         body["reasoning"] = json!({"effort": effort, "summary": "auto"});
     }
     if !request.tools.is_empty() {
-        body["tools"] = json!(request.tools);
+        // The Responses dialect wants flat tools ({type, name, …}) — the
+        // chat-completions nesting 400s with "Missing required parameter:
+        // 'tools[0].name'". Caught by the first live codex turn.
+        let tools: Vec<serde_json::Value> = request
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "name": t["function"]["name"],
+                    "description": t["function"]["description"],
+                    "parameters": t["function"]["parameters"],
+                    "strict": false,
+                })
+            })
+            .collect();
+        body["tools"] = json!(tools);
     }
 
     let mut builder = match &account {

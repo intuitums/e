@@ -61,7 +61,11 @@ impl Screen {
         // state, where erase-to-end clears the cell under it — eating the
         // line's last character. Full rows need no erase at all.
         let put = |out: &mut std::io::StdoutLock<'_>, line: &String| -> io::Result<()> {
-            if visible_width(line) >= cols {
+            if visible_width(line) > cols {
+                // An overlong line would wrap physically and desync the row
+                // differ — clip it; producers should wrap, this is the net.
+                write!(out, "{}", crate::tui::markdown::clip_styled(line, cols))
+            } else if visible_width(line) == cols {
                 write!(out, "{line}")
             } else {
                 write!(out, "{line}\x1b[K")
