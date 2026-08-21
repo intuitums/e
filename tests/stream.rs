@@ -57,8 +57,9 @@ async fn completions_stream_parses_deltas_and_usage() {
             context_window: 200_000,
         },
         system: "sys".into(),
-        messages: vec![ChatMessage { role: "user".into(), content: "hi".into() }],
+        messages: vec![ChatMessage::user("hi")],
         effort: None,
+        tools: Vec::new(),
     };
     let (mut rx, _handle) = stream(request);
 
@@ -75,7 +76,8 @@ async fn completions_stream_parses_deltas_and_usage() {
                 done = true;
                 break;
             }
-            Event::Error(e) => panic!("stream error: {e}"),
+            Event::Error { message, .. } => panic!("stream error: {message}"),
+            Event::ToolCall(_) => {}
         }
     }
     assert!(done);
@@ -121,7 +123,7 @@ async fn agent_folds_provider_events_into_one_session_stream() {
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
-    agent.prompt("hi".into(), "sys".into());
+    agent.submit("hi".into(), "sys".into());
 
     // The contract: TurnStart first, TurnEnd last, exactly once each.
     let mut kinds = Vec::new();
@@ -134,6 +136,7 @@ async fn agent_folds_provider_events_into_one_session_stream() {
             SessionEvent::TurnEnd { .. } => "end",
             SessionEvent::ReasoningDelta(_) => "reasoning",
             SessionEvent::Error(_) => "error",
+            _ => "other",
         });
         if done {
             break;

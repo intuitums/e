@@ -23,11 +23,14 @@ use e::tui::screen::Screen;
 
 /// Per-turn frontend bookkeeping; the engine state lives in the Agent.
 struct ActiveTurn {
-    block: usize,
+    /// The current assistant text block, if one is streaming.
+    block: Option<usize>,
     text: String,
     turn: Turn,
     started: Instant,
     error: Option<String>,
+    /// tool id → transcript block index, so ToolEnd updates the right row.
+    tool_blocks: std::collections::HashMap<u64, usize>,
 }
 
 struct App {
@@ -307,27 +310,47 @@ impl App {
             self.notice("a turn is already streaming — esc to interrupt first".into());
             return;
         }
-        self.transcript.push(Block::new(Kind::User, text.clone()));
-        self.agent.prompt(text, system_prompt());
+        // A message while streaming steers; the user block appears on Steered.
+        if !self.agent.is_streaming() {
+            self.transcript.push(Block::new(Kind::User, text.clone()));
+        }
+        self.agent.submit(text, system_prompt());
     }
 
     /// The single session stream, in order. Turn bookkeeping hangs off it.
     fn on_session_event(&mut self, event: SessionEvent) {
         match event {
             SessionEvent::TurnStart => {
-                let block = self.transcript.push(Block::new(Kind::Assistant, ""));
                 self.active = Some(ActiveTurn {
-                    block,
+                    block: None,
                     text: String::new(),
                     turn: Turn::new(),
                     started: Instant::now(),
                     error: None,
+                    tool_blocks: std::collections::HashMap::new(),
                 });
+            }
+            SessionEvent::Steered(text) => {
+                // A mid-turn message: show it as a user turn where it landed.
+                self.transcript.push(Block::new(Kind::User, text));
+                // The next assistant text opens a fresh block.
+                if let Some(s) = &mut self.active {
+                    s.block = None;
+                    s.text.clear();
+                }
             }
             SessionEvent::TextDelta(delta) => {
                 if let Some(s) = &mut self.active {
                     s.text.push_str(&delta);
-                    let (idx, text) = (s.block, s.text.clone());
+                    let idx = match s.block {
+                        Some(idx) => idx,
+                        None => {
+                            let idx = self.transcript.push(Block::new(Kind::Assistant, ""));
+                            s.block = Some(idx);
+                            idx
+                        }
+                    };
+                    let text = s.text.clone();
                     if let Some(b) = self.transcript.blocks.get_mut(idx) {
                         b.text = text;
                         b.touch();
@@ -336,6 +359,34 @@ impl App {
             }
             SessionEvent::ReasoningDelta(_) => {
                 // Reasoning stays out of the transcript; the indicator says Thinking.
+            }
+            SessionEvent::ToolStart { id, verb, target } => {
+                if let Some(s) = &mut self.active {
+                    // A new tool ends the current text block; text after tools
+                    // opens a fresh one.
+                    s.block = None;
+                    s.text.clear();
+                    s.turn.note_tool_verb(&verb);
+                    let mut block = Block::new(Kind::Tool, verb);
+                    block.detail = Some(target);
+                    let idx = self.transcript.push(block);
+                    s.tool_blocks.insert(id, idx);
+                }
+            }
+            SessionEvent::ToolEnd { id, summary, is_error } => {
+                if let Some(s) = &mut self.active {
+                    if let Some(&idx) = s.tool_blocks.get(&id) {
+                        if let Some(b) = self.transcript.blocks.get_mut(idx) {
+                            b.done = true;
+                            b.is_error = is_error;
+                            b.detail = Some(match b.detail.take() {
+                                Some(t) if !t.is_empty() => format!("{t}  ({summary})"),
+                                _ => summary,
+                            });
+                            b.touch();
+                        }
+                    }
+                }
             }
             SessionEvent::Usage { input, output, cache_read } => {
                 self.context_tokens = input + cache_read;

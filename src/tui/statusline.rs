@@ -28,6 +28,21 @@ impl Turn {
         Turn { counts: BTreeMap::new(), last_verb: None, input: 0, output: 0, started_at: std::time::Instant::now() }
     }
 
+    /// Count a tool by the display verb the agent already resolved.
+    pub fn note_tool_verb(&mut self, verb: &str) {
+        let name = match verb {
+            "Read" | "Searched" | "Listed" => "read",
+            "Wrote" => "write",
+            "Edited" => "edit",
+            "Ran" => "bash",
+            _ => return,
+        };
+        if let Some((k, v, ..)) = TOOLS.iter().find(|(n, ..)| *n == name) {
+            *self.counts.entry(k).or_insert(0) += 1;
+            self.last_verb = Some(v);
+        }
+    }
+
     pub fn note_tool(&mut self, name: &str) {
         let key = match name {
             "find" | "grep" | "glob" => "read",

@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod auth;
 pub mod responses;
+pub mod tools;
 pub mod workspace;
 pub mod completions;
 pub mod home;

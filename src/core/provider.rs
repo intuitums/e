@@ -10,20 +10,49 @@ use tokio::sync::mpsc;
 
 use crate::core::model::{Api, Model};
 
-#[derive(Clone, Serialize)]
+/// One requested tool invocation, as the model asked for it.
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    /// Raw JSON argument string, exactly as streamed.
+    pub arguments: String,
+}
+
+#[derive(Clone, Serialize, serde::Deserialize)]
 pub struct ChatMessage {
-    pub role: String, // "user" | "assistant" | "system"
+    pub role: String, // "user" | "assistant" | "tool" | "system"
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl ChatMessage {
+    pub fn user(content: impl Into<String>) -> Self {
+        ChatMessage { role: "user".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None }
+    }
+    pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls, tool_call_id: None }
+    }
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        ChatMessage { role: "tool".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: Some(call_id.into()) }
+    }
 }
 
 #[derive(Debug)]
 pub enum Event {
     TextDelta(String),
     ReasoningDelta(String),
+    /// A completed tool request (dialects accumulate the argument deltas).
+    ToolCall(ToolCall),
     /// input, output, cache_read tokens from the terminal usage frame.
     Usage { input: u64, output: u64, cache_read: u64 },
     Done,
-    Error(String),
+    /// `delivered`: whether the request may have reached the provider —
+    /// only definitely-unsent failures are safe to auto-retry.
+    Error { message: String, delivered: bool },
 }
 
 pub struct Request {
@@ -31,6 +60,8 @@ pub struct Request {
     pub system: String,
     pub messages: Vec<ChatMessage>,
     pub effort: Option<String>,
+    /// Tool schemas to advertise (dialect-shaped by each implementation).
+    pub tools: Vec<serde_json::Value>,
 }
 
 /// Start the request; events arrive on the returned channel. The task ends
@@ -47,8 +78,8 @@ pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHand
             Ok(()) => {
                 let _ = tx.send(Event::Done).await;
             }
-            Err(message) => {
-                let _ = tx.send(Event::Error(message)).await;
+            Err((message, delivered)) => {
+                let _ = tx.send(Event::Error { message, delivered }).await;
             }
         }
     });

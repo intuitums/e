@@ -11,7 +11,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::core::auth::{self, Credential};
-use crate::core::provider::{http, Event, Request, SseSplitter};
+use crate::core::provider::{http, Event, Request, SseSplitter, ToolCall};
 
 pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const AUTH_BASE: &str = "https://auth.openai.com";
@@ -66,23 +66,43 @@ async fn fresh_access(provider: &str) -> Result<(String, String), String> {
     Ok((access.to_string(), account))
 }
 
-pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), String> {
-    let (access, account) = fresh_access(&request.model.provider).await?;
+type RunError = (String, bool); // (message, delivered)
+
+pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
+    let (access, account) = fresh_access(&request.model.provider).await.map_err(|e| (e, false))?;
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    // Responses-API message items.
-    let input: Vec<serde_json::Value> = request
-        .messages
-        .iter()
-        .map(|m| {
-            let part = if m.role == "assistant" { "output_text" } else { "input_text" };
-            json!({
-                "type": "message",
-                "role": m.role,
-                "content": [{"type": part, "text": m.content}],
-            })
-        })
-        .collect();
+    // Responses-API items: messages, function calls, and their outputs.
+    let mut input: Vec<serde_json::Value> = Vec::new();
+    for m in &request.messages {
+        match m.role.as_str() {
+            "assistant" => {
+                if !m.content.is_empty() {
+                    input.push(json!({
+                        "type": "message", "role": "assistant",
+                        "content": [{"type": "output_text", "text": m.content}],
+                    }));
+                }
+                for call in &m.tool_calls {
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }));
+                }
+            }
+            "tool" => input.push(json!({
+                "type": "function_call_output",
+                "call_id": m.tool_call_id.clone().unwrap_or_default(),
+                "output": m.content,
+            })),
+            role => input.push(json!({
+                "type": "message", "role": role,
+                "content": [{"type": "input_text", "text": m.content}],
+            })),
+        }
+    }
 
     let mut body = json!({
         "model": request.model.id,
@@ -99,6 +119,9 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), Stri
     if let Some(effort) = &request.effort {
         body["reasoning"] = json!({"effort": effort, "summary": "auto"});
     }
+    if !request.tools.is_empty() {
+        body["tools"] = json!(request.tools);
+    }
 
     let response = http()
         .post(format!("{}/codex/responses", request.model.base_url))
@@ -112,18 +135,20 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), Stri
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| (format!("request failed: {e}"), false))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(format!("{status}: {}", text.chars().take(300).collect::<String>()));
+        return Err((format!("{status}: {}", text.chars().take(300).collect::<String>()), true));
     }
 
     let mut splitter = SseSplitter::new();
     let mut stream = response.bytes_stream();
+    // function_call items accumulate argument deltas keyed by item id.
+    let mut pending: std::collections::BTreeMap<String, ToolCall> = Default::default();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("stream error: {e}"))?;
+        let chunk = chunk.map_err(|e| (format!("stream error: {e}"), true))?;
         for payload in splitter.feed(&String::from_utf8_lossy(&chunk)) {
             if payload == "[DONE]" {
                 return Ok(());
@@ -141,6 +166,41 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), Stri
                 "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
                     if let Some(text) = value["delta"].as_str() {
                         let _ = tx.send(Event::ReasoningDelta(text.into())).await;
+                    }
+                }
+                "response.output_item.added" => {
+                    let item = &value["item"];
+                    if item["type"].as_str() == Some("function_call") {
+                        let key = item["id"].as_str().or(item["call_id"].as_str()).unwrap_or("").to_string();
+                        pending.insert(key, ToolCall {
+                            id: item["call_id"].as_str().unwrap_or("").into(),
+                            name: item["name"].as_str().unwrap_or("").into(),
+                            arguments: item["arguments"].as_str().unwrap_or("").into(),
+                        });
+                    }
+                }
+                "response.function_call_arguments.delta" => {
+                    let key = value["item_id"].as_str().unwrap_or("").to_string();
+                    if let Some(call) = pending.get_mut(&key) {
+                        call.arguments.push_str(value["delta"].as_str().unwrap_or(""));
+                    }
+                }
+                "response.output_item.done" => {
+                    let item = &value["item"];
+                    if item["type"].as_str() == Some("function_call") {
+                        let key = item["id"].as_str().or(item["call_id"].as_str()).unwrap_or("").to_string();
+                        let mut call = pending.remove(&key).unwrap_or(ToolCall {
+                            id: String::new(), name: String::new(), arguments: String::new(),
+                        });
+                        // The done item carries the authoritative fields.
+                        if let Some(id) = item["call_id"].as_str() { call.id = id.into(); }
+                        if let Some(name) = item["name"].as_str() { call.name = name.into(); }
+                        if let Some(args) = item["arguments"].as_str() {
+                            if !args.is_empty() { call.arguments = args.into(); }
+                        }
+                        if !call.name.is_empty() {
+                            let _ = tx.send(Event::ToolCall(call)).await;
+                        }
                     }
                 }
                 "response.completed" | "response.done" | "response.incomplete" => {
@@ -162,7 +222,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), Stri
                         .as_str()
                         .unwrap_or("response failed")
                         .to_string();
-                    return Err(message);
+                    return Err((message, true));
                 }
                 _ => {}
             }

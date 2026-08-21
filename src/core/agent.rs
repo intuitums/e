@@ -1,128 +1,203 @@
-//! The agent: one session, one event stream.
+//! The agent: one session, one event stream, the tool loop.
 //!
-//! The frontend subscribes once and receives every session event — turn
-//! lifecycle, streamed deltas, usage — on a single channel, in order. Tool
-//! execution events join the same union when the loop lands. Provider-level
-//! events never leave this module; dialects feed the session stream.
-//!
-//! Terminal contract per turn: exactly one `TurnEnd`, always last, whatever
-//! happened (completion, provider error, or abort).
+//! A turn is: request → stream text/reasoning/tool-call events → if the model
+//! called tools, run them (yolo — no gate), append results, request again;
+//! repeat until a reply arrives with no tool calls. Steering messages typed
+//! mid-turn are drained between steps, before the next request. The whole turn
+//! emits on one ordered channel and ends with exactly one `TurnEnd`.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
 use crate::core::model::{slug, Model};
-use crate::core::provider::{self, ChatMessage, Event as ProviderEvent, Request};
+use crate::core::provider::{self, ChatMessage, Event as ProviderEvent, Request, ToolCall};
+use crate::core::tools;
 
 #[derive(Debug)]
 pub enum SessionEvent {
     TurnStart,
     TextDelta(String),
     ReasoningDelta(String),
+    /// A tool is about to run: display verb + target.
+    ToolStart { id: u64, verb: String, target: String },
+    /// A tool finished: its one-line summary and whether it errored.
+    ToolEnd { id: u64, summary: String, is_error: bool },
     Usage { input: u64, output: u64, cache_read: u64 },
     Error(String),
+    /// A steering message was accepted mid-turn (for display as a user block).
+    Steered(String),
     TurnEnd { aborted: bool },
 }
 
 pub struct Agent {
     pub model: Model,
-    history: Vec<ChatMessage>,
+    cwd: PathBuf,
+    history: Arc<Mutex<Vec<ChatMessage>>>,
     events: mpsc::Sender<SessionEvent>,
-    turn: Option<TurnHandle>,
-}
-
-struct TurnHandle {
-    task: tokio::task::JoinHandle<()>,
-    /// Text accumulated so far, for committing a partial turn on abort.
-    text: std::sync::Arc<std::sync::Mutex<String>>,
+    /// Steering messages queued while a turn runs.
+    steer: Arc<Mutex<Vec<String>>>,
+    cancel: Arc<AtomicBool>,
+    running: bool,
 }
 
 impl Agent {
-    /// Create the agent and the session stream the frontend consumes.
     pub fn new(model: Model) -> (Self, mpsc::Receiver<SessionEvent>) {
         let (events, rx) = mpsc::channel(256);
-        (Agent { model, history: Vec::new(), events, turn: None }, rx)
+        let agent = Agent {
+            model,
+            cwd: std::env::current_dir().unwrap_or_default(),
+            history: Arc::new(Mutex::new(Vec::new())),
+            events,
+            steer: Arc::new(Mutex::new(Vec::new())),
+            cancel: Arc::new(AtomicBool::new(false)),
+            running: false,
+        };
+        (agent, rx)
     }
 
     pub fn is_streaming(&self) -> bool {
-        self.turn.is_some()
+        self.running
     }
-
     pub fn model_slug(&self) -> String {
         slug(&self.model)
     }
-
-    pub fn clear(&mut self) {
-        self.history.clear();
-    }
-
     pub fn effort(&self) -> Option<String> {
         if self.model.efforts.is_empty() { None } else { Some("high".into()) }
     }
+    pub fn history_snapshot(&self) -> Vec<ChatMessage> {
+        self.history.lock().unwrap().clone()
+    }
+    pub fn load_history(&self, messages: Vec<ChatMessage>) {
+        *self.history.lock().unwrap() = messages;
+    }
+    pub fn clear(&self) {
+        self.history.lock().unwrap().clear();
+    }
 
-    /// Start a turn. The reply streams on the session channel; the user
-    /// message is committed to history immediately, the assistant text when
-    /// the turn ends (including partial text on abort).
-    pub fn prompt(&mut self, text: String, system: String) {
-        if self.turn.is_some() {
-            let _ = self.events.try_send(SessionEvent::Error(
-                "a turn is already streaming — esc to interrupt first".into(),
-            ));
+    /// Queue a message. If a turn is running it steers (drained next step);
+    /// otherwise it starts a turn.
+    pub fn submit(&mut self, text: String, system: String) {
+        if self.running {
+            self.steer.lock().unwrap().push(text);
             return;
         }
-        self.history.push(ChatMessage { role: "user".into(), content: text });
+        self.history.lock().unwrap().push(ChatMessage::user(text));
+        self.start(system);
+    }
 
-        let request = Request {
-            model: self.model.clone(),
-            system,
-            messages: self.history.clone(),
-            effort: self.effort(),
-        };
+    fn start(&mut self, system: String) {
+        self.running = true;
+        self.cancel.store(false, Ordering::SeqCst);
         let events = self.events.clone();
-        let text_cell = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let cell = text_cell.clone();
+        let history = self.history.clone();
+        let steer = self.steer.clone();
+        let cancel = self.cancel.clone();
+        let model = self.model.clone();
+        let cwd = self.cwd.clone();
+        let effort = self.effort();
 
-        let task = tokio::spawn(async move {
+        tokio::spawn(async move {
             let _ = events.send(SessionEvent::TurnStart).await;
-            let (mut rx, _handle) = provider::stream(request);
-            while let Some(event) = rx.recv().await {
-                match event {
-                    ProviderEvent::TextDelta(delta) => {
-                        cell.lock().unwrap().push_str(&delta);
-                        let _ = events.send(SessionEvent::TextDelta(delta)).await;
-                    }
-                    ProviderEvent::ReasoningDelta(delta) => {
-                        let _ = events.send(SessionEvent::ReasoningDelta(delta)).await;
-                    }
-                    ProviderEvent::Usage { input, output, cache_read } => {
-                        let _ = events.send(SessionEvent::Usage { input, output, cache_read }).await;
-                    }
-                    ProviderEvent::Error(message) => {
-                        let _ = events.send(SessionEvent::Error(message)).await;
-                        break;
-                    }
-                    ProviderEvent::Done => break,
+            let mut tool_seq = 0u64;
+            let aborted = 'turn: loop {
+                if cancel.load(Ordering::SeqCst) {
+                    break true;
                 }
-            }
-            let _ = events.send(SessionEvent::TurnEnd { aborted: false }).await;
+                // Drain steering (guard dropped before any await).
+                let steered: Vec<String> = { steer.lock().unwrap().drain(..).collect() };
+                for message in steered {
+                    let _ = events.send(SessionEvent::Steered(message.clone())).await;
+                    history.lock().unwrap().push(ChatMessage::user(message));
+                }
+
+                let messages = { history.lock().unwrap().clone() };
+                let request = Request {
+                    model: model.clone(),
+                    system: system.clone(),
+                    messages,
+                    effort: effort.clone(),
+                    tools: tools::schemas(),
+                };
+                let (mut rx, handle) = provider::stream(request);
+
+                let mut text = String::new();
+                let mut calls: Vec<ToolCall> = Vec::new();
+                let mut errored = false;
+                while let Some(event) = rx.recv().await {
+                    if cancel.load(Ordering::SeqCst) {
+                        handle.abort();
+                        break 'turn true;
+                    }
+                    match event {
+                        ProviderEvent::TextDelta(d) => {
+                            text.push_str(&d);
+                            let _ = events.send(SessionEvent::TextDelta(d)).await;
+                        }
+                        ProviderEvent::ReasoningDelta(d) => {
+                            let _ = events.send(SessionEvent::ReasoningDelta(d)).await;
+                        }
+                        ProviderEvent::ToolCall(call) => calls.push(call),
+                        ProviderEvent::Usage { input, output, cache_read } => {
+                            let _ = events.send(SessionEvent::Usage { input, output, cache_read }).await;
+                        }
+                        ProviderEvent::Error { message, .. } => {
+                            let _ = events.send(SessionEvent::Error(message)).await;
+                            errored = true;
+                        }
+                        ProviderEvent::Done => {}
+                    }
+                }
+                if errored {
+                    break false;
+                }
+
+                // Commit the assistant turn (text + any calls).
+                history.lock().unwrap().push(ChatMessage::assistant(text, calls.clone()));
+
+                if calls.is_empty() {
+                    break false; // a plain reply ends the turn
+                }
+
+                // Run each tool (yolo: no gate), append results, loop.
+                for call in calls {
+                    let args: serde_json::Value =
+                        serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
+                    let (verb, target) = tools::present(&call.name, &args);
+                    tool_seq += 1;
+                    let id = tool_seq;
+                    let _ = events.send(SessionEvent::ToolStart { id, verb, target }).await;
+
+                    let name = call.name.clone();
+                    let arguments = call.arguments.clone();
+                    let cwd2 = cwd.clone();
+                    let output = tokio::task::spawn_blocking(move || tools::run(&name, &arguments, &cwd2))
+                        .await
+                        .unwrap_or(tools::ToolOutput {
+                            content: "tool panicked".into(),
+                            is_error: true,
+                            summary: "error".into(),
+                        });
+                    let _ = events
+                        .send(SessionEvent::ToolEnd { id, summary: output.summary.clone(), is_error: output.is_error })
+                        .await;
+                    history.lock().unwrap().push(ChatMessage::tool_result(call.id, output.content));
+                }
+            };
+            let _ = events.send(SessionEvent::TurnEnd { aborted }).await;
         });
-        self.turn = Some(TurnHandle { task, text: text_cell });
     }
 
-    /// The frontend reports each turn's end so history commits exactly once.
+    /// Called by the frontend after each TurnEnd so a new turn may start.
     pub fn on_turn_end(&mut self) {
-        if let Some(turn) = self.turn.take() {
-            let text = turn.text.lock().unwrap().clone();
-            if !text.is_empty() {
-                self.history.push(ChatMessage { role: "assistant".into(), content: text });
-            }
-        }
+        self.running = false;
     }
 
-    /// Abort the in-flight turn; emits the terminal `TurnEnd` itself since
-    /// the task may die mid-send.
     pub fn interrupt(&mut self) {
-        if let Some(turn) = &self.turn {
-            turn.task.abort();
+        self.cancel.store(true, Ordering::SeqCst);
+        if !self.running {
             let _ = self.events.try_send(SessionEvent::TurnEnd { aborted: true });
         }
     }

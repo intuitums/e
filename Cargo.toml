@@ -28,4 +28,5 @@ uuid = { version = "1", features = ["v4", "v7"] }
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.8"
+regex = "1"
 libc = "0.2"
