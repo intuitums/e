@@ -85,7 +85,7 @@ impl App {
             "/new" | "/clear" => {
                 self.agent.clear();
                 self.transcript.clear();
-                self.transcript.push(Block::new(Kind::Banner, e::VERSION));
+                self.transcript.push(Block::new(Kind::Banner, banner_path()));
             }
             _ if trimmed.starts_with('/') => {
                 self.notice(format!("unknown command {trimmed}"));
@@ -164,6 +164,17 @@ impl App {
 
     fn notice(&mut self, text: String) {
         self.transcript.push(Block::new(Kind::Notice, text));
+    }
+}
+
+/// The banner's path: the working directory, home-relative.
+fn banner_path() -> String {
+    let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() && cwd.starts_with(&home) {
+        format!("~{}", &cwd[home.len()..])
+    } else {
+        cwd
     }
 }
 
@@ -266,7 +277,7 @@ async fn main() -> std::io::Result<()> {
         armed_at: None,
         should_quit: false,
     };
-    app.transcript.push(Block::new(Kind::Banner, e::VERSION));
+    app.transcript.push(Block::new(Kind::Banner, banner_path()));
     // A message on the command line becomes the first prompt.
     let initial: String = args.join(" ");
 

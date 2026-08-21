@@ -48,10 +48,11 @@ impl Block {
 
     fn render(&self, theme: &Theme, width: usize) -> Vec<String> {
         match self.kind {
+            // `𝑒 · <workspace path>` — the custom glyph, a dot, the path.
             Kind::Banner => vec![format!(
                 "{}{}",
                 bold(&theme.fg("userMessageText", "𝑒")),
-                theme.fg("muted", &format!(" v{} · Run /help for commands", self.text))
+                theme.fg("muted", &format!(" · {}", self.text))
             )],
             Kind::User => {
                 let rail = format!("{} ", theme.fg("userMessageText", "┃"));
