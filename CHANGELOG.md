@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The OAuth callback page declares UTF-8 (the em-dash rendered as mojibake
+  in the browser) and now wears e's look: the wordmark, the message, dim
+  detail, light/dark via prefers-color-scheme.
 - Scoped models, the reference workflow: `/models` (renamed from `/model`,
   which still works) lists every signed-in model; `/scoped-models` is a
   multi-select — Space toggles, no scope means everything, the first toggle

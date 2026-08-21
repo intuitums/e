@@ -159,7 +159,7 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
 
         let path = request_line.split_whitespace().nth(1).unwrap_or("");
         if !path.starts_with("/auth/callback") {
-            respond(&mut stream, 404, "not found");
+            respond(&mut stream, 404, "Not found", "");
             continue;
         }
         let query: std::collections::HashMap<_, _> = path
@@ -170,27 +170,61 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
             .filter_map(|pair| pair.split_once('='))
             .collect();
         if query.get("state").copied() != Some(expected_state) {
-            respond(&mut stream, 400, "state mismatch — try again");
+            respond(
+                &mut stream,
+                400,
+                "State mismatch",
+                "Try again from the terminal.",
+            );
             return Err("state mismatch".into());
         }
         let Some(code) = query.get("code") else {
             let err = query.get("error").copied().unwrap_or("no code");
-            respond(&mut stream, 400, "sign-in failed — return to the terminal");
+            respond(
+                &mut stream,
+                400,
+                "Sign-in failed",
+                "Return to the terminal.",
+            );
             return Err(format!("authorization failed: {err}"));
         };
-        respond(&mut stream, 200, "signed in — you can close this tab");
+        respond(&mut stream, 200, "Signed in", "You can close this tab.");
         return Ok(urldecode(code));
     }
     Err("listener closed".into())
 }
 
-fn respond(stream: &mut std::net::TcpStream, status: u16, message: &str) {
+/// The one e surface a browser renders: the wordmark, a title, a dim line —
+/// e's look in page form. UTF-8 is declared in the header AND a meta tag
+/// (the em-dash mojibake taught us not to let browsers guess).
+fn respond(stream: &mut std::net::TcpStream, status: u16, title: &str, detail: &str) {
     let reason = if status == 200 { "OK" } else { "Error" };
-    let body =
-        format!("<html><body style=\"font-family:sans-serif\"><p>{message}</p></body></html>");
+    let body = format!(
+        concat!(
+            "<!doctype html><html><head><meta charset=\"utf-8\">",
+            "<title>e · {title}</title><style>",
+            ":root{{--bg:#ffffff;--ink:#262626;--dim:#767676}}",
+            "@media(prefers-color-scheme:dark){{:root{{--bg:#0c0c0c;--ink:#e8e8e8;--dim:#8a8a8a}}}}",
+            "html,body{{height:100%;margin:0}}",
+            "body{{display:flex;align-items:center;justify-content:center;",
+            "background:var(--bg);color:var(--ink);",
+            "font-family:ui-monospace,SFMono-Regular,Menlo,monospace}}",
+            "main{{text-align:center}}",
+            ".mark{{font-size:64px;line-height:1}}",
+            ".title{{margin-top:24px;font-size:16px}}",
+            ".detail{{margin-top:8px;font-size:13px;color:var(--dim)}}",
+            "</style></head><body><main>",
+            "<div class=\"mark\">𝑒</div>",
+            "<div class=\"title\">{title}</div>",
+            "<div class=\"detail\">{detail}</div>",
+            "</main></body></html>"
+        ),
+        title = title,
+        detail = detail,
+    );
     let _ = write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.flush();
@@ -401,4 +435,40 @@ fn required(value: &serde_json::Value, field: &str) -> Result<String, String> {
         .filter(|s| !s.is_empty())
         .map(String::from)
         .ok_or_else(|| format!("invalid xAI OAuth response field: {field}"))
+}
+
+#[cfg(test)]
+mod tests {
+    /// The callback page must declare UTF-8 — the em-dash mojibake bug — and
+    /// carry e's wordmark.
+    #[test]
+    fn callback_page_is_utf8_and_branded() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            super::respond(&mut stream, 200, "Signed in", "You can close this tab.");
+        });
+        let mut client = std::net::TcpStream::connect(addr).unwrap();
+        use std::io::Write;
+        client.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
+        let mut response = Vec::new();
+        let _ = client.read_to_end(&mut response);
+        server.join().unwrap();
+        let text = String::from_utf8(response).expect("response is valid UTF-8");
+        assert!(text.contains("content-type: text/html; charset=utf-8"));
+        assert!(text.contains("<meta charset=\"utf-8\">"));
+        assert!(text.contains("𝑒"));
+        assert!(text.contains("Signed in"));
+        assert!(text.contains("You can close this tab."));
+        // The body length header counts bytes, not chars.
+        let body = text.split("\r\n\r\n").nth(1).unwrap();
+        let declared: usize = text
+            .lines()
+            .find(|l| l.starts_with("content-length:"))
+            .and_then(|l| l.split(':').nth(1)?.trim().parse().ok())
+            .unwrap();
+        assert_eq!(declared, body.len());
+    }
 }
