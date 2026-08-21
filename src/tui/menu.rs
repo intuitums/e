@@ -43,7 +43,8 @@ pub enum MenuKind {
     Commands,
     Files,
     Models,
-    Providers,
+    /// The /login method choice: account vs API key.
+    LoginMethod,
 }
 
 pub struct Menu {
@@ -58,7 +59,8 @@ pub struct Menu {
 }
 
 pub const HINT_USE: &str = "↑↓ Navigate     Enter Use     Esc Close";
-const MAX_VISIBLE: usize = 8;
+/// The reference keeps six selectable rows below the header.
+const MAX_VISIBLE: usize = 6;
 
 /// Subsequence fuzzy match; lower score is better, None is no match.
 pub fn fuzzy_score(query: &str, candidate: &str) -> Option<usize> {
@@ -179,6 +181,9 @@ impl Menu {
         if count == 0 {
             rows.push(theme.fg("muted", "  Nothing found."));
         }
+        // Reference treatment: selection is brightness alone — the selected
+        // row's label is bold bright ink, every other row is dim entirely;
+        // descriptions are always dim; three-space column gap.
         let label_width = self.filtered[self.window_start..window_end]
             .iter()
             .map(|&i| visible_width(&self.items[i].label))
@@ -196,16 +201,16 @@ impl Menu {
             let mut row = if selected {
                 bold(&theme.fg("userMessageText", &padded))
             } else {
-                padded
+                theme.fg("dim", &padded)
             };
             if !item.description.is_empty() {
-                row.push_str(&theme.fg("muted", &format!("  {}", item.description)));
+                row.push_str(&theme.fg("dim", &format!("   {}", item.description)));
             }
             if !item.meta.is_empty() {
                 let pad = width.saturating_sub(2 + visible_width(&row) + visible_width(&item.meta));
-                if pad > 1 {
+                if pad > 3 {
                     row.push_str(&" ".repeat(pad));
-                    row.push_str(&theme.fg("muted", &item.meta));
+                    row.push_str(&theme.fg("dim", &item.meta));
                 }
             }
             let mut line = format!("  {row}");

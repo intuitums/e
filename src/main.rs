@@ -102,12 +102,13 @@ impl App {
         self.menu = Some(Menu::new(MenuKind::Models, "Models", HINT_USE, items));
     }
 
-    fn open_provider_menu(&mut self) {
+    /// /login: the authentication-method choice, in the reference wording.
+    fn open_login_menu(&mut self) {
         let items = vec![
-            MenuItem::new("openai-codex", "Account — opens the browser (ChatGPT sign-in)", "openai-codex"),
-            MenuItem::new("opencode-go", "API key — pasted here, stored in ~/.e/auth.json", "opencode-go"),
+            MenuItem::new("Sign in with an account", "ChatGPT — opens the browser", "account"),
+            MenuItem::new("Sign in with an API key", "stored in ~/.e/auth.json", "api_key"),
         ];
-        self.menu = Some(Menu::new(MenuKind::Providers, "Sign in", HINT_USE, items));
+        self.menu = Some(Menu::new(MenuKind::LoginMethod, "Sign in", HINT_USE, items));
     }
 
     fn open_file_menu(&mut self, query: &str) {
@@ -189,14 +190,20 @@ impl App {
                     self.agent.model = found;
                 }
             }
-            MenuKind::Providers => self.login(item.value),
+            MenuKind::LoginMethod => match item.value.as_str() {
+                // One account provider today, so the provider step collapses
+                // (single options are skipped straight through, like the
+                // reference).
+                "account" => self.login("openai-codex".into()),
+                _ => self.login("opencode-go".into()),
+            },
         }
         true
     }
 
     fn dispatch_command(&mut self, command: String) {
         match command.as_str() {
-            "/login" => self.open_provider_menu(),
+            "/login" => self.open_login_menu(),
             "/model" => self.open_model_menu(),
             other => self.submit(other.to_string()),
         }
@@ -221,7 +228,7 @@ impl App {
         if let Some(rest) = trimmed.strip_prefix("/login") {
             let provider = rest.trim().to_string();
             if provider.is_empty() {
-                self.open_provider_menu();
+                self.open_login_menu();
             } else {
                 self.login(provider);
             }
@@ -266,7 +273,7 @@ impl App {
     /// paste into the composer).
     fn login(&mut self, provider: String) {
         if provider.is_empty() {
-            self.open_provider_menu();
+            self.open_login_menu();
             return;
         }
         if provider == "openai-codex" {
