@@ -2,6 +2,12 @@
 
 ## Unreleased
 
++- The catalog splits along its one real seam: `catalog/mod.rs` decides
++  which models exist (registry projection, models.json overrides,
++  resolution, scope) and `catalog/remote.rs` owns the live sync (the
++  GET /models refresh, its cache, and the window-precedence overlay).
++  External paths are unchanged.
+
 - Providers are data, the reference architecture: each built-in lives in
   `src/core/provider/providers/<name>.json` — gateway, dialect, auth
   surface (which OAuth flow, which API-key env var), display name, seed
