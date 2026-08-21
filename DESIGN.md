@@ -18,23 +18,34 @@ the design document. When the renderer was rewritten from TypeScript to
 Rust, the suite carried over and the output didn't change — that is the
 property this principle buys.
 
-## 2. A guest, not a landlord
+## 2. Own home, open formats
 
-Every coding agent builds its own silo — its own credential store, session
-format, config dialect — and treats the machine as its private territory.
-e does the opposite: it treats the agent ecosystem on a machine as **shared
-state it is a guest in**.
+e is sovereign over its own state. Everything it knows lives under one
+unified home — `~/.e/` — and it never reaches into another tool's territory
+to run:
 
-- Credentials are borrowed read-only from stores that already exist before
-  e's own is consulted. Installing e never demands a re-login.
-- Sessions are written in an established JSONL schema other tooling can
-  read, under e's own directory — interoperable, never invasive.
-- Conventions that already span harnesses on this machine — `AGENTS.md`,
-  `skills/`, prompt templates — are honored in the same shapes, so one
-  canon serves every tool.
+```
+~/.e/
+  settings.json     preferences
+  auth.json         credentials — e's own, never read from elsewhere
+  AGENTS.md         global instructions
+  sessions/         JSONL session logs
+  skills/           SKILL.md skill directories
+  prompts/          slash prompt templates
+  themes/           palette overrides
+  extensions/       reserved (see "What e is not")
+```
 
-The test for any integration: could e be deleted tomorrow leaving no trace,
-and could its files be read without it installed? Both must stay yes.
+Sovereignty is not a silo, because every format in that home is an **open
+convention, not a dialect**: instructions are `AGENTS.md` (the open spec —
+never a vendor file like CLAUDE.md), skills are `SKILL.md` directories,
+sessions are plain JSONL in an established schema, prompts are frontmatter
+markdown. Other tools can read e's home without e installed; that is the
+interop, and it points outward.
+
+Migration is **explicit, never implicit**: `e import` copies credentials or
+sessions from another tool's store once, with the user watching. e never
+silently borrows at runtime — if it isn't in `~/.e/`, e doesn't have it.
 
 ## 3. Readable in an afternoon
 
@@ -56,7 +67,8 @@ raised *explicitly, in this file* — never silently.
 
 # What e is not
 
-Not a plugin platform: there is no extension API, and the way to change e
-is to change e. Not a product surface: no telemetry, no account, no
+Not a plugin platform **yet**: `~/.e/extensions/` is reserved, but an
+extension API is a budget decision (principle 3) that has not been paid
+for — until it is, the way to change e is to change e. Not a product surface: no telemetry, no account, no
 upsell, no update channel phoning home. Not a research playground: the
 spec-first discipline means novelty lands behind tests or not at all.
