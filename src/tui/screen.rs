@@ -11,6 +11,8 @@
 
 use std::io::{self, Write};
 
+use crate::tui::markdown::visible_width;
+
 pub struct Screen {
     prev: Vec<String>,
     pub cols: u16,
@@ -44,9 +46,21 @@ impl Screen {
         let mut out = io::stdout().lock();
         write!(out, "\x1b[?2026h\x1b[?25l")?;
 
+        let cols = self.cols as usize;
+        // A line that fills the row leaves the cursor in the pending-wrap
+        // state, where erase-to-end clears the cell under it — eating the
+        // line's last character. Full rows need no erase at all.
+        let put = |out: &mut std::io::StdoutLock<'_>, line: &String| -> io::Result<()> {
+            if visible_width(line) >= cols {
+                write!(out, "{line}")
+            } else {
+                write!(out, "{line}\x1b[K")
+            }
+        };
+
         if self.prev.is_empty() {
             for (i, line) in lines.iter().enumerate() {
-                write!(out, "{line}\x1b[K")?;
+                put(&mut out, line)?;
                 if i + 1 < lines.len() {
                     write!(out, "\r\n")?;
                 }
@@ -66,7 +80,7 @@ impl Screen {
                 write!(out, "\r")?;
             }
             for (i, line) in lines.iter().enumerate().skip(start) {
-                write!(out, "{line}\x1b[K")?;
+                put(&mut out, line)?;
                 if i + 1 < lines.len() {
                     write!(out, "\r\n")?;
                 }
@@ -79,7 +93,8 @@ impl Screen {
                 }
                 write!(out, "\x1b[{extra}A")?;
                 if let Some(last) = lines.last() {
-                    write!(out, "\r{last}\x1b[K")?;
+                    write!(out, "\r")?;
+                    put(&mut out, last)?;
                 }
             }
         }
