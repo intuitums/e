@@ -198,6 +198,28 @@ pub fn scope() -> Option<Vec<String>> {
     crate::core::config::settings::get_strings("scoped_models")
 }
 
+/// Back to no scope at all: ctrl+p cycles everything again.
+pub fn clear_scope() {
+    crate::core::config::settings::remove("scoped_models");
+}
+
+/// Sort models for a picker: grouped by provider in registry order (unknown
+/// providers after, alphabetically), original order within a provider.
+pub fn provider_grouped(mut models: Vec<Model>) -> Vec<Model> {
+    let registry_pos = |provider: &str| {
+        crate::core::provider::registry::all()
+            .iter()
+            .position(|p| p.name == provider)
+            .unwrap_or(usize::MAX)
+    };
+    models.sort_by(|a, b| {
+        registry_pos(&a.provider)
+            .cmp(&registry_pos(&b.provider))
+            .then_with(|| a.provider.cmp(&b.provider))
+    });
+    models
+}
+
 pub fn set_scope(ids: &[String]) {
     crate::core::config::settings::set_strings("scoped_models", ids);
 }

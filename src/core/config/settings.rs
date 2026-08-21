@@ -42,6 +42,13 @@ pub fn set_strings(key: &str, values: &[String]) {
     });
 }
 
+/// Remove a key entirely; every other key survives, as always.
+pub fn remove(key: &str) {
+    let _ = crate::core::config::store::update(&home::settings_path(), 0o644, |obj| {
+        obj.remove(key);
+    });
+}
+
 /// A settings choice: a label, a category, and the options to cycle through.
 /// Options are owned so some (theme) can be computed from `~/.e/` at runtime —
 /// user themes are just files, not a compiled list.

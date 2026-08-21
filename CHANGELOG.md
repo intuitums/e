@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Picker order: /models groups models by provider (registry order, live
+  additions inline with their provider); /scoped-models lists the scoped
+  entries first; ctrl+x on the scoped picker resets the scope entirely.
 +- The Zen provider's id is `opencode-zen`, matching its display name and
 +  `opencode-go` — the two OpenCode gateways now read as a pair. Auth.json
 +  keys written under the old `opencode` id still sign in (read-only
