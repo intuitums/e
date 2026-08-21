@@ -595,9 +595,10 @@ impl App {
         if trimmed.is_empty() {
             return;
         }
-        self.editor.push_history(text);
 
         if let Some(secret_for) = self.pending_key.take() {
+            // A pasted API key goes to auth.json and nowhere else — in
+            // particular not into the composer's recall history below.
             self.auth = None;
             self.editor.mask = false;
             match e::core::auth::login::save_api_key(&secret_for, &trimmed) {
@@ -606,6 +607,8 @@ impl App {
             }
             return;
         }
+
+        self.editor.push_history(text);
 
         // `!cmd` runs in the shell directly; the output lands in the
         // transcript and in history, so the model sees what the user did.
