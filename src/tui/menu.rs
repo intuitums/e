@@ -47,6 +47,8 @@ pub enum MenuKind {
     Models,
     Sessions,
     Skills,
+    /// The scoped-models multi-select: Space toggles, Enter closes.
+    Scoped,
 }
 
 pub struct Menu {
@@ -61,6 +63,7 @@ pub struct Menu {
 }
 
 pub const HINT_USE: &str = "↑↓ Navigate     Enter Use     Esc Close";
+pub const HINT_SCOPED: &str = "↑↓ Navigate     Space Toggle     Enter Done";
 /// The reference keeps six selectable rows below the header.
 const MAX_VISIBLE: usize = 6;
 
@@ -142,6 +145,17 @@ impl Menu {
 
     pub fn is_empty(&self) -> bool {
         self.filtered.is_empty()
+    }
+
+    pub fn for_each_item(&mut self, mut f: impl FnMut(&mut MenuItem)) {
+        for item in &mut self.items {
+            f(item);
+        }
+    }
+
+    pub fn current_mut(&mut self) -> Option<&mut MenuItem> {
+        let idx = *self.filtered.get(self.selected)?;
+        self.items.get_mut(idx)
     }
 
     pub fn current(&self) -> Option<&MenuItem> {

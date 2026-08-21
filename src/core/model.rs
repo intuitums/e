@@ -241,6 +241,28 @@ fn resolve_in(models: &[Model], query: &str) -> Option<Model> {
     None
 }
 
+/// The scoped-model ids ("provider/id"), or None when no scope is set.
+pub fn scope() -> Option<Vec<String>> {
+    crate::core::settings::get_strings("scoped_models")
+}
+
+pub fn set_scope(ids: &[String]) {
+    crate::core::settings::set_strings("scoped_models", ids);
+}
+
+/// The models ctrl+p cycles: the scope filtered to what is signed in, or —
+/// with no scope — everything available (the reference behavior).
+pub fn cycle_pool() -> Vec<Model> {
+    let available = available();
+    match scope() {
+        Some(ids) if !ids.is_empty() => available
+            .into_iter()
+            .filter(|m| ids.iter().any(|id| *id == slug(m)))
+            .collect(),
+        _ => available,
+    }
+}
+
 /// Human name for a provider, for panels: capitalized, no dashes.
 pub fn display_name(provider: &str) -> &str {
     match provider {

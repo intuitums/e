@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Scoped models, the reference workflow: `/models` (renamed from `/model`,
+  which still works) lists every signed-in model; `/scoped-models` is a
+  multi-select — Space toggles, no scope means everything, the first toggle
+  narrows to just that model — persisted as `scoped_models` in settings.
+  ctrl+p / ctrl+shift+p cycles through the scope (or all available models),
+  wrapping, skipping signed-out entries, persisting each switch; the
+  statusline is the feedback.
 - The model picker shows only models from signed-in providers; `/model`
   resolution works on the same set, so a pick is always usable. The default
   model follows availability instead of sticking (a configured model whose

@@ -20,6 +20,28 @@ pub fn set_string(key: &str, val: &str) {
     });
 }
 
+/// A string-list key: absent means "no value set" (for scoped models, that
+/// reads as "no scope — everything available is in play").
+pub fn get_strings(key: &str) -> Option<Vec<String>> {
+    crate::core::store::read_object(&home::settings_path())
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+}
+
+pub fn set_strings(key: &str, values: &[String]) {
+    let _ = crate::core::store::update(&home::settings_path(), 0o644, |obj| {
+        obj.insert(
+            key.to_string(),
+            Value::Array(values.iter().map(|v| Value::String(v.clone())).collect()),
+        );
+    });
+}
+
 /// A settings choice: a label, a category, and the options to cycle through.
 /// Options are owned so some (theme) can be computed from `~/.e/` at runtime —
 /// user themes are just files, not a compiled list.

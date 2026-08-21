@@ -149,3 +149,36 @@ fn only_signed_in_providers_are_available() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn cycle_pool_follows_the_scope() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("e-scope-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+    std::fs::write(
+        dir.join("auth.json"),
+        r#"{"anthropic":{"key":"k"},"xai":{"key":"k"}}"#,
+    )
+    .unwrap();
+
+    // No scope: the pool is everything available.
+    assert_eq!(
+        e::core::model::cycle_pool().len(),
+        e::core::model::available().len()
+    );
+
+    // A scope narrows the pool — and unavailable entries are ignored.
+    e::core::model::set_scope(&[
+        "anthropic/claude-fable-5".into(),
+        "xai/grok-4.6".into(),
+        "openai/gpt-5.5".into(), // openai is not signed in
+    ]);
+    let pool: Vec<String> = e::core::model::cycle_pool()
+        .iter()
+        .map(e::core::model::slug)
+        .collect();
+    assert_eq!(pool, vec!["xai/grok-4.6", "anthropic/claude-fable-5"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -18,7 +18,7 @@ use e::core::model::{self, Model};
 use e::core::output::{format_duration, format_tokens};
 use e::tui::authpanel::{self, AuthStage};
 use e::tui::composer::{Editor, EditorResult, Key};
-use e::tui::menu::{Menu, MenuItem, MenuKind, HINT_USE};
+use e::tui::menu::{Menu, MenuItem, MenuKind, HINT_SCOPED, HINT_USE};
 use e::tui::screen::Screen;
 use e::tui::statusline::{statusline, StatusData, Turn};
 use e::tui::theme::Theme;
@@ -158,7 +158,12 @@ impl App {
                 "sign in to a provider — account or API key",
                 "/login",
             ),
-            MenuItem::new("/model", "switch the model", "/model"),
+            MenuItem::new("/models", "switch the model", "/models"),
+            MenuItem::new(
+                "/scoped-models",
+                "choose which models ctrl+p cycles",
+                "/scoped-models",
+            ),
             MenuItem::new("/resume", "resume a saved session", "/resume"),
             MenuItem::new("/new", "start a fresh session", "/new"),
             MenuItem::new("/copy", "copy the last reply", "/copy"),
@@ -187,6 +192,104 @@ impl App {
             items.push(MenuItem::new(&slash, &description, &slash));
         }
         items
+    }
+
+    /// The scoped-models multi-select: every available model, Space toggling
+    /// membership. The reference semantics: no scope stored = everything in
+    /// scope; the first toggle narrows the scope to just that model.
+    fn open_scoped_menu(&mut self) {
+        let available = model::available();
+        if available.is_empty() {
+            self.notice("no models available — use /login to sign in to a provider".into());
+            return;
+        }
+        let scope = model::scope();
+        let items: Vec<MenuItem> = available
+            .iter()
+            .map(|m| {
+                let slug = model::slug(m);
+                let mut item = MenuItem::new(&m.id, &m.provider, &slug);
+                let in_scope = match &scope {
+                    Some(ids) => ids.contains(&slug),
+                    None => true,
+                };
+                if in_scope {
+                    item.meta = "in scope".into();
+                }
+                item
+            })
+            .collect();
+        self.menu = Some(Menu::new(
+            MenuKind::Scoped,
+            "Scoped models",
+            HINT_SCOPED,
+            items,
+        ));
+    }
+
+    /// Space on the scoped picker: reference toggle semantics — no scope yet
+    /// means the first toggle starts a scope of exactly that model.
+    fn toggle_scoped(&mut self) {
+        let Some(menu) = &mut self.menu else { return };
+        let Some(slug) = menu.current().map(|i| i.value.clone()) else {
+            return;
+        };
+        match model::scope() {
+            None => {
+                model::set_scope(std::slice::from_ref(&slug));
+                menu.for_each_item(|item| {
+                    item.meta = if item.value == slug {
+                        "in scope".into()
+                    } else {
+                        String::new()
+                    };
+                });
+            }
+            Some(mut ids) => {
+                let meta = if let Some(pos) = ids.iter().position(|id| *id == slug) {
+                    ids.remove(pos);
+                    ""
+                } else {
+                    ids.push(slug.clone());
+                    "in scope"
+                };
+                if let Some(item) = menu.current_mut() {
+                    item.meta = meta.into();
+                }
+                model::set_scope(&ids);
+            }
+        }
+    }
+
+    /// ctrl+p / ctrl+shift+p: cycle through the scope (or all available
+    /// models when no scope is set), persisting the switch. The statusline is
+    /// the feedback — it shows the new model immediately.
+    fn cycle_model(&mut self, forward: bool) {
+        let pool = model::cycle_pool();
+        if pool.len() <= 1 {
+            let scoped = model::scope().map(|s| !s.is_empty()).unwrap_or(false);
+            self.notice(
+                if scoped {
+                    "only one model in scope"
+                } else {
+                    "only one model available"
+                }
+                .into(),
+            );
+            return;
+        }
+        let current = self.agent.model_slug();
+        let idx = pool
+            .iter()
+            .position(|m| model::slug(m) == current)
+            .unwrap_or(0);
+        let next = if forward {
+            (idx + 1) % pool.len()
+        } else {
+            (idx + pool.len() - 1) % pool.len()
+        };
+        persist_model(&pool[next]);
+        self.agent.model = pool[next].clone();
     }
 
     fn open_resume_menu(&mut self) {
@@ -436,6 +539,7 @@ impl App {
             MenuKind::Sessions => {
                 self.resume_path(std::path::PathBuf::from(item.value));
             }
+            MenuKind::Scoped => {}
             MenuKind::Skills => {
                 // Replace the $token, then send the skill body as context.
                 let text = self.editor.text();
@@ -467,7 +571,8 @@ impl App {
     fn dispatch_command(&mut self, command: String) {
         match command.as_str() {
             "/login" => self.open_login_menu(),
-            "/model" => self.open_model_menu(),
+            "/models" | "/model" => self.open_model_menu(),
+            "/scoped-models" => self.open_scoped_menu(),
             "/settings" => self.open_settings(),
             "/resume" => self.open_resume_menu(),
             "/copy" => self.copy_last(),
@@ -511,7 +616,14 @@ impl App {
             return;
         }
 
-        if let Some(rest) = trimmed.strip_prefix("/model") {
+        if trimmed == "/scoped-models" {
+            self.open_scoped_menu();
+            return;
+        }
+        let model_rest = trimmed
+            .strip_prefix("/models")
+            .or_else(|| trimmed.strip_prefix("/model"));
+        if let Some(rest) = model_rest {
             let query = rest.trim();
             if query.is_empty() {
                 self.open_model_menu();
@@ -530,7 +642,7 @@ impl App {
             "/quit" | "/exit" => self.should_quit = true,
             "/version" => self.notice(format!("e {}", e::VERSION)),
             "/help" => self.notice(
-                "commands:\n  /login [provider]   sign in (API key or account)\n  /model [name]       list or switch models\n  /new                fresh session\n  /compact            summarize into a fresh session\n  /trust              trust this directory\n  !<cmd>              run a shell command; the model sees the output\n  /version            show the version\n  /quit               exit"
+                "commands:\n  /login [provider]   sign in (API key or account)\n  /models [name]      list or switch models\n  /scoped-models      choose which models ctrl+p cycles\n  /new                fresh session\n  /compact            summarize into a fresh session\n  /trust              trust this directory\n  !<cmd>              run a shell command; the model sees the output\n  /version            show the version\n  /quit               exit"
                     .into(),
             ),
             "/new" | "/clear" => {
@@ -1130,6 +1242,15 @@ async fn main() -> std::io::Result<()> {
                                 }
                                 _ => {}
                             }
+                        } else if app
+                            .menu
+                            .as_ref()
+                            .map(|m| m.kind == MenuKind::Scoped)
+                            .unwrap_or(false)
+                            && k.code == KeyCode::Char(' ')
+                            && !ctrl
+                        {
+                            app.toggle_scoped();
                         } else if app.menu.is_some()
                             && matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc)
                             && !ctrl
@@ -1160,6 +1281,10 @@ async fn main() -> std::io::Result<()> {
                             } else {
                                 arm(&mut app);
                             }
+                        } else if ctrl && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+                            let backward = k.code == KeyCode::Char('P')
+                                || k.modifiers.contains(KeyModifiers::SHIFT);
+                            app.cycle_model(!backward);
                         } else if ctrl && k.code == KeyCode::Char('d') && app.editor.is_empty() {
                             break;
                         } else if let Some(key) = key_of(&k) {
