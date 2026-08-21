@@ -1,32 +1,16 @@
-//! The settings panel — fx's settings-screen shape.
+//! The settings panel — fx's settings-screen shape, over `settings::all()`.
 //!
-//! `Header`, then dim category labels, then one row per setting: the label at
-//! the left, its options at a value column with the current one bright and the
-//! rest dim. `←→` change the selected row's value; `↑↓` move; `Esc` closes —
-//! fx's `↑↓ Navigate  ←→ Change  Esc Close`, no Enter.
+//! Rows and their options come from `~/.e/`-aware settings, so a user-editable
+//! set (theme) shows every file they've dropped in. `←→` change the selected
+//! row's value; `↑↓` move; framing and the hint come from the shared panel.
 
-use crate::core::settings::Choice;
+use crate::core::settings::{self, Setting};
 use crate::render_width::visible_width;
 use crate::tui::render::bold;
 use crate::tui::theme::Theme;
 
-/// A setting row and the category it falls under.
-pub struct Row {
-    pub category: &'static str,
-    pub choice: &'static Choice,
-}
-
-/// e's settings, in category order.
-pub fn rows() -> Vec<Row> {
-    use crate::core::settings::{EFFORT, THEME};
-    vec![
-        Row { category: "Interface", choice: &THEME },
-        Row { category: "Agent", choice: &EFFORT },
-    ]
-}
-
 pub struct SettingsPanel {
-    rows: Vec<Row>,
+    settings: Vec<Setting>,
     pub selected: usize,
 }
 
@@ -35,21 +19,22 @@ pub const HINT: &str = "↑↓ Navigate     ←→ Change     Esc Close";
 
 impl SettingsPanel {
     pub fn new() -> Self {
-        SettingsPanel { rows: rows(), selected: 0 }
+        SettingsPanel { settings: settings::all(), selected: 0 }
     }
 
     pub fn step(&mut self, delta: isize) {
-        let n = self.rows.len() as isize;
+        let n = self.settings.len() as isize;
         if n == 0 {
             return;
         }
         self.selected = (self.selected as isize + delta).rem_euclid(n) as usize;
     }
 
-    /// Change the selected setting's value; persisted immediately.
+    /// Change the selected setting's value; persisted immediately. Reloads the
+    /// option sets so a value that adds choices (never today) stays coherent.
     pub fn change(&mut self, dir: i32) {
-        if let Some(row) = self.rows.get(self.selected) {
-            row.choice.cycle(dir);
+        if let Some(setting) = self.settings.get(self.selected) {
+            setting.cycle(dir);
         }
     }
 
@@ -57,26 +42,25 @@ impl SettingsPanel {
         let header = bold(&theme.fg("userMessageText", "Settings"));
         let mut body: Vec<String> = Vec::new();
         let mut last_category = "";
-        for (i, row) in self.rows.iter().enumerate() {
-            if row.category != last_category {
+        for (i, setting) in self.settings.iter().enumerate() {
+            if setting.category != last_category {
                 if !body.is_empty() {
                     body.push(String::new());
                 }
-                body.push(theme.fg("dim", row.category));
-                last_category = row.category;
+                body.push(theme.fg("dim", setting.category));
+                last_category = setting.category;
             }
             let selected = i == self.selected;
             let label = if selected {
-                bold(&theme.fg("userMessageText", row.choice.label))
+                bold(&theme.fg("userMessageText", &setting.label))
             } else {
-                theme.fg("dim", row.choice.label)
+                theme.fg("dim", &setting.label)
             };
             let mut line = format!("  {label}");
             let pad = VALUE_COL.saturating_sub(visible_width(&line));
             line.push_str(&" ".repeat(pad));
-            let current = row.choice.current();
-            let opts: Vec<String> = row
-                .choice
+            let current = setting.current();
+            let opts: Vec<String> = setting
                 .options
                 .iter()
                 .map(|option| {

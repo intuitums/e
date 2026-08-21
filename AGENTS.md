@@ -53,6 +53,13 @@ it through `panel.rs` so it can't diverge.
 - The harness is budgeted (DESIGN.md §3). Prefer a spawned process over a daemon,
   a gate over a pipeline. A feature that can't pay for itself stays out.
 - `~/.e/` is the only home e reads. Never reach into another tool's directory.
+- **Don't hardcode what a user might change.** Looks, wordings, and behaviours a
+  person could sensibly prefer are read from `~/.e/` with a built-in default —
+  themes from `~/.e/themes/`, and skills, prompts, instructions, the system
+  prompt the same way. When you add something user-facing, make it a file-backed
+  override, not a constant. (This is DESIGN.md §2; it is the extensibility that
+  matters. A code-plugin API is separate and still budgeted — don't add one
+  without a decision.)
 - Verify UI changes with a real frame, not by reasoning about bytes. `scripts/`
   has a pty capture-and-replay harness; that is how the look gets checked.
 - Keep the commit trailer: `Co-authored-by: Claude <noreply@anthropic.com>`.

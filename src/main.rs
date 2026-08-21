@@ -20,7 +20,7 @@ use e::tui::composer::{Editor, EditorResult, Key};
 use e::tui::statusline::{statusline, StatusData, Turn};
 use e::tui::authpanel::{self, AuthStage};
 use e::tui::menu::{Menu, MenuItem, MenuKind, HINT_USE};
-use e::tui::theme::{load_bundled, Theme};
+use e::tui::theme::Theme;
 use e::tui::transcript::{Block, Kind, Transcript};
 use e::tui::screen::Screen;
 
@@ -596,17 +596,11 @@ impl App {
         }
     }
 
-    /// Resolve the theme from settings (auto detects the terminal) and reload.
+    /// Reload the theme from settings (auto detects the terminal).
     fn apply_theme(&mut self) {
-        let light = match e::core::settings::THEME.current().as_str() {
-            "light" => true,
-            "dark" => false,
-            _ => e::tui::background::detect_light().unwrap_or(false),
-        };
-        if let Ok(theme) = load_bundled(light) {
-            self.theme = theme;
-            self.transcript.invalidate();
-        }
+        let detected = e::tui::background::detect_light().unwrap_or(false);
+        self.theme = e::tui::theme::resolve(&e::core::settings::theme(), detected);
+        self.transcript.invalidate();
     }
 
     fn notice(&mut self, text: String) {
@@ -697,12 +691,8 @@ async fn main() -> std::io::Result<()> {
     terminal::enable_raw_mode()?;
     let _guard = RawGuard;
     execute!(std::io::stdout(), EnableBracketedPaste)?;
-    let light = match e::core::settings::THEME.current().as_str() {
-        "light" => true,
-        "dark" => false,
-        _ => e::tui::background::detect_light().unwrap_or(false),
-    };
-    let theme = load_bundled(light).map_err(std::io::Error::other)?;
+    let detected = e::tui::background::detect_light().unwrap_or(false);
+    let theme = e::tui::theme::resolve(&e::core::settings::theme(), detected);
 
     let (cols, rows) = terminal::size()?;
     let mut screen = Screen::new(cols, rows);

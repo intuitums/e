@@ -18,9 +18,9 @@ the design document. When the renderer was rewritten from TypeScript to
 Rust, the suite carried over and the output didn't change — that is the
 property this principle buys.
 
-## 2. Own home, open formats
+## 2. Own home, open formats — and everything in it is yours
 
-e is sovereign over its own state. Everything it knows lives under one
+e is sovereign over its own state, and extensible through it. Everything it knows lives under one
 unified home — `~/.e/` — and it never reaches into another tool's territory
 to run:
 
@@ -46,6 +46,17 @@ interop, and it points outward.
 Migration is **explicit, never implicit**: `e import` copies credentials or
 sessions from another tool's store once, with the user watching. e never
 silently borrows at runtime — if it isn't in `~/.e/`, e doesn't have it.
+
+And the home is the **extension surface**. Everything a user might reasonably
+want to change is data they drop in `~/.e/`, with the built-in as the
+fallback — never something hardcoded they'd have to edit Rust to touch.
+Themes are files in `~/.e/themes/`; skills, prompts, instructions, and the
+system prompt are all overridable the same way. This is the extensibility that
+matters — a person shapes e by owning its data, not by writing a plugin. (Code
+extensions remain a separate budget decision; see "What e is not".) The rule
+for building: if it's a look, a wording, or a behaviour a user could sensibly
+prefer, read it from `~/.e/` with a sane default, don't nail it into the
+binary.
 
 ## 3. Readable in an afternoon
 
