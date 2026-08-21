@@ -5,5 +5,7 @@ pub mod app {
 }
 pub mod render {
     pub mod ansi;
+    pub mod highlight;
+    pub mod markdown;
     pub mod theme;
 }

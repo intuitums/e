@@ -88,3 +88,54 @@ fn the_palette_carries_the_reference_values() {
         assert_eq!(dark.vars.get(*name), Some(d), "dark var {name}");
     }
 }
+
+use e_tui::render::markdown::{code_panel, render_markdown};
+
+fn dark() -> Theme {
+    read_theme("dark").0
+}
+
+#[test]
+fn code_panel_geometry_matches_the_reference() {
+    let t = dark();
+    assert_eq!(
+        code_panel(&t, "x", "zig", 80),
+        vec!["┌ \x1b[2mzig\x1b[22m ─┐", "│ x    │", "└──────┘"]
+    );
+    assert_eq!(code_panel(&t, "x", "", 80), vec!["┌────┐", "│ x  │", "└────┘"]);
+    // Label truncated to panel_width - 5 when the terminal is narrow.
+    assert_eq!(
+        code_panel(&t, "x", "typescript", 8),
+        vec!["┌ \x1b[2mtyp\x1b[22m ─┐", "│ x    │", "└──────┘"]
+    );
+}
+
+#[test]
+fn lists_match_the_reference_glyphs_and_indent() {
+    let t = dark();
+    let out = render_markdown(&t, "- one\n  - nested\n\n1. numbered\n", 40).join("\n");
+    assert!(out.contains("\x1b[2m•\x1b[22m one"), "bullet: {out:?}");
+    assert!(out.contains("  \x1b[2m•\x1b[22m nested"), "nested: {out:?}");
+    assert!(out.contains("1. numbered"), "ordered: {out:?}");
+}
+
+#[test]
+fn rules_and_blockquotes_match_byte_for_byte() {
+    let t = dark();
+    let hr = render_markdown(&t, "---\n", 92).join("\n");
+    assert!(hr.contains(&format!("\x1b[2m{}\x1b[22m", "─".repeat(60))));
+    let quote = render_markdown(&t, "> quoted\n", 92).join("\n");
+    assert!(quote.contains("\x1b[2m│ \x1b[22mquoted"), "{quote:?}");
+}
+
+#[test]
+fn inline_spans_match_the_reference() {
+    let t = dark();
+    let out = render_markdown(&t, "One **bold** with `code` and a [link](https://x.dev).\n", 80).join("\n");
+    assert!(out.contains("\x1b[1mbold\x1b[22m"));
+    // Inline code: the palette's dedicated inline-code gray (dim var = 245 dark).
+    assert!(out.contains("\x1b[38;5;245mcode\x1b[39m"), "{out:?}");
+    // Links: underline only, OSC 8 wrapped, no printed URL.
+    assert!(out.contains("\x1b]8;;https://x.dev\x1b\\\x1b[4mlink\x1b[24m\x1b]8;;\x1b\\"), "{out:?}");
+    assert!(!out.contains("(https://x.dev)"));
+}

@@ -9,6 +9,7 @@ e-core = { path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
 unicode-width.workspace = true
+pulldown-cmark = { version = "0.12", default-features = false }
 
 [[bin]]
 name = "e"
