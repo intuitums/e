@@ -1,0 +1,83 @@
+name: Release
+
+# A version tag builds the four release binaries and publishes them with
+# checksums. install.sh and the Homebrew tap both consume these artifacts.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  create:
+    name: Draft release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --draft --title "e $TAG" \
+              --notes "See [CHANGELOG.md](https://github.com/fschrhunt/e/blob/main/CHANGELOG.md)."
+
+  build:
+    name: Build (${{ matrix.runner }})
+    needs: create
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            targets: "aarch64-apple-darwin x86_64-apple-darwin"
+          - runner: ubuntu-latest
+            targets: "x86_64-unknown-linux-gnu"
+          - runner: ubuntu-24.04-arm
+            targets: "aarch64-unknown-linux-gnu"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build and upload each target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          rustup update --no-self-update stable
+          for target in ${{ matrix.targets }}; do
+            rustup target add "$target"
+            cargo build --release --target "$target"
+            tar czf "e-$target.tar.gz" -C "target/$target/release" e
+            gh release upload "$TAG" "e-$target.tar.gz" --clobber
+          done
+
+  publish:
+    name: Checksums and publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checksum every artifact, undraft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir assets && cd assets
+          gh release download "$TAG" --pattern "e-*.tar.gz"
+          sha256sum e-*.tar.gz > checksums.txt
+          gh release upload "$TAG" checksums.txt --clobber
+          gh release edit "$TAG" --draft=false
