@@ -99,6 +99,13 @@ pub fn all() -> Vec<Setting> {
             default: "auto".into(),
         },
         Setting {
+            key: "auto_update".into(),
+            label: "Auto-update".into(),
+            category: "Updates",
+            options: vec!["on".into(), "off".into()],
+            default: "on".into(),
+        },
+        Setting {
             key: "effort".into(),
             label: "Reasoning effort".into(),
             category: "Agent",
@@ -116,4 +123,9 @@ pub fn effort() -> String {
 
 pub fn theme() -> String {
     get_string("theme").unwrap_or_else(|| "auto".into())
+}
+
+/// Whether the launch-time background update runs.
+pub fn auto_update() -> bool {
+    get_string("auto_update").as_deref() != Some("off")
 }

@@ -13,6 +13,7 @@ pub mod provider;
 pub mod resources;
 pub mod session;
 pub mod tools;
+pub mod update;
 
 pub mod output;
 pub mod workspace;
