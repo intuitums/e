@@ -1,0 +1,17 @@
+name: Feature
+description: Something e should do
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The need, not the implementation. Check ROADMAP.md first — some things are deliberately out (DESIGN.md, "What e is not").
+    validations:
+      required: true
+  - type: textarea
+    id: sketch
+    attributes:
+      label: How might it work?
+    validations:
+      required: false

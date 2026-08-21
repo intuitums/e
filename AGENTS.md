@@ -8,6 +8,8 @@ it is the why; this is the how.
 ```sh
 cargo build          # dev
 cargo test           # the whole contract — run this before you call anything done
+cargo fmt --check && cargo clippy --all-targets -- -D warnings
+./scripts/guard.sh   # the security-surface audit — CI runs all of these
 ```
 
 `cargo test` is not optional. The visual design is pinned byte-for-byte in
@@ -64,4 +66,8 @@ it through `panel.rs` so it can't diverge.
   symmetry, and keep hooks fail-open. (This is DESIGN.md §2.)
 - Verify UI changes with a real frame, not by reasoning about bytes. `scripts/`
   has a pty capture-and-replay harness; that is how the look gets checked.
+- `scripts/guard.sh` pins the trust boundary: allowed network hosts, the
+  sovereign home, store-only config writes, where `unsafe` lives, SHA-pinned
+  CI actions. If a change legitimately moves a boundary, update the guard in
+  the same commit — never work around it.
 - Keep the commit trailer: `Co-authored-by: Claude <noreply@anthropic.com>`.

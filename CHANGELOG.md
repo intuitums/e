@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Open-source hardening: CI (fmt, clippy, tests on Linux + macOS),
+  `scripts/guard.sh` — a security-surface audit pinning the allowed network
+  hosts, the sovereign `~/.e/` home, store-only credential writes, the one
+  `unsafe` file, and SHA-pinned workflow actions. CONTRIBUTING.md,
+  SECURITY.md, CODEOWNERS, issue/PR templates, dependabot, weekly
+  `cargo audit`, and branch protection on `main`.
+- The codebase is now rustfmt-formatted and clippy-clean; both are CI gates.
+
 ## 0.3.0 — 2026-08-21
 
 - **Extension API** (`src/core/api/`): executables in `~/.e/extensions/`

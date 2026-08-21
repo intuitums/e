@@ -1,0 +1,17 @@
+# Every change needs the maintainer's eyes; these paths are called out because
+# they are the trust boundary — credentials, the extension host, the network
+# surface, and CI itself. Branch protection requires code-owner review, so a
+# PR touching them cannot merge on green checks alone.
+
+*                     @fschrhunt
+
+/src/core/api/        @fschrhunt
+/src/core/auth.rs     @fschrhunt
+/src/core/login.rs    @fschrhunt
+/src/core/store.rs    @fschrhunt
+/src/core/home.rs     @fschrhunt
+/src/core/provider.rs @fschrhunt
+/src/core/completions.rs @fschrhunt
+/src/core/responses.rs @fschrhunt
+/.github/             @fschrhunt
+/scripts/guard.sh     @fschrhunt
