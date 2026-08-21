@@ -1117,6 +1117,19 @@ async fn main() -> std::io::Result<()> {
         println!("e {}", e::VERSION);
         return Ok(());
     }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "e — a coding agent for your terminal\n\n\
+usage:\n  e [message]           start a session (optionally with a first prompt)\n  \
+e -c, --continue      continue this directory's most recent session\n  \
+e -r, --resume        pick a session to resume\n  \
+e ask \"prompt\"        one agent turn, no TUI; plain text when piped\n  \
+e docs [topic]        print a built-in format guide\n  \
+e auth                show sign-in status\n  \
+e -v, --version"
+        );
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("auth") {
         e::core::auth::login::auth_status();
         return Ok(());
@@ -1200,13 +1213,17 @@ async fn main() -> std::io::Result<()> {
     }
     // -c continues this workspace's most recent session.
     let continue_flag = args.iter().any(|a| a == "-c" || a == "--continue");
+    let resume_flag = args.iter().any(|a| a == "-r" || a == "--resume");
     let message_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     let initial: String = message_args
         .iter()
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join(" ");
-    if continue_flag {
+    if resume_flag {
+        // The reference behavior: launch straight into the session picker.
+        app.open_resume_menu();
+    } else if continue_flag {
         app.resume_recent();
     }
 
