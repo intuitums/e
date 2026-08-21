@@ -1157,6 +1157,19 @@ e -v, --version"
         return Ok(());
     }
 
+    // A panic mid-frame must not strand the shell in raw mode with a hidden
+    // cursor — restore the terminal first, then report as usual.
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = terminal::disable_raw_mode();
+            print!("\x1b[?2004l\x1b[?25h\r\n");
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+            default_hook(info);
+        }));
+    }
+
     // Raw mode first: background detection needs the reply un-line-buffered.
     terminal::enable_raw_mode()?;
     let _guard = RawGuard;
@@ -1235,6 +1248,10 @@ e -v, --version"
     }
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
+    // SIGTERM/SIGHUP (a kill, a closed tab) exit through the same cleanup as
+    // /quit — the terminal is restored, the extension host shut down.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
 
     if !initial.trim().is_empty() {
         app.submit(initial);
@@ -1475,6 +1492,8 @@ e -v, --version"
                     app.notice(message);
                 }
             }
+            _ = sigterm.recv() => break,
+            _ = sighup.recv() => break,
             _ = tick.tick() => {
                 if let Some(at) = app.armed_at {
                     if at.elapsed() > Duration::from_millis(1600) {

@@ -12,7 +12,10 @@
   Audit follow-up: Responses-dialect reasoning items are now captured and
   replayed verbatim ahead of the calls they produced — without this, the
   second step of every codex/OpenAI tool turn 400s; other dialects and
-  compaction skip them.
+  compaction skip them. SIGTERM/SIGHUP now exit through the normal cleanup
+  (terminal restored, extension host shut down) and a panic hook restores
+  the terminal before reporting — a killed e no longer strands the shell
+  in raw mode with a hidden cursor.
 - `e -r` / `--resume` launches straight into the session picker (the
   reference behavior); `e -c` continues the directory's latest session as
   before. `e --help` documents the CLI surface.
