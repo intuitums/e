@@ -30,7 +30,8 @@ src/core/    the harness, terminal-free
   auth/           credentials (mod.rs) · login.rs (OAuth, device-code, API keys)
   config/         the ~/.e surface: home.rs (paths) · store.rs (merge-write)
                   · settings.rs · trust.rs (per-directory trust)
-  resources/      skills.rs · prompts.rs (/name templates)
+  resources/      skills.rs · prompts.rs (/name templates) · docs.rs (the
+                  embedded guides behind `e docs`)
   api/            the extension host: subprocesses over a JSONL line
                   protocol (docs/extensions.md) — tools, commands, hooks
   tools/          read · write · edit · ls · grep · bash · skill

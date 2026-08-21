@@ -27,6 +27,9 @@ fn default_prompt_has_pi_structure() {
         assert!(prompt.contains("- read:") && prompt.contains("- bash:"));
         assert!(prompt.contains("Guidelines:"));
         assert!(prompt.contains("- Be concise in your responses"));
+        // The self-docs section: the agent learns e's own formats via `e docs`.
+        assert!(prompt.contains("e documentation (read only when the user asks about e itself"));
+        assert!(prompt.contains("`e docs <topic>`"));
         assert!(prompt
             .trim_end()
             .ends_with("Current working directory: /tmp/proj"));

@@ -24,6 +24,10 @@ e is sovereign over its own state, and extensible through it. Everything it know
 unified home — `~/.e/` — and it never reaches into another tool's territory
 to run:
 
+Nothing is seeded: every entry below appears the first time something is
+written into it, so a bare home stays bare and everything in `~/.e` is
+something the user caused. `e docs` prints the format guide for each.
+
 ```
 ~/.e/
   settings.json     preferences

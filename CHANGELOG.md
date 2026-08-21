@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The home is now created lazily (the reference behavior): no seeded
+  skeleton — directories appear the first time something is written, so a
+  fresh boot-and-quit leaves no `~/.e` at all.
+- `e docs [topic]`: the format guides ship inside the binary — extensions,
+  themes, models, prompt-templates, skills, plus both built-in themes
+  verbatim as starting points. The system prompt points the agent at them
+  (gated: only when asked about e itself), so "write me an extension" gets
+  the protocol right on the first try.
 - Core restructured into domain folders (the reference tree's names):
   `agent/`, `provider/` (with the catalog), `auth/`, `config/`,
   `resources/` — pure moves, no behavior change.

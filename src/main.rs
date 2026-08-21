@@ -1124,6 +1124,25 @@ async fn main() -> std::io::Result<()> {
     if args.first().map(String::as_str) == Some("ask") {
         return ask(args[1..].join(" ")).await;
     }
+    if args.first().map(String::as_str) == Some("docs") {
+        use e::core::resources::docs;
+        match args.get(1).map(String::as_str) {
+            Some(topic) => match docs::body(topic) {
+                Some(text) => println!("{text}"),
+                None => {
+                    eprintln!("no such topic: {topic} — run `e docs` for the list");
+                    std::process::exit(2);
+                }
+            },
+            None => {
+                println!("built-in guides — `e docs <topic>`:\n");
+                for (name, blurb) in docs::TOPICS {
+                    println!("  {name:<18} {blurb}");
+                }
+            }
+        }
+        return Ok(());
+    }
 
     // Raw mode first: background detection needs the reply un-line-buffered.
     terminal::enable_raw_mode()?;

@@ -40,17 +40,10 @@ pub fn themes_dir() -> PathBuf {
     home().join("themes")
 }
 
-/// Create the home skeleton if absent. Idempotent; never touches contents.
+/// Make sure the home directory itself exists before a write lands in it.
+/// Nothing else is seeded — the reference behavior: subdirectories appear
+/// when something is first written into them, so a bare home stays bare and
+/// every entry in `~/.e` is something the user (or a session) caused.
 pub fn ensure() -> std::io::Result<()> {
-    for dir in [
-        home(),
-        sessions_dir(),
-        skills_dir(),
-        prompts_dir(),
-        themes_dir(),
-        extensions_dir(),
-    ] {
-        std::fs::create_dir_all(dir)?;
-    }
-    Ok(())
+    std::fs::create_dir_all(home())
 }

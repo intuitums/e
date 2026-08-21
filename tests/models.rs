@@ -200,3 +200,15 @@ fn cycle_pool_follows_the_scope() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn every_docs_topic_has_a_body() {
+    for (name, _) in e::core::resources::docs::TOPICS {
+        let body = e::core::resources::docs::body(name).unwrap();
+        assert!(!body.trim().is_empty(), "empty doc: {name}");
+    }
+    assert!(e::core::resources::docs::body("extensions")
+        .unwrap()
+        .contains("initialize"));
+    assert!(e::core::resources::docs::body("nope").is_none());
+}
