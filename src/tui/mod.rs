@@ -6,6 +6,7 @@ pub mod composer;
 pub mod highlight;
 pub mod markdown;
 pub mod menu;
+pub mod panel;
 pub mod render;
 pub mod screen;
 pub mod settingspanel;

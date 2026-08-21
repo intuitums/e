@@ -152,7 +152,6 @@ impl Menu {
     }
 
     pub fn render(&self, theme: &Theme, width: usize) -> Vec<String> {
-        let divider = theme.fg("dim", &"─".repeat(width));
         let count = self.filtered.len();
         let window_end = (self.window_start + MAX_VISIBLE).min(count);
 
@@ -177,9 +176,9 @@ impl Menu {
             }
         }
 
-        let mut rows = vec![divider.clone(), header, String::new()];
+        let mut body: Vec<String> = Vec::new();
         if count == 0 {
-            rows.push(theme.fg("muted", "  Nothing found."));
+            body.push(theme.fg("muted", "  Nothing found."));
         }
         // Reference treatment: selection is brightness alone — the selected
         // row's label is bold bright ink, every other row is dim entirely;
@@ -217,10 +216,9 @@ impl Menu {
             if visible_width(&line) > width {
                 line = line.chars().take(width.saturating_sub(1)).collect::<String>() + "…";
             }
-            rows.push(line);
+            body.push(line);
         }
-        rows.push(divider);
-        rows
+        crate::tui::panel::frame(theme, width, header, body)
     }
 }
 

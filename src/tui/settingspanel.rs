@@ -30,7 +30,7 @@ pub struct SettingsPanel {
     pub selected: usize,
 }
 
-const VALUE_COL: usize = 22;
+const VALUE_COL: usize = 20;
 pub const HINT: &str = "↑↓ Navigate     ←→ Change     Esc Close";
 
 impl SettingsPanel {
@@ -53,13 +53,16 @@ impl SettingsPanel {
         }
     }
 
-    pub fn render(&self, theme: &Theme, _width: usize) -> Vec<String> {
-        let mut out = vec![String::new(), format!("  {}", bold(&theme.fg("userMessageText", "Settings")))];
+    pub fn render(&self, theme: &Theme, width: usize) -> Vec<String> {
+        let header = bold(&theme.fg("userMessageText", "Settings"));
+        let mut body: Vec<String> = Vec::new();
         let mut last_category = "";
         for (i, row) in self.rows.iter().enumerate() {
             if row.category != last_category {
-                out.push(String::new());
-                out.push(format!("  {}", theme.fg("dim", row.category)));
+                if !body.is_empty() {
+                    body.push(String::new());
+                }
+                body.push(theme.fg("dim", row.category));
                 last_category = row.category;
             }
             let selected = i == self.selected;
@@ -68,25 +71,25 @@ impl SettingsPanel {
             } else {
                 theme.fg("dim", row.choice.label)
             };
-            let mut line = format!("    {label}");
-            // Pad to the value column.
+            let mut line = format!("  {label}");
             let pad = VALUE_COL.saturating_sub(visible_width(&line));
             line.push_str(&" ".repeat(pad));
-            // Options inline; current bright, others dim.
             let current = row.choice.current();
-            let mut opts = Vec::new();
-            for option in row.choice.options {
-                if *option == current {
-                    opts.push(bold(&theme.fg("userMessageText", option)));
-                } else {
-                    opts.push(theme.fg("dim", option));
-                }
-            }
+            let opts: Vec<String> = row
+                .choice
+                .options
+                .iter()
+                .map(|option| {
+                    if *option == current {
+                        bold(&theme.fg("userMessageText", option))
+                    } else {
+                        theme.fg("dim", option)
+                    }
+                })
+                .collect();
             line.push_str(&opts.join("  "));
-            out.push(line);
+            body.push(line);
         }
-        out.push(String::new());
-        out.push(format!("  {}", theme.fg("dim", HINT)));
-        out
+        crate::tui::panel::frame(theme, width, header, body)
     }
 }
