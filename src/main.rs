@@ -82,6 +82,8 @@ struct App {
     settings: Option<e::tui::settingspanel::SettingsPanel>,
     /// Background job narration (login flows) into the transcript.
     jobs: tokio::sync::mpsc::Sender<String>,
+    /// How a login flow ended; control flow reads this, never the notices.
+    logins: tokio::sync::mpsc::Sender<e::core::auth::login::Outcome>,
     /// Extension host; commands and prompts come back on `results`.
     host: std::sync::Arc<e::core::api::ExtensionHost>,
     results: tokio::sync::mpsc::Sender<AppJob>,
@@ -420,10 +422,14 @@ impl App {
             tokio::spawn(e::core::auth::login::codex_login(
                 "openai-codex".into(),
                 self.jobs.clone(),
+                self.logins.clone(),
             ));
         } else {
             self.notice("starting the xAI sign-in…".into());
-            tokio::spawn(e::core::auth::login::xai_login(self.jobs.clone()));
+            tokio::spawn(e::core::auth::login::xai_login(
+                self.jobs.clone(),
+                self.logins.clone(),
+            ));
         }
     }
 
@@ -716,10 +722,14 @@ impl App {
             tokio::spawn(e::core::auth::login::codex_login(
                 provider,
                 self.jobs.clone(),
+                self.logins.clone(),
             ));
         } else if provider == "xai" {
             self.notice("starting the xAI sign-in…".into());
-            tokio::spawn(e::core::auth::login::xai_login(self.jobs.clone()));
+            tokio::spawn(e::core::auth::login::xai_login(
+                self.jobs.clone(),
+                self.logins.clone(),
+            ));
         } else {
             self.notice(format!(
                 "paste the {provider} API key and press enter (esc cancels)"
@@ -1011,19 +1021,17 @@ impl App {
             .map(|m| m.content.clone());
         match last {
             Some(text) => {
-                let ok = std::process::Command::new("pbcopy")
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                    .and_then(|mut c| {
-                        use std::io::Write;
-                        c.stdin.take().unwrap().write_all(text.as_bytes())?;
-                        c.wait()
-                    })
-                    .is_ok();
+                // OSC 52: the terminal-native clipboard, no helper binary,
+                // works over ssh too. Terminals without it silently ignore
+                // the sequence.
+                use base64::Engine;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+                let ok = write!(std::io::stdout(), "\x1b]52;c;{encoded}\x07").is_ok();
+                let _ = std::io::stdout().flush();
                 self.notice(if ok {
                     "copied the last reply".into()
                 } else {
-                    "copy failed (no pbcopy)".into()
+                    "copy failed".into()
                 });
             }
             None => self.notice("nothing to copy yet".into()),
@@ -1192,6 +1200,7 @@ e -v, --version"
     let mut screen = Screen::new(cols, rows);
     let (mut agent, mut session_events) = Agent::new(model::default_model());
     let (jobs_tx, mut jobs_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let (logins_tx, mut logins_rx) = tokio::sync::mpsc::channel::<e::core::auth::login::Outcome>(4);
     let (results_tx, mut results_rx) = tokio::sync::mpsc::channel::<AppJob>(16);
     let host = e::core::api::ExtensionHost::start(jobs_tx.clone()).await;
     agent.set_host(host.clone());
@@ -1210,6 +1219,7 @@ e -v, --version"
         auth: None,
         settings: None,
         jobs: jobs_tx,
+        logins: logins_tx,
         host,
         results: results_tx,
         compacting: false,
@@ -1487,20 +1497,29 @@ e -v, --version"
             }
             message = jobs_rx.recv() => {
                 if let Some(message) = message {
-                    if matches!(app.auth, Some(AuthStage::Waiting)) && message.contains("signed in")
-                        || message.contains("login failed")
-                    {
-                        app.auth = None;
-                    }
-                    if message.contains("signed in")
-                        && !e::core::auth::load().contains_key(&app.agent.model.provider)
-                    {
-                        if let Some(m) = e::core::provider::catalog::available().into_iter().next() {
-                            app.notice(format!("model set to {}", e::core::provider::catalog::slug(&m)));
-                            app.agent.model = m;
+                    app.notice(message);
+                }
+            }
+            outcome = logins_rx.recv() => {
+                // Control flow hangs off the typed outcome; the human-readable
+                // notice arrives separately on `jobs`.
+                match outcome {
+                    Some(e::core::auth::login::Outcome::SignedIn { .. }) => {
+                        if matches!(app.auth, Some(AuthStage::Waiting)) {
+                            app.auth = None;
+                        }
+                        // A fresh credential may make new models available:
+                        // if the current model's provider is still signed out,
+                        // fall back to the first available model.
+                        if !e::core::auth::load().contains_key(&app.agent.model.provider) {
+                            if let Some(m) = e::core::provider::catalog::available().into_iter().next() {
+                                app.notice(format!("model set to {}", e::core::provider::catalog::slug(&m)));
+                                app.agent.model = m;
+                            }
                         }
                     }
-                    app.notice(message);
+                    Some(e::core::auth::login::Outcome::Failed) => app.auth = None,
+                    None => {}
                 }
             }
             _ = sigterm.recv() => break,

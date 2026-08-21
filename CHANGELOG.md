@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Audit follow-up, control flow off prose: provider errors now carry a
+  structured kind (auth / transient / delivered) instead of the retry
+  decision matching message text like "no credentials"; login flows report
+  a typed Outcome alongside their display notices instead of the frame
+  parsing "signed in" strings. /copy uses OSC 52 — the terminal-native
+  clipboard, no pbcopy, works over ssh. The HTTP client is pooled across
+  requests instead of rebuilt per turn. DESIGN.md §3 now says what the
+  code does: tool execution is ungated (yolo); trust gates instructions,
+  not tools.
 - Slash commands match on a word boundary: /loginfoo no longer starts an
   API-key flow for a provider named "foo" — it falls through to the
   unknown-command notice, like any other typo.

@@ -75,7 +75,7 @@ async fn fresh_access(provider: &str) -> Result<(String, String), String> {
     Ok((access.to_string(), account))
 }
 
-type RunError = (String, bool); // (message, delivered)
+type RunError = (String, crate::core::provider::ErrorKind);
 
 pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
     // A plain API key means the standard platform mount (`{base}/responses`,
@@ -86,7 +86,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         _ => {
             let (access, account) = fresh_access(&request.model.provider)
                 .await
-                .map_err(|e| (e, false))?;
+                .map_err(|e| (e, crate::core::provider::ErrorKind::Auth))?;
             (access, Some(account))
         }
     };
@@ -177,18 +177,19 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     builder = builder
         .bearer_auth(&access)
         .header("accept", "text/event-stream");
-    let response = builder
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| (format!("request failed: {e}"), false))?;
+    let response = builder.json(&body).send().await.map_err(|e| {
+        (
+            format!("request failed: {e}"),
+            crate::core::provider::ErrorKind::Transient,
+        )
+    })?;
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         return Err((
             format!("{status}: {}", text.chars().take(300).collect::<String>()),
-            true,
+            crate::core::provider::ErrorKind::Delivered,
         ));
     }
 
@@ -197,7 +198,12 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     // function_call items accumulate argument deltas keyed by item id.
     let mut pending: std::collections::BTreeMap<String, ToolCall> = Default::default();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| (format!("stream error: {e}"), true))?;
+        let chunk = chunk.map_err(|e| {
+            (
+                format!("stream error: {e}"),
+                crate::core::provider::ErrorKind::Delivered,
+            )
+        })?;
         for payload in splitter.feed(&String::from_utf8_lossy(&chunk)) {
             if payload == "[DONE]" {
                 return Ok(());
@@ -298,7 +304,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                         .as_str()
                         .unwrap_or("response failed")
                         .to_string();
-                    return Err((message, true));
+                    return Err((message, crate::core::provider::ErrorKind::Delivered));
                 }
                 _ => {}
             }

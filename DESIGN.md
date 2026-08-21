@@ -78,8 +78,11 @@ input, not an aspiration:
 - Shell execution is a spawned process with captured output, not a terminal
   daemon with a VT emulator. If a session needs a real terminal, the user
   has one.
-- Permissions are a gate — allow, deny, ask, with a read-only fallback —
-  not a model-driven review pipeline.
+- Tool execution is ungated — the model runs what it runs (yolo); trust
+  gates which instructions enter the prompt, not whether tools run. The
+  extension API may hook tool calls for those who want a gate, but none is
+  built in: an approval pipeline is a model-driven review machine, and the
+  budget says no.
 - Big capabilities (MCP, subagents, web tooling) are admitted only when
   they can pay their complexity inside the budget, or they stay out.
 

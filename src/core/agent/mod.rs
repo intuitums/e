@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use crate::core::provider::catalog::{slug, Model};
-use crate::core::provider::{self, ChatMessage, Event as ProviderEvent, Request, ToolCall};
+use crate::core::provider::{
+    self, ChatMessage, ErrorKind as ProviderErrorKind, Event as ProviderEvent, Request, ToolCall,
+};
 use crate::core::session::Session;
 use crate::core::tools;
 
@@ -287,14 +289,12 @@ impl Agent {
                                 })
                                 .await;
                         }
-                        ProviderEvent::Error { message, delivered } => {
-                            // Only a definitely-unsent failure is safe to retry
-                            // (fx's DeliveryCertainty): a delivered request may
-                            // have run tools or been billed.
-                            let retryable = !delivered
-                                && !message.contains("no credentials")
-                                && !message.contains("run /login");
-                            if retryable
+                        ProviderEvent::Error { message, kind } => {
+                            // Only a Transient (definitely-unsent) failure is
+                            // safe to retry: a delivered request may have run
+                            // tools or been billed; an auth failure needs a
+                            // sign-in, not a retry.
+                            if kind == ProviderErrorKind::Transient
                                 && text.is_empty()
                                 && calls.is_empty()
                                 && reasoning_items.is_empty()

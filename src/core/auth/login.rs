@@ -58,12 +58,27 @@ pub fn save_api_key(provider: &str, key: &str) -> Result<(), String> {
 
 /// The browser PKCE flow, reporting progress through `notify` so the TUI can
 /// narrate it. The blocking callback wait runs off the async runtime.
-pub async fn codex_login(provider: String, notify: tokio::sync::mpsc::Sender<String>) {
-    let message = match codex_login_inner(&provider, &notify).await {
-        Ok(()) => format!("signed in to {provider} — saved to ~/.e/auth.json"),
-        Err(e) => format!("login failed: {e}"),
+/// How a login flow ended. The typed signal the TUI acts on — display text
+/// goes out separately as notices; control flow never parses prose.
+pub enum Outcome {
+    SignedIn { provider: String },
+    Failed,
+}
+
+pub async fn codex_login(
+    provider: String,
+    notify: tokio::sync::mpsc::Sender<String>,
+    outcomes: tokio::sync::mpsc::Sender<Outcome>,
+) {
+    let (message, outcome) = match codex_login_inner(&provider, &notify).await {
+        Ok(()) => (
+            format!("signed in to {provider} — saved to ~/.e/auth.json"),
+            Outcome::SignedIn { provider },
+        ),
+        Err(e) => (format!("login failed: {e}"), Outcome::Failed),
     };
     let _ = notify.send(message).await;
+    let _ = outcomes.send(outcome).await;
 }
 
 async fn codex_login_inner(
@@ -288,12 +303,21 @@ const XAI_DEFAULT_LIFETIME_SECS: u64 = 3600;
 /// RFC 8628: ask for a device code, send the user to the verification page,
 /// poll the token endpoint until they approve. The access token then acts as
 /// the API key on api.x.ai.
-pub async fn xai_login(notify: tokio::sync::mpsc::Sender<String>) {
-    let message = match xai_login_inner(&notify).await {
-        Ok(()) => "signed in to xAI — saved to ~/.e/auth.json".to_string(),
-        Err(e) => format!("login failed: {e}"),
+pub async fn xai_login(
+    notify: tokio::sync::mpsc::Sender<String>,
+    outcomes: tokio::sync::mpsc::Sender<Outcome>,
+) {
+    let (message, outcome) = match xai_login_inner(&notify).await {
+        Ok(()) => (
+            "signed in to xAI — saved to ~/.e/auth.json".to_string(),
+            Outcome::SignedIn {
+                provider: "xai".into(),
+            },
+        ),
+        Err(e) => (format!("login failed: {e}"), Outcome::Failed),
     };
     let _ = notify.send(message).await;
+    let _ = outcomes.send(outcome).await;
 }
 
 async fn xai_login_inner(notify: &tokio::sync::mpsc::Sender<String>) -> Result<(), String> {
