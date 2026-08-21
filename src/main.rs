@@ -57,6 +57,8 @@ enum AppJob {
         cmd: String,
         output: e::core::tools::ToolOutput,
     },
+    /// A /reload finished: the restarted extension host.
+    Reloaded(std::sync::Arc<e::core::api::ExtensionHost>),
 }
 
 struct App {
@@ -94,6 +96,8 @@ struct App {
     trust: Option<TrustStage>,
     /// Transcript index of the running `!` block, updated on completion.
     shell_block: Option<usize>,
+    /// A /reload is restarting the extension host; prompts are held.
+    reloading: bool,
 }
 
 impl App {
@@ -163,6 +167,11 @@ impl App {
                 "/scoped-models",
                 "choose which models ctrl+p cycles",
                 "/scoped-models",
+            ),
+            MenuItem::new(
+                "/reload",
+                "reload extensions, themes, and config",
+                "/reload",
             ),
             MenuItem::new("/resume", "resume a saved session", "/resume"),
             MenuItem::new("/new", "start a fresh session", "/new"),
@@ -573,6 +582,7 @@ impl App {
             "/login" => self.open_login_menu(),
             "/models" | "/model" => self.open_model_menu(),
             "/scoped-models" => self.open_scoped_menu(),
+            "/reload" => self.reload(),
             "/settings" => self.open_settings(),
             "/resume" => self.open_resume_menu(),
             "/copy" => self.copy_last(),
@@ -642,7 +652,7 @@ impl App {
             "/quit" | "/exit" => self.should_quit = true,
             "/version" => self.notice(format!("e {}", e::VERSION)),
             "/help" => self.notice(
-                "commands:\n  /login [provider]   sign in (API key or account)\n  /models [name]      list or switch models\n  /scoped-models      choose which models ctrl+p cycles\n  /new                fresh session\n  /compact            summarize into a fresh session\n  /trust              trust this directory\n  !<cmd>              run a shell command; the model sees the output\n  /version            show the version\n  /quit               exit"
+                "commands:\n  /login [provider]   sign in (API key or account)\n  /models [name]      list or switch models\n  /scoped-models      choose which models ctrl+p cycles\n  /reload             reload extensions, themes, and config\n  /new                fresh session\n  /compact            summarize into a fresh session\n  /trust              trust this directory\n  !<cmd>              run a shell command; the model sees the output\n  /version            show the version\n  /quit               exit"
                     .into(),
             ),
             "/new" | "/clear" => {
@@ -660,6 +670,7 @@ impl App {
             "/settings" => self.open_settings(),
             "/copy" => self.copy_last(),
             "/compact" => self.compact_now(),
+            "/reload" => self.reload(),
             "/trust" => match e::core::trust::set(&self.agent.cwd(), true) {
                 Ok(()) => self.notice("directory trusted — its AGENTS.md now loads".into()),
                 Err(e) => self.notice(format!("trust: {e}")),
@@ -714,8 +725,8 @@ impl App {
     }
 
     fn prompt(&mut self, text: String) {
-        // While compacting, hold the message; it submits after the swap.
-        if self.compacting {
+        // While compacting or reloading, hold the message; it submits after.
+        if self.compacting || self.reloading {
             self.transcript.push(Block::new(Kind::User, text.clone()));
             self.held_prompts.push(text);
             return;
@@ -957,6 +968,34 @@ impl App {
         });
     }
 
+    /// /reload, the reference behavior: refresh what a session caches. In e
+    /// that is the extension host (restarted) and the theme (re-resolved) —
+    /// skills, prompts, AGENTS.md, settings, and models.json are read fresh
+    /// on every use already.
+    fn reload(&mut self) {
+        if self.agent.is_streaming() {
+            self.notice("wait for the turn to finish before /reload".into());
+            return;
+        }
+        if self.compacting {
+            self.notice("wait for compaction to finish before /reload".into());
+            return;
+        }
+        if self.reloading {
+            return;
+        }
+        self.reloading = true;
+        self.notice("reloading…".into());
+        let old = self.host.clone();
+        let jobs = self.jobs.clone();
+        let results = self.results.clone();
+        tokio::spawn(async move {
+            old.shutdown().await;
+            let host = e::core::api::ExtensionHost::start(jobs).await;
+            let _ = results.send(AppJob::Reloaded(host)).await;
+        });
+    }
+
     fn copy_last(&mut self) {
         let last = self
             .agent
@@ -1119,6 +1158,7 @@ async fn main() -> std::io::Result<()> {
         held_prompts: Vec::new(),
         trust: None,
         shell_block: None,
+        reloading: false,
     };
     app.transcript.push(Block::new(Kind::Banner, e::VERSION));
     if e::core::trust::status(&app.agent.cwd()).is_none() {
@@ -1337,6 +1377,19 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
                     Some(AppJob::CompactFailed(_)) => {}
+                    Some(AppJob::Reloaded(host)) => {
+                        app.reloading = false;
+                        app.host = host.clone();
+                        app.agent.set_host(host);
+                        app.apply_theme();
+                        app.notice(
+                            "reloaded extensions, themes, and config — skills, prompts, and AGENTS.md are always read fresh"
+                                .into(),
+                        );
+                        for text in std::mem::take(&mut app.held_prompts) {
+                            app.prompt(text);
+                        }
+                    }
                     Some(AppJob::Shell { cmd, output }) => {
                         // Display a trimmed tail in the live block; history
                         // gets the full (tool-truncated) output.

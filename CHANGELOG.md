@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `/reload`: hot-reload without restarting the session — the extension
+  host restarts (picking up new, changed, or removed extensions) and the
+  theme re-resolves; skills, prompts, AGENTS.md, settings, and models.json
+  are read fresh on every use already. Refused mid-turn and during
+  compaction; prompts typed while reloading are held and submitted after.
 - The OAuth callback page declares UTF-8 (the em-dash rendered as mojibake
   in the browser) and now wears e's look: the wordmark, the message, dim
   detail, light/dark via prefers-color-scheme.
