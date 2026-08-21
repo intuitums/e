@@ -9,23 +9,6 @@ Grayscale, keyboard-driven, nothing phones home.
 
 </div>
 
-```
-𝑒 v0.2.0 · Run /help for commands
-
-┃ what changed in src/main.rs?
-
-  ● Read main.rs  240 lines
-
-  The ctrl+c handler is now two-stage: the first press interrupts a streaming
-  turn or clears the composer, and arms a 1.5s window; a second press exits.
-
-  1s (↑4.2k ↓63)
-
-┃
-
-opencode-go/deepseek-v4-flash · 3%
-```
-
 ## Start
 
 ```sh
