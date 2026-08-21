@@ -1,43 +1,94 @@
-//! Context assembly: the system prompt and AGENTS.md instructions.
+//! Context assembly: the system prompt, following pi's `buildSystemPrompt`.
 //!
-//! The prompt is e's identity plus the working environment, then any
-//! AGENTS.md rules: global `~/.e/AGENTS.md` and the project's, in open-spec
-//! `<global-rules>` / `<project-rules>` sections.
+//! The base prompt is e's identity, an explicit tools list, and the
+//! guidelines. A user's `settings.json` `system_prompt` replaces that base
+//! wholesale (pi's `customPrompt` path). Either way, the layered context is
+//! appended in pi's order: project instructions (AGENTS.md), then the working
+//! directory. AGENTS.md ships as nothing — the user fills it.
 
+use serde::Deserialize;
 use std::path::Path;
 
 use crate::core::home;
 
-const IDENTITY: &str = "\
-You are e, a coding agent working in a terminal alongside the user.
+/// One-line description of each tool, for the Available tools list.
+const TOOL_SNIPPETS: &[(&str, &str)] = &[
+    ("read", "Read the contents of a file. Use offset/limit for large files."),
+    ("write", "Write content to a file, creating it if needed, overwriting if it exists."),
+    ("edit", "Replace an exact string in a file; the old text must match once."),
+    ("ls", "List the entries of a directory."),
+    ("grep", "Search file contents by regular expression across the workspace."),
+    ("bash", "Execute a bash command in the working directory. Returns combined output."),
+    ("skill", "Load a skill's instructions by name when a listed skill fits the task."),
+];
 
-- Answer in GitHub-flavored markdown; be direct and concise.
-- You have tools: read, write, edit, ls, grep, and bash. Use them to inspect \
-and change the workspace rather than guessing or asking.
-- Prefer small, focused changes. Preserve unrelated code and formatting.
-- When you finish a task, stop — don't narrate what you could do next.";
+const GUIDELINES: &[&str] = &[
+    "Prefer small, focused changes; preserve unrelated code and formatting",
+    "Show file paths clearly when working with files",
+    "Be concise in your responses",
+    "When you finish a task, stop — don't narrate what you could do next",
+];
+
+/// The default base: identity, tools, guidelines (pi's shape, e's name).
+fn default_base() -> String {
+    let tools = TOOL_SNIPPETS
+        .iter()
+        .map(|(name, snippet)| format!("- {name}: {snippet}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let guidelines = GUIDELINES.iter().map(|g| format!("- {g}")).collect::<Vec<_>>().join("\n");
+    format!(
+        "You are an expert coding assistant operating inside e, a coding agent \
+harness. You help users by reading files, executing commands, editing code, \
+and writing new files.\n\n\
+Available tools:\n{tools}\n\n\
+In addition to the tools above, you may have access to other custom tools \
+depending on the project.\n\n\
+Guidelines:\n{guidelines}"
+    )
+}
+
+#[derive(Deserialize, Default)]
+struct Settings {
+    #[serde(default)]
+    system_prompt: Option<String>,
+}
+
+/// A user override from `~/.e/settings.json`, if a non-empty one is set.
+fn custom_prompt() -> Option<String> {
+    let json = std::fs::read_to_string(home::settings_path()).ok()?;
+    let settings: Settings = serde_json::from_str(&json).ok()?;
+    settings.system_prompt.filter(|p| !p.trim().is_empty())
+}
 
 pub fn system_prompt(cwd: &Path) -> String {
-    let mut prompt = String::from(IDENTITY);
+    let mut prompt = custom_prompt().unwrap_or_else(default_base);
 
-    prompt.push_str(&format!(
-        "\n\n<environment>\nWorking directory: {}\nDate: {}\n</environment>",
-        cwd.display(),
-        today(),
-    ));
-
-    if let Some(rules) = read_trimmed(&home::agents_md_path()) {
-        prompt.push_str(&format!("\n\n<global-rules>\n{rules}\n</global-rules>"));
-    }
+    // Skills catalog (auto-invocable), like pi's skills section.
     if let Some(catalog) = crate::core::skills::catalog() {
         prompt.push_str(&format!("\n\n{catalog}"));
     }
-    if let Some(rules) = read_trimmed(&cwd.join("AGENTS.md")) {
-        prompt.push_str(&format!(
-            "\n\n<project-rules from=\"{}/AGENTS.md\">\n{rules}\n</project-rules>",
-            xml_escape(&cwd.to_string_lossy()),
-        ));
+
+    // Project instructions: AGENTS.md, global then project, in pi's block shape.
+    let mut context_files: Vec<(String, String)> = Vec::new();
+    if let Some(rules) = read_trimmed(&home::agents_md_path()) {
+        context_files.push((home::agents_md_path().to_string_lossy().into_owned(), rules));
     }
+    if let Some(rules) = read_trimmed(&cwd.join("AGENTS.md")) {
+        context_files.push((cwd.join("AGENTS.md").to_string_lossy().into_owned(), rules));
+    }
+    if !context_files.is_empty() {
+        prompt.push_str("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n");
+        for (path, content) in context_files {
+            prompt.push_str(&format!(
+                "<project_instructions path=\"{}\">\n{content}\n</project_instructions>\n\n",
+                xml_escape(&path)
+            ));
+        }
+        prompt.push_str("</project_context>\n");
+    }
+
+    prompt.push_str(&format!("\nCurrent working directory: {}", cwd.display()));
     prompt
 }
 
@@ -49,29 +100,4 @@ fn read_trimmed(path: &Path) -> Option<String> {
 
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
-}
-
-/// UTC date, no external time crate — derived from the unix epoch.
-fn today() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = secs / 86_400;
-    let (y, m, d) = civil_from_days(days as i64);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-/// Howard Hinnant's days-to-civil algorithm.
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m, d)
 }
