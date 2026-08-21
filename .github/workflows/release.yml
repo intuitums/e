@@ -26,9 +26,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
+          # The release notes are the tag's own CHANGELOG section.
+          awk -v ver="${TAG#v}" \
+            '$0 == "## " ver || $0 ~ "^## " ver " " {hit=1; next} /^## / {hit=0} hit' \
+            CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "See [CHANGELOG.md](https://github.com/fschrhunt/e/blob/main/CHANGELOG.md)." > notes.md
+          fi
+          {
+            echo ""
+            echo "---"
+            echo ""
+            echo "**Install or update**"
+            echo ""
+            echo '```sh'
+            echo "curl -fsSL https://raw.githubusercontent.com/fschrhunt/e/main/install.sh | sh"
+            echo '```'
+            echo ""
+            echo "or \`brew upgrade e\` (tap: \`fschrhunt/tap\`). Installs at 0.4.0 or older predate the built-in auto-updater and need this one manual update; from this release on, e updates itself."
+          } >> notes.md
           gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --draft --title "e $TAG" \
-              --notes "See [CHANGELOG.md](https://github.com/fschrhunt/e/blob/main/CHANGELOG.md)."
+            gh release create "$TAG" --draft --title "e $TAG" --notes-file notes.md
 
   build:
     name: Build (${{ matrix.runner }})

@@ -13,6 +13,13 @@ list, not quietly on it.
 - **0.3** — the surface: extension API (`~/.e/extensions/`, line protocol —
   tools, commands, hooks, events); editable themes; non-destructive config
   writes; compaction — auto at the context threshold and via `/compact`, deferred to turn end, keeping recent messages
+- **0.4** — shipping and self-sufficiency: install.sh + Homebrew tap fed
+  by a tagged-release pipeline; self-update (background at launch, /reload
+  switches in place, /settings opt-out); the full reference tool UI
+  (groups, output previews, ctrl+o viewer, paste placeholders, cancelled
+  state); a live model catalog from each gateway's own /models with
+  providers as data (registry + env-var keys); per-directory trust;
+  `e ask`; prompt templates; `!` shell passthrough; `e docs`
 
 ## Next
 
