@@ -10,7 +10,11 @@ One small, fast binary — extend it with your own tools, commands, themes, and 
 curl -fsSL https://raw.githubusercontent.com/fschrhunt/e/main/install.sh | sh
 ```
 
-<sub>or `brew install fschrhunt/tap/e`</sub>
+<sub>or `brew install fschrhunt/tap/e` — or grab a binary:
+[macOS arm64](https://github.com/fschrhunt/e/releases/latest/download/e-aarch64-apple-darwin.tar.gz) ·
+[macOS x86_64](https://github.com/fschrhunt/e/releases/latest/download/e-x86_64-apple-darwin.tar.gz) ·
+[Linux arm64](https://github.com/fschrhunt/e/releases/latest/download/e-aarch64-unknown-linux-gnu.tar.gz) ·
+[Linux x86_64](https://github.com/fschrhunt/e/releases/latest/download/e-x86_64-unknown-linux-gnu.tar.gz)</sub>
 
 · · ·
 
