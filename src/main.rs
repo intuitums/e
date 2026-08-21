@@ -204,7 +204,9 @@ impl App {
             }
         }
         self.agent.load_history(messages);
-        if let Ok(s) = e::core::session::Session::reopen(&path) { self.agent.set_session(Some(s)) }
+        if let Ok(s) = e::core::session::Session::reopen(&path) {
+            self.agent.set_session(Some(s))
+        }
         self.notice(format!(
             "resumed {}",
             path.file_name()
