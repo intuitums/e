@@ -4,24 +4,70 @@
 //! runs of tool rows contiguous. Blocks render (and cache) their final lines
 //! at a given width; streaming touches only the tail block.
 
+use crate::core::tools::ToolOutcome;
 use crate::tui::markdown::{render_markdown, wrap_styled};
 use crate::tui::render::{bold, dim};
 use crate::tui::theme::Theme;
+
+/// One stable child of a provider-issued tool batch.
+pub struct ToolChild {
+    pub id: u64,
+    pub category: String,
+    pub running: String,
+    pub completed: String,
+    pub target: String,
+    pub state: ToolState,
+    pub result: Option<String>,
+    pub output: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToolState {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    TimedOut,
+    Blocked,
+    Cancelled,
+}
+
+impl ToolChild {
+    pub fn pending(
+        id: u64,
+        category: String,
+        running: String,
+        completed: String,
+        target: String,
+    ) -> Self {
+        Self {
+            id,
+            category,
+            running,
+            completed,
+            target,
+            state: ToolState::Pending,
+            result: None,
+            output: String::new(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Banner,
     User,
     Assistant,
-    Reasoning,
     Tool,
-    /// Finished consecutive tool calls, collapsed to the reference group
-    /// shape: a tallied header, `├` children, `└` last.
+    /// One provider-issued batch: a tallied header over stable lifecycle
+    /// children, including a single call in minimal mode.
     ToolGroup,
     /// A `!` shell passthrough: `$ cmd` header, output tail below.
     Shell,
     Summary,
     Notice,
+    /// A system lifecycle fact in the reference grammar: `● System: …`.
+    System,
 }
 
 pub struct Block {
@@ -34,15 +80,17 @@ pub struct Block {
     /// A finished tool's outcome summary ("exit 7", "timeout 5s"); rendered
     /// as a continuation line only on failure — the reference convention.
     pub result: Option<String>,
-    /// ToolGroup children, plain "Verb target" per call, in order.
+    /// Legacy collapsed children, retained for restored/static rows.
     pub children: Vec<String>,
+    /// Live lifecycle children. A batch creates these before execution.
+    pub tool_children: Vec<ToolChild>,
     /// The turn was interrupted while this tool ran — the reference's `■`.
     pub cancelled: bool,
     /// Command rows: the first output lines, shown as `│` rows beneath.
     pub preview: Vec<String>,
     /// Output lines beyond the preview (drives the elision row).
     pub more: usize,
-    cache: Option<(usize, Vec<String>)>,
+    cache: Option<(usize, bool, Vec<String>)>,
 }
 
 impl Block {
@@ -55,6 +103,7 @@ impl Block {
             detail: None,
             result: None,
             children: Vec::new(),
+            tool_children: Vec::new(),
             cancelled: false,
             preview: Vec::new(),
             more: 0,
@@ -66,21 +115,115 @@ impl Block {
         self.cache = None;
     }
 
+    /// Build a live group whose header and child order are known up front.
+    pub fn tool_group(children: Vec<ToolChild>) -> Self {
+        let mut block = Block::new(Kind::ToolGroup, "");
+        block.tool_children = children;
+        block.refresh_tool_header();
+        block
+    }
+
+    pub fn start_tool(&mut self, id: u64) {
+        if let Some(child) = self.tool_children.iter_mut().find(|child| child.id == id) {
+            child.state = ToolState::Running;
+            self.touch();
+        }
+    }
+
+    pub fn append_tool_output(&mut self, id: u64, chunk: &str) {
+        const DISPLAY_CAP: usize = 64 * 1024;
+        if let Some(child) = self.tool_children.iter_mut().find(|child| child.id == id) {
+            let room = DISPLAY_CAP.saturating_sub(child.output.len());
+            if room > 0 {
+                let mut take = room.min(chunk.len());
+                while take > 0 && !chunk.is_char_boundary(take) {
+                    take -= 1;
+                }
+                child.output.push_str(&chunk[..take]);
+            }
+            self.touch();
+        }
+    }
+
+    pub fn finish_tool(&mut self, id: u64, outcome: ToolOutcome, summary: String, content: &str) {
+        if let Some(child) = self.tool_children.iter_mut().find(|child| child.id == id) {
+            child.state = match outcome {
+                ToolOutcome::Completed => ToolState::Completed,
+                ToolOutcome::Failed => ToolState::Failed,
+                ToolOutcome::TimedOut => ToolState::TimedOut,
+                ToolOutcome::Blocked => ToolState::Blocked,
+                ToolOutcome::Cancelled => ToolState::Cancelled,
+            };
+            child.result = Some(summary);
+            if child.output.is_empty()
+                && matches!(child.category.as_str(), "command" | "edit" | "write")
+            {
+                child.output = crate::core::tools::sanitize_display(content);
+            }
+        }
+        self.refresh_tool_header();
+        self.touch();
+    }
+
+    pub fn cancel_unfinished_tools(&mut self) {
+        for child in &mut self.tool_children {
+            if matches!(child.state, ToolState::Pending | ToolState::Running) {
+                child.state = ToolState::Cancelled;
+                child.result = Some("cancelled".into());
+            }
+        }
+        self.refresh_tool_header();
+        self.touch();
+    }
+
+    fn refresh_tool_header(&mut self) {
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        let mut failed = 0usize;
+        let mut cancelled = 0usize;
+        for child in &self.tool_children {
+            if matches!(
+                child.state,
+                ToolState::Failed | ToolState::TimedOut | ToolState::Blocked
+            ) {
+                failed += 1;
+            } else if child.state == ToolState::Cancelled {
+                cancelled += 1;
+            }
+            if let Some((_, count)) = counts.iter_mut().find(|(kind, _)| *kind == child.category) {
+                *count += 1;
+            } else {
+                counts.push((child.category.clone(), 1));
+            }
+        }
+        let count = self.tool_children.len();
+        let mut header = format!("{count} tool call{}", if count == 1 { "" } else { "s" });
+        for (category, count) in counts {
+            header.push_str(&format!(" · {}", category_tally(&category, count)));
+        }
+        if failed > 0 {
+            header.push_str(&format!(" · {failed} failed"));
+        }
+        if cancelled > 0 {
+            header.push_str(&format!(" · {cancelled} cancelled"));
+        }
+        self.text = header;
+    }
+
     /// Render for tests: the same rows lines() caches, without the cache.
     pub fn lines_for_test(&self, theme: &Theme, width: usize) -> Vec<String> {
-        self.render(theme, width)
+        self.render(theme, width, true)
     }
 
-    fn lines(&mut self, theme: &Theme, width: usize) -> &[String] {
-        let valid = matches!(&self.cache, Some((w, _)) if *w == width);
+    fn lines(&mut self, theme: &Theme, width: usize, blink_on: bool) -> &[String] {
+        let valid = matches!(&self.cache, Some((w, phase, _)) if *w == width && *phase == blink_on);
         if !valid {
-            let lines = self.render(theme, width);
-            self.cache = Some((width, lines));
+            let lines = self.render(theme, width, blink_on);
+            self.cache = Some((width, blink_on, lines));
         }
-        &self.cache.as_ref().unwrap().1
+        &self.cache.as_ref().unwrap().2
     }
 
-    fn render(&self, theme: &Theme, width: usize) -> Vec<String> {
+    fn render(&self, theme: &Theme, width: usize, blink_on: bool) -> Vec<String> {
         match self.kind {
             // `𝑒 v0.2.0 · Run /help for commands` — name bold, rest dim.
             Kind::Banner => vec![format!(
@@ -130,47 +273,96 @@ impl Block {
                 };
                 let mut rows = vec![match &self.detail {
                     Some(target) if !target.is_empty() => {
-                        format!("  {marker} {} {}", self.text, theme.fg("muted", target))
+                        format!("{marker} {} {}", self.text, theme.fg("muted", target))
                     }
-                    _ => format!("  {marker} {}", self.text),
+                    _ => format!("{marker} {}", self.text),
                 }];
                 if self.done {
                     // The reference's command-output shape: the first lines
                     // as `│` rows, an elision row for the rest, and an exit
                     // line ("│ exit code 7") when the command failed.
                     for line in &self.preview {
-                        rows.push(format!("    {}", theme.fg("muted", &format!("│ {line}"))));
-                    }
-                    if self.more > 0 {
-                        rows.push(format!(
-                            "    {}",
-                            theme.fg(
-                                "muted",
-                                &format!("│ … {} lines more (ctrl o to view)", self.more)
-                            )
-                        ));
+                        rows.push(theme.fg("muted", &format!("│ {line}")));
                     }
                     if self.is_error {
                         if let Some(result) = &self.result {
-                            let shown = match result.strip_prefix("exit ") {
-                                Some(code) => format!("exit code {code}"),
-                                None => result.clone(),
-                            };
-                            rows.push(format!("    {}", theme.fg("muted", &format!("│ {shown}"))));
+                            let shown = display_outcome(result);
+                            rows.push(theme.fg("muted", &format!("│ {shown}")));
                         }
+                    }
+                    if self.more > 0 {
+                        rows.push(theme.fg(
+                            "muted",
+                            &format!("│ … {} lines more (ctrl o to view)", self.more),
+                        ));
                     }
                 }
                 rows
             }
             Kind::ToolGroup => {
-                let mut rows = vec![format!("  ● {}", self.text)];
-                for (i, child) in self.children.iter().enumerate() {
-                    let connector = if i + 1 == self.children.len() {
+                // The reference grammar runs the tool family flush left — the
+                // same column as the user rail — never indented.
+                let marker = bold(&theme.fg("userMessageText", "●"));
+                let mut rows = vec![format!("{marker} {}", theme.fg("statusline", &self.text))];
+                if self.tool_children.is_empty() {
+                    for (i, child) in self.children.iter().enumerate() {
+                        let connector = if i + 1 == self.children.len() {
+                            "└"
+                        } else {
+                            "├"
+                        };
+                        rows.push(format!("{connector} {}", theme.fg("statusline", child)));
+                    }
+                    return rows;
+                }
+                for (index, child) in self.tool_children.iter().enumerate() {
+                    if child.state == ToolState::Pending {
+                        continue;
+                    }
+                    let connector = if index + 1 == self.tool_children.len() {
                         "└"
                     } else {
                         "├"
                     };
-                    rows.push(format!("  {} {child}", theme.fg("muted", connector)));
+                    let connector = match child.state {
+                        ToolState::Running if blink_on => theme.fg("userMessageText", connector),
+                        ToolState::Running => theme.fg("dim", connector),
+                        ToolState::Failed | ToolState::TimedOut | ToolState::Blocked => {
+                            theme.fg("error", connector)
+                        }
+                        ToolState::Cancelled => theme.fg("warning", connector),
+                        _ => theme.fg("muted", connector),
+                    };
+                    let action = match child.state {
+                        ToolState::Running => child.running.as_str(),
+                        ToolState::Completed => child.completed.as_str(),
+                        ToolState::Failed => "Failed",
+                        ToolState::TimedOut => "Timed out",
+                        ToolState::Blocked => "Blocked",
+                        ToolState::Cancelled => "Cancelled",
+                        ToolState::Pending => unreachable!(),
+                    };
+                    let suffix = if child.state == ToolState::Completed
+                        && matches!(child.category.as_str(), "edit" | "write")
+                    {
+                        child
+                            .result
+                            .as_deref()
+                            .map(|result| format!("  {result}"))
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    let available =
+                        width.saturating_sub(2 + action.chars().count() + suffix.chars().count());
+                    let target = clip_plain(&child.target, available);
+                    let label = if target.is_empty() {
+                        format!("{action}{suffix}")
+                    } else {
+                        format!("{action} {target}{suffix}")
+                    };
+                    rows.push(format!("{connector} {}", theme.fg("statusline", &label)));
+                    append_tool_preview(&mut rows, child, theme);
                 }
                 rows
             }
@@ -193,34 +385,81 @@ impl Block {
                 }
                 rows
             }
-            Kind::Reasoning => {
-                let text = self.text.trim();
-                if text.is_empty() {
-                    return Vec::new();
-                }
-                // Dimmed, gutter-indented, italicized thinking. Summaries
-                // arrive as markdown (bold titles, code spans) — render the
-                // inline spans instead of showing literal asterisks.
-                let styled = crate::tui::markdown::inline_spans(theme, text);
-                crate::tui::markdown::wrap_styled(&styled, width.saturating_sub(2).max(8))
-                    .into_iter()
-                    .map(|l| format!("  {}", theme.fg("dim", &crate::tui::render::italic(&l))))
-                    .collect()
-            }
             Kind::Summary => vec![theme.fg("dim", &format!("  {}", self.text))],
             Kind::Notice => wrap_styled(&self.text, width.saturating_sub(2).max(8))
                 .into_iter()
                 .map(|l| format!("  {l}"))
                 .collect(),
+            Kind::System => vec![theme.fg("dim", &format!("● System: {}", self.text))],
         }
     }
 }
 
-/// The reference's tally label for a verb; only "command" pluralizes
-/// ("2 read", "1 edit", "3 commands" — the reference's own literals).
+fn category_tally(category: &str, count: usize) -> String {
+    if category == "command" && count > 1 {
+        format!("{count} commands")
+    } else {
+        format!("{count} {category}")
+    }
+}
+
+fn display_outcome(result: &str) -> String {
+    match result.strip_prefix("exit ") {
+        Some(code) => format!("exit code {code}"),
+        None => result.to_string(),
+    }
+}
+
+fn clip_plain(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".into();
+    }
+    let mut clipped: String = text.chars().take(width - 1).collect();
+    clipped.push('…');
+    clipped
+}
+
+/// Pipe rows appear only while the command owns execution focus — the
+/// reference grammar. Completion withdraws them; full output lives behind
+/// ctrl+o, never inline.
+fn append_tool_preview(rows: &mut Vec<String>, child: &ToolChild, theme: &Theme) {
+    if child.state != ToolState::Running {
+        return;
+    }
+    if !matches!(child.category.as_str(), "command" | "edit" | "write") {
+        return;
+    }
+    let output: Vec<&str> = child
+        .output
+        .lines()
+        .filter(|line| !line.starts_with("… [killed:") && *line != "… [cancelled]")
+        .collect();
+    const LIVE_BUDGET: usize = 5;
+    for line in output.iter().take(LIVE_BUDGET) {
+        let styled = if line.starts_with('+') && !line.starts_with("+++") {
+            theme.fg("toolDiffAdded", line)
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            theme.fg("toolDiffRemoved", line)
+        } else {
+            theme.fg("muted", line)
+        };
+        rows.push(format!("{} {styled}", theme.fg("muted", "│")));
+    }
+    let more = output.len().saturating_sub(LIVE_BUDGET);
+    if more > 0 {
+        rows.push(theme.fg("muted", &format!("│ … {more} lines more (ctrl o to view)")));
+    }
+}
+
+/// Collapse legacy restored rows. Live batches use `tool_children` instead.
 fn flush_run(out: &mut Vec<Block>, run: &mut Vec<Block>) {
-    if run.len() < 2 {
-        out.append(run);
+    if run.is_empty() {
         return;
     }
     let mut counts: Vec<(String, usize)> = Vec::new();
@@ -314,10 +553,8 @@ impl Transcript {
         }
     }
 
-    /// Collapse every run of two or more finished tool rows into the
-    /// reference group: `● N tool calls · tallies [· N failed]` over `├`/`└`
-    /// children. Idempotent — groups never re-collapse; a still-running row
-    /// ends its run and stays live.
+    /// Convert legacy standalone finished rows into minimal-mode groups.
+    /// Live session events create groups directly and never call this.
     pub fn collapse_tools(&mut self) {
         let mut out: Vec<Block> = Vec::with_capacity(self.blocks.len());
         let mut run: Vec<Block> = Vec::new();
@@ -334,11 +571,15 @@ impl Transcript {
     }
 
     pub fn render(&mut self, theme: &Theme, width: usize) -> Vec<String> {
+        self.render_animated(theme, width, true)
+    }
+
+    pub fn render_animated(&mut self, theme: &Theme, width: usize, blink_on: bool) -> Vec<String> {
         let mut out = Vec::new();
         let mut prev: Option<Kind> = None;
         for block in &mut self.blocks {
             let kind = block.kind;
-            let lines = block.lines(theme, width);
+            let lines = block.lines(theme, width, blink_on);
             if lines.is_empty() {
                 continue;
             }

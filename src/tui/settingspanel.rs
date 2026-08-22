@@ -1,4 +1,5 @@
-//! The settings panel — fx's settings-screen shape, over `settings::all()`.
+//! The settings panel — the reference settings-screen shape, over
+//! `settings::all()`.
 //!
 //! Rows and their options come from `~/.e/`-aware settings, so a user-editable
 //! set (theme) shows every file they've dropped in. `←→` change the selected

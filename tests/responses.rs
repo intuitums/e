@@ -90,6 +90,8 @@ async fn responses_tools_are_flat_on_the_wire() {
         "nested shape leaked"
     );
     assert!(body_json["tools"][0]["parameters"].is_object());
+    // Batches run concurrently, matching the advertised capability.
+    assert_eq!(body_json["parallel_tool_calls"], true);
 
     // API-key deployment: the standard mount, no codex account header.
     let request_line = sent.lines().next().unwrap();

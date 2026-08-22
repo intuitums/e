@@ -76,8 +76,10 @@ to end in a sitting** — on the order of 15k lines. The budget is a design
 input, not an aspiration:
 
 - Shell execution is a spawned process with captured output, not a terminal
-  daemon with a VT emulator. If a session needs a real terminal, the user
-  has one.
+  daemon with a VT emulator. Captured pipes stream through the one ordered
+  session event channel while a bounded result is retained. Tool batches are
+  stable transcript records from first start, never a destructive end-of-turn
+  rewrite. If a session needs a real terminal, the user has one.
 - Tool execution is ungated — the model runs what it runs (yolo); trust
   gates which instructions enter the prompt, not whether tools run. The
   extension API may hook tool calls for those who want a gate, but none is

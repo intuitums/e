@@ -11,16 +11,18 @@ Extensions can:
 - **add slash commands** that show up in the `/` picker
 - **gate tool calls** with the `tool_call` hook (return a block + reason)
 - **observe events** (`turn_end`) and **notify** the transcript at any time
+- **handle startup arguments** and request a same-binary relaunch in another directory
 
 ## Wire protocol (version 1)
 
 e → extension, requests (each carries an `id` to answer with):
 
 ```
-{"id":1,"method":"initialize","params":{"protocol":1,"e_version":"0.3.0","cwd":"/path"}}
-{"id":2,"method":"tool_call","params":{"name":"greet","arguments":{...}}}
-{"id":3,"method":"command","params":{"name":"ping","args":"rest of the line"}}
-{"id":4,"method":"hook.tool_call","params":{"name":"bash","arguments":{...}}}
+{"id":1,"method":"initialize","params":{"protocol":1,"e_version":"0.4.1","cwd":"/path"}}
+{"id":2,"method":"hook.startup","params":{"cwd":"/path","argv":["--worktree","feature"]}}
+{"id":3,"method":"tool_call","params":{"name":"greet","arguments":{...}}}
+{"id":4,"method":"command","params":{"name":"ping","args":"rest of the line"}}
+{"id":5,"method":"hook.tool_call","params":{"name":"bash","arguments":{...}}}
 ```
 
 e → extension, notifications (no `id`, no reply):
@@ -58,11 +60,27 @@ optional; `parameters` is a JSON Schema object.
 **hook.tool_call** → `{"block":true,"reason":"why"}` to stop the call
 (the model sees the reason as an error result), `{"block":false}` to allow.
 
+**hook.startup** → rewritten arguments and optional process changes:
+
+```json
+{"argv":["-c"],
+ "env":{"REMOVE_ME":null},
+ "relaunch":{"cwd":"/path/to/worktree","env":{"BOOTSTRAPPED":"1"}}}
+```
+
+Startup hooks run in extension filename order before e parses subcommands,
+`-c`, `-r`, or the initial prompt. `argv` feeds the next hook. `env` changes
+the current process. `relaunch` replaces the current process with the same e
+binary in `cwd`; extensions cannot choose another executable. The first
+relaunch ends the chain.
+
 ## Rules of the road
 
 - The initialize answer must arrive within 5 s or the extension is skipped.
-- Hooks have 5 s and **fail open**: a slow or broken hook never blocks the
-  agent — only an explicit `"block":true` does.
+- Runtime hooks have 5 s and **fail open**: a slow or broken tool gate never
+  blocks the agent. Startup hooks are different: an advertised startup hook
+  that errors or times out stops launch, rather than leaking a consumed flag
+  or branch name into the initial prompt.
 - Tool calls have 300 s, commands 60 s.
 - On quit e sends `shutdown`, waits a beat, then kills the process.
 - A crashed or missing extension is reported in the transcript and skipped;
@@ -87,3 +105,11 @@ done
 ```
 
 Restart e, type `/ping`, get `pong`.
+
+## What startup hooks are for
+
+Because a startup extension sees raw argv and can relaunch the same binary in
+a new cwd, it can implement things like managed Git worktree launches (`-w`
+creating `<root>/<repo>/<branch>` and continuing there), project profiles, or
+scratch-directory routing — all in any language the line protocol speaks,
+with nothing hardcoded in e itself.

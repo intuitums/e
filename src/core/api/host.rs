@@ -2,10 +2,10 @@
 //! long-lived process per extension, and routes tools, commands, hooks, and
 //! events over the line protocol.
 //!
-//! Failure posture: an extension that won't start or answer is skipped or
-//! timed out and reported — never a reason the harness can't run. Hooks fail
-//! open (a broken gatekeeper doesn't brick the agent); a block only happens on
-//! an explicit verdict.
+//! Failure posture: discovery and runtime hooks fail open and are reported.
+//! An extension that advertises a startup hook owns startup argument handling,
+//! so its explicit failure is fatal rather than leaking consumed arguments
+//! into the user's prompt.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,7 +18,9 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
-use super::protocol::{self, CommandResult, HookVerdict, Incoming, Manifest, ToolResult};
+use super::protocol::{
+    self, CommandResult, HookVerdict, Incoming, Manifest, Relaunch, StartupResult, ToolResult,
+};
 use crate::core::config::home;
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -40,6 +42,15 @@ struct Extension {
 pub struct ExtensionHost {
     extensions: Vec<Extension>,
     ids: AtomicU64,
+}
+
+/// Result of startup-hook chaining before normal CLI parsing.
+pub enum StartupAction {
+    Continue(Vec<String>),
+    Relaunch {
+        argv: Vec<String>,
+        request: Relaunch,
+    },
 }
 
 impl ExtensionHost {
@@ -75,6 +86,65 @@ impl ExtensionHost {
 
     pub fn is_empty(&self) -> bool {
         self.extensions.is_empty()
+    }
+
+    /// Chain startup-capable extensions over raw argv. Unlike runtime hooks,
+    /// an explicit startup-hook failure is fatal because silently treating a
+    /// consumed branch name as a prompt is unsafe and surprising.
+    pub async fn startup(&self, mut argv: Vec<String>) -> Result<StartupAction, String> {
+        let cwd = std::env::current_dir()
+            .unwrap_or_default()
+            .display()
+            .to_string();
+        for ext in &self.extensions {
+            if !ext.manifest.hooks.iter().any(|hook| hook == "startup") {
+                continue;
+            }
+            let value = self
+                .request(
+                    ext,
+                    "hook.startup",
+                    json!({"cwd": cwd, "argv": argv.clone()}),
+                    HOOK_TIMEOUT,
+                )
+                .await
+                .map_err(|reason| format!("extension {} startup: {reason}", ext.manifest.name))?;
+            let result: StartupResult = serde_json::from_value(value).map_err(|error| {
+                format!(
+                    "extension {} startup: bad result: {error}",
+                    ext.manifest.name
+                )
+            })?;
+            if let Some(next) = result.argv {
+                argv = next;
+            }
+            for (name, value) in result.env {
+                if name.is_empty()
+                    || name.contains('=')
+                    || name.contains('\0')
+                    || value.as_deref().is_some_and(|value| value.contains('\0'))
+                {
+                    return Err(format!(
+                        "extension {} startup: invalid environment entry",
+                        ext.manifest.name
+                    ));
+                }
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            if let Some(request) = result.relaunch {
+                if request.cwd.trim().is_empty() {
+                    return Err(format!(
+                        "extension {} startup: relaunch cwd is empty",
+                        ext.manifest.name
+                    ));
+                }
+                return Ok(StartupAction::Relaunch { argv, request });
+            }
+        }
+        Ok(StartupAction::Continue(argv))
     }
 
     /// Built-in schemas with extension tools merged in. An extension tool with
@@ -294,13 +364,30 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
     let mut child = tokio::process::Command::new(path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .current_dir(std::env::current_dir().unwrap_or_default())
         .spawn()
         .map_err(|e| format!("failed to start: {e}"))?;
 
     let stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
+    let stderr = child.stderr.take();
+
+    if let Some(stderr) = stderr {
+        let notices = notices.clone();
+        let source = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "extension".into());
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if !line.trim().is_empty() {
+                    let _ = notices.send(format!("extension {source}: {line}")).await;
+                }
+            }
+        });
+    }
 
     // Writer task: serialized line output.
     let (writer, mut writer_rx) = mpsc::channel::<String>(64);

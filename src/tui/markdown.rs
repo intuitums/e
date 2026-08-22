@@ -92,47 +92,6 @@ pub fn clip_styled(styled: &str, max: usize) -> String {
     out
 }
 
-/// Minimal inline markdown for text that arrives *as* markdown but renders
-/// outside the block renderer (reasoning summaries): `**bold**` and
-/// `` `code` `` become styling; everything else passes through.
-pub fn inline_spans(theme: &Theme, text: &str) -> String {
-    let mut out = String::new();
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '*' && i + 1 < chars.len() && chars[i + 1] == '*' {
-            if let Some(end) = find_pair(&chars, i + 2, &['*', '*']) {
-                let inner: String = chars[i + 2..end].iter().collect();
-                out.push_str(&crate::tui::render::bold(&inner));
-                i = end + 2;
-                continue;
-            }
-        }
-        if chars[i] == '`' {
-            if let Some(end) = find_pair(&chars, i + 1, &['`']) {
-                let inner: String = chars[i + 1..end].iter().collect();
-                out.push_str(&theme.fg("mdCode", &inner));
-                i = end + 1;
-                continue;
-            }
-        }
-        out.push(chars[i]);
-        i += 1;
-    }
-    out
-}
-
-fn find_pair(chars: &[char], from: usize, close: &[char]) -> Option<usize> {
-    let mut i = from;
-    while i + close.len() <= chars.len() {
-        if chars[i..i + close.len()] == *close && i > from {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
-
 pub fn wrap_styled(styled: &str, width: usize) -> Vec<String> {
     let mut rows = Vec::new();
     for hard in styled.split('\n') {

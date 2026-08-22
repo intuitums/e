@@ -6,7 +6,8 @@
 
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event as TermEvent, EventStream, KeyCode,
-    KeyEvent, KeyModifiers,
+    KeyEvent, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::{execute, terminal};
 use futures::StreamExt;
@@ -20,7 +21,7 @@ use e::tui::authpanel::{self, AuthStage};
 use e::tui::composer::{Editor, EditorResult, Key};
 use e::tui::menu::{Menu, MenuItem, MenuKind, HINT_SCOPED, HINT_USE};
 use e::tui::screen::Screen;
-use e::tui::statusline::{statusline, StatusData, Turn};
+use e::tui::statusline::{statusline, StatusData, Turn, TurnPhase};
 use e::tui::theme::Theme;
 use e::tui::transcript::{Block, Kind, Transcript};
 use e::tui::trustpanel::{self, TrustStage};
@@ -33,14 +34,14 @@ struct ActiveTurn {
     turn: Turn,
     started: Instant,
     error: Option<String>,
-    /// tool id → transcript block index, so ToolEnd updates the right row.
+    /// tool id → stable group block, so lifecycle events update in place.
     tool_blocks: std::collections::HashMap<u64, usize>,
-    /// The live reasoning block, shown dimmed while the model thinks.
-    reasoning: Option<usize>,
+    /// Batch members not yet terminal, including serially pending calls.
+    pending_tools: usize,
+    /// False until the provider's first real Usage lands; the seed estimate
+    /// fills the counters before that.
+    usage_seen: bool,
 }
-
-/// The reference's compact command-output row limit.
-const PREVIEW_ROWS: usize = 4;
 
 /// The ctrl+o full-detail screen: one stored output at a time, scrollable,
 /// ←/→ switching between outputs — the reference surface, e-sized.
@@ -115,6 +116,8 @@ struct App {
     shell_block: Option<usize>,
     /// A /reload is restarting the extension host; prompts are held.
     reloading: bool,
+    /// Transcript index of the reload notice, replaced when reload finishes.
+    reload_block: Option<usize>,
     /// Full tool outputs for the ctrl+o viewer: (title, content), newest
     /// last, capped.
     outputs: Vec<(String, String)>,
@@ -162,13 +165,30 @@ impl App {
     }
 
     fn frame(&mut self, width: usize) -> Vec<String> {
-        let mut lines = self.transcript.render(&self.theme, width);
+        let blink_on = self
+            .active
+            .as_ref()
+            .map(|turn| (turn.started.elapsed().as_millis() / 500) % 2 == 0)
+            .unwrap_or(true);
+        let mut lines = self
+            .transcript
+            .render_animated(&self.theme, width, blink_on);
         if let Some(s) = &self.active {
-            lines.push(String::new());
-            lines.push(format!(
-                " • {}",
-                s.turn.label(s.started.elapsed().as_secs())
-            ));
+            if let Some(label) = s.turn.label(s.started.elapsed().as_secs()) {
+                lines.push(String::new());
+                if s.turn.phase == TurnPhase::Thinking {
+                    // The reference runs the activity dot on the same column
+                    // as the user rail — flush left, no indent.
+                    let marker = if blink_on {
+                        self.theme.fg("userMessageText", "•")
+                    } else {
+                        self.theme.fg("dim", "•")
+                    };
+                    lines.push(format!("{marker} {label}"));
+                } else {
+                    lines.push(label);
+                }
+            }
         }
         let entering_key = matches!(self.auth, Some(AuthStage::ApiKey { .. }));
         if !entering_key {
@@ -409,15 +429,58 @@ impl App {
         };
         self.transcript.clear();
         self.transcript.push(Block::new(Kind::Banner, e::VERSION));
+        let mut restored_calls = std::collections::HashMap::<String, (usize, u64)>::new();
+        let mut restored_id = 0u64;
         for m in &messages {
             match m.role.as_str() {
                 "user" => {
                     self.transcript
                         .push(Block::new(Kind::User, m.content.clone()));
                 }
-                "assistant" if !m.content.trim().is_empty() => {
-                    self.transcript
-                        .push(Block::new(Kind::Assistant, m.content.clone()));
+                "assistant" => {
+                    if !m.content.trim().is_empty() {
+                        self.transcript
+                            .push(Block::new(Kind::Assistant, m.content.clone()));
+                    }
+                    if !m.tool_calls.is_empty() {
+                        let mut children = Vec::with_capacity(m.tool_calls.len());
+                        let mut ids = Vec::with_capacity(m.tool_calls.len());
+                        for call in &m.tool_calls {
+                            restored_id += 1;
+                            let args = serde_json::from_str(&call.arguments)
+                                .unwrap_or(serde_json::Value::Null);
+                            let shown = e::core::tools::present(&call.name, &args);
+                            children.push(e::tui::transcript::ToolChild::pending(
+                                restored_id,
+                                shown.category,
+                                shown.running,
+                                shown.completed,
+                                shown.target,
+                            ));
+                            ids.push((call.id.clone(), restored_id));
+                        }
+                        let block = self.transcript.push(Block::tool_group(children));
+                        for (call_id, id) in ids {
+                            restored_calls.insert(call_id, (block, id));
+                        }
+                    }
+                }
+                "tool" => {
+                    let Some(call_id) = m.tool_call_id.as_ref() else {
+                        continue;
+                    };
+                    let Some(&(block, id)) = restored_calls.get(call_id) else {
+                        continue;
+                    };
+                    let (outcome, summary) = m
+                        .tool_meta
+                        .as_ref()
+                        .map(|meta| (meta.outcome, meta.summary.clone()))
+                        .unwrap_or((e::core::tools::ToolOutcome::Completed, "done".into()));
+                    if let Some(group) = self.transcript.blocks.get_mut(block) {
+                        group.start_tool(id);
+                        group.finish_tool(id, outcome, summary, &m.content);
+                    }
                 }
                 _ => {}
             }
@@ -766,6 +829,7 @@ impl App {
                 self.compact_requested = false;
                 self.held_prompts.clear();
                 self.shell_block = None;
+                self.reload_block = None;
                 self.context_tokens = 0;
                 self.agent.clear();
                 self.agent.set_session(None);
@@ -870,8 +934,21 @@ impl App {
                     started: Instant::now(),
                     error: None,
                     tool_blocks: std::collections::HashMap::new(),
-                    reasoning: None,
+                    pending_tools: 0,
+                    usage_seen: false,
                 });
+                // Seed the token counters from request size so the activity
+                // row shows ↑ from the first second, like the reference.
+                if let Some(s) = &mut self.active {
+                    let chars: usize = system_prompt().chars().count()
+                        + self
+                            .agent
+                            .history_snapshot()
+                            .iter()
+                            .map(|m| m.content.chars().count())
+                            .sum::<usize>();
+                    s.turn.input = (chars / 4) as u64;
+                }
             }
             SessionEvent::Steered(text) => {
                 // A mid-turn message: show it as a user turn where it landed.
@@ -884,7 +961,8 @@ impl App {
             }
             SessionEvent::TextDelta(delta) => {
                 if let Some(s) = &mut self.active {
-                    s.reasoning = None;
+                    s.turn.phase = TurnPhase::AssistantText;
+                    s.turn.note_text(&delta);
                     s.text.push_str(&delta);
                     let idx = match s.block {
                         Some(idx) => idx,
@@ -901,71 +979,90 @@ impl App {
                     }
                 }
             }
+            // Reasoning summaries are counted toward the ↓ estimate but
+            // never drawn — the reference transcript projects none.
             SessionEvent::ReasoningDelta(delta) => {
                 if let Some(s) = &mut self.active {
-                    let idx = match s.reasoning {
-                        Some(idx) => idx,
-                        None => {
-                            let idx = self.transcript.push(Block::new(Kind::Reasoning, ""));
-                            s.reasoning = Some(idx);
-                            idx
-                        }
-                    };
-                    if let Some(b) = self.transcript.blocks.get_mut(idx) {
-                        b.text.push_str(&delta);
-                        b.touch();
+                    s.turn.note_text(&delta);
+                }
+            }
+            SessionEvent::ToolBatchStart { calls } => {
+                if let Some(s) = &mut self.active {
+                    s.block = None;
+                    s.text.clear();
+                    s.turn.phase = TurnPhase::Tool;
+                    s.pending_tools += calls.len();
+                    let children = calls
+                        .iter()
+                        .map(|call| {
+                            e::tui::transcript::ToolChild::pending(
+                                call.id,
+                                call.category.clone(),
+                                call.running.clone(),
+                                call.completed.clone(),
+                                call.target.clone(),
+                            )
+                        })
+                        .collect();
+                    let idx = self.transcript.push(Block::tool_group(children));
+                    for call in calls {
+                        s.tool_blocks.insert(call.id, idx);
                     }
                 }
             }
-            SessionEvent::ToolStart { id, verb, target } => {
+            SessionEvent::ToolStart { id } => {
                 if let Some(s) = &mut self.active {
-                    // A new tool ends the current text block; text after tools
-                    // opens a fresh one.
-                    s.block = None;
-                    s.reasoning = None;
-                    s.text.clear();
-                    s.turn.note_tool_verb(&verb);
-                    let mut block = Block::new(Kind::Tool, verb);
-                    block.detail = Some(target);
-                    let idx = self.transcript.push(block);
-                    s.tool_blocks.insert(id, idx);
+                    s.turn.phase = TurnPhase::Tool;
+                    if let Some(&idx) = s.tool_blocks.get(&id) {
+                        if let Some(block) = self.transcript.blocks.get_mut(idx) {
+                            block.start_tool(id);
+                        }
+                    }
+                }
+            }
+            SessionEvent::ToolOutput { id, chunk, .. } => {
+                if let Some(s) = &mut self.active {
+                    if let Some(&idx) = s.tool_blocks.get(&id) {
+                        if let Some(block) = self.transcript.blocks.get_mut(idx) {
+                            block.append_tool_output(id, &chunk);
+                        }
+                    }
                 }
             }
             SessionEvent::ToolEnd {
                 id,
+                outcome,
                 summary,
-                is_error,
                 content,
             } => {
                 let mut title = None;
                 if let Some(s) = &mut self.active {
                     if let Some(&idx) = s.tool_blocks.get(&id) {
-                        if let Some(b) = self.transcript.blocks.get_mut(idx) {
-                            b.done = true;
-                            b.is_error = is_error;
-                            b.result = Some(summary);
-                            // The reference shows command output beneath the
-                            // row: the first lines, then an elision row.
-                            if b.text == "Ran" && !content.trim().is_empty() {
-                                let lines: Vec<&str> = content.lines().collect();
-                                b.preview = lines
-                                    .iter()
-                                    .take(PREVIEW_ROWS)
-                                    .map(|l| l.to_string())
-                                    .collect();
-                                b.more = lines.len().saturating_sub(PREVIEW_ROWS);
+                        if let Some(block) = self.transcript.blocks.get_mut(idx) {
+                            if let Some(child) =
+                                block.tool_children.iter().find(|child| child.id == id)
+                            {
+                                title = Some(if child.target.is_empty() {
+                                    child.completed.clone()
+                                } else {
+                                    format!("{} {}", child.completed, child.target)
+                                });
                             }
-                            title = Some(match &b.detail {
-                                Some(t) if !t.is_empty() => format!("{} {}", b.text, t),
-                                _ => b.text.clone(),
-                            });
-                            b.touch();
+                            block.finish_tool(id, outcome, summary, &content);
                         }
                     }
+                    s.pending_tools = s.pending_tools.saturating_sub(1);
+                    s.turn.phase = if s.pending_tools == 0 {
+                        TurnPhase::Thinking
+                    } else {
+                        TurnPhase::Tool
+                    };
                 }
-                // Every non-empty tool output feeds the ctrl+o viewer.
                 if !content.trim().is_empty() {
-                    self.remember_output(title.unwrap_or_else(|| "tool output".into()), content);
+                    self.remember_output(
+                        title.unwrap_or_else(|| "tool output".into()),
+                        e::core::tools::sanitize_display(&content),
+                    );
                 }
             }
             SessionEvent::Usage {
@@ -975,8 +1072,16 @@ impl App {
             } => {
                 self.context_tokens = input + cache_read + output;
                 if let Some(s) = &mut self.active {
-                    s.turn.input += input + cache_read;
-                    s.turn.output += output;
+                    // The seed estimate holds the counters until the first
+                    // real usage lands; from then on, accumulate per step.
+                    if s.usage_seen {
+                        s.turn.input += input + cache_read;
+                        s.turn.output += output;
+                    } else {
+                        s.turn.input = input + cache_read;
+                        s.turn.output = output;
+                        s.usage_seen = true;
+                    }
                 }
             }
             SessionEvent::Retry { attempt, message } => {
@@ -992,39 +1097,41 @@ impl App {
             SessionEvent::TurnEnd { aborted } => {
                 self.agent.on_turn_end();
                 if aborted {
-                    // A row still running when the turn was interrupted gets
-                    // the reference's cancelled state — it must not read as
-                    // "still running" in the scrollback forever.
+                    // Every started or serially pending member reaches a
+                    // terminal state; no ghost Running row survives Esc.
                     for block in &mut self.transcript.blocks {
-                        if block.kind == Kind::Tool && !block.done {
+                        if block.kind == Kind::ToolGroup {
+                            block.cancel_unfinished_tools();
+                        } else if block.kind == Kind::Tool && !block.done {
                             block.cancelled = true;
                             block.touch();
                         }
                     }
                 }
-                // The reference collapse: finished tool runs fold into their
-                // tallied group once the turn is over.
-                self.transcript.collapse_tools();
                 let Some(s) = self.active.take() else { return };
-                let tokens = if s.turn.input == 0 && s.turn.output == 0 {
-                    String::new()
+                // The reference grammar: a completed turn ends with a dim
+                // duration-and-tokens row; a cancelled one says so instead.
+                if aborted {
+                    self.transcript.push(Block::new(Kind::System, "cancelled"));
                 } else {
-                    format!(
-                        " (↑{} ↓{})",
-                        format_tokens(s.turn.input),
-                        format_tokens(s.turn.output)
-                    )
-                };
-                let mark = if aborted { " · interrupted" } else { "" };
-                self.transcript.push(Block::new(
-                    Kind::Summary,
-                    format!(
-                        "{}{}{}",
-                        format_duration(s.started.elapsed().as_millis() as u64),
-                        tokens,
-                        mark
-                    ),
-                ));
+                    let tokens = if s.turn.input == 0 && s.turn.output == 0 {
+                        String::new()
+                    } else {
+                        format!(
+                            " (↑{} ↓{})",
+                            format_tokens(s.turn.input),
+                            format_tokens(s.turn.output)
+                        )
+                    };
+                    self.transcript.push(Block::new(
+                        Kind::Summary,
+                        format!(
+                            "{}{}",
+                            format_duration(s.started.elapsed().as_millis() as u64),
+                            tokens
+                        ),
+                    ));
+                }
                 if let Some(message) = s.error {
                     self.notice(format!("error: {message}"));
                 }
@@ -1113,7 +1220,7 @@ impl App {
                     .await
                     .unwrap_or(e::core::tools::ToolOutput {
                         content: "shell command panicked".into(),
-                        is_error: true,
+                        outcome: e::core::tools::ToolOutcome::Failed,
                         summary: "error".into(),
                     });
             let _ = results.send(AppJob::Shell { cmd, output }).await;
@@ -1121,9 +1228,15 @@ impl App {
     }
 
     fn remember_output(&mut self, title: String, content: String) {
+        const OUTPUT_BUDGET: usize = 4 * 1024 * 1024;
         self.outputs.push((title, content));
-        if self.outputs.len() > 50 {
-            self.outputs.remove(0);
+        let mut bytes: usize = self.outputs.iter().map(|(_, body)| body.len()).sum();
+        while self.outputs.len() > 1 && (self.outputs.len() > 50 || bytes > OUTPUT_BUDGET) {
+            let removed = self.outputs.remove(0).1.len();
+            bytes = bytes.saturating_sub(removed);
+            if let Some(viewer) = &mut self.viewer {
+                viewer.index = viewer.index.saturating_sub(1);
+            }
         }
     }
 
@@ -1152,7 +1265,7 @@ impl App {
             return;
         }
         self.reloading = true;
-        self.notice("reloading…".into());
+        self.reload_block = Some(self.transcript.push(Block::new(Kind::Notice, "reloading…")));
         let old = self.host.clone();
         let jobs = self.jobs.clone();
         let results = self.results.clone();
@@ -1199,6 +1312,23 @@ impl App {
 
     fn notice(&mut self, text: String) {
         self.transcript.push(Block::new(Kind::Notice, text));
+    }
+}
+
+/// Replace /reload's in-progress notice, or append the result if that block
+/// disappeared when another command cleared the transcript.
+fn finish_reload_notice(transcript: &mut Transcript, reload_block: Option<usize>) {
+    const STARTED: &str = "reloading…";
+    const FINISHED: &str = "reloaded extensions, themes, and config — skills, prompts, and AGENTS.md are always read fresh";
+
+    if let Some(block) = reload_block
+        .and_then(|index| transcript.blocks.get_mut(index))
+        .filter(|block| block.kind == Kind::Notice && block.text == STARTED)
+    {
+        block.text = FINISHED.into();
+        block.touch();
+    } else {
+        transcript.push(Block::new(Kind::Notice, FINISHED));
     }
 }
 
@@ -1250,6 +1380,41 @@ fn command_arg<'a>(input: &'a str, command: &str) -> Option<&'a str> {
         .filter(|rest| rest.is_empty() || rest.starts_with(' '))
 }
 
+/// Replace this process with the current e binary, optionally in a new cwd.
+/// Extensions may choose arguments and environment, but never an arbitrary
+/// executable.
+fn relaunch_self(
+    cwd: &str,
+    args: &[String],
+    env: &std::collections::BTreeMap<String, Option<String>>,
+) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe()?;
+    let mut command = std::process::Command::new(exe);
+    command.current_dir(cwd).args(args);
+    for (name, value) in env {
+        if name.is_empty()
+            || name.contains('=')
+            || name.contains('\0')
+            || value.as_deref().is_some_and(|value| value.contains('\0'))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid relaunch environment entry",
+            ));
+        }
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    Err(command.exec())
+}
+
 fn key_of(event: &KeyEvent) -> Option<Key> {
     let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
     let alt = event.modifiers.contains(KeyModifiers::ALT);
@@ -1264,8 +1429,8 @@ fn key_of(event: &KeyEvent) -> Option<Key> {
         (KeyCode::Right, _, true) => Key::WordRight,
         (KeyCode::Left, ..) => Key::Left,
         (KeyCode::Right, ..) => Key::Right,
-        (KeyCode::Up, ..) => Key::HistoryPrev,
-        (KeyCode::Down, ..) => Key::HistoryNext,
+        (KeyCode::Up, ..) => Key::Up,
+        (KeyCode::Down, ..) => Key::Down,
         (KeyCode::Home, ..) => Key::Home,
         (KeyCode::End, ..) => Key::End,
         (KeyCode::Char('a'), true, _) => Key::Home,
@@ -1283,7 +1448,7 @@ fn key_of(event: &KeyEvent) -> Option<Key> {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-v") {
         println!("e {}", e::VERSION);
         return Ok(());
@@ -1302,12 +1467,29 @@ e -v, --version"
         );
         return Ok(());
     }
+    // Extensions start before normal argument parsing so the startup hook can
+    // consume custom flags and safely relaunch this same binary in a new cwd.
+    let (jobs_tx, mut jobs_rx) = tokio::sync::mpsc::channel::<String>(256);
+    let host = e::core::api::ExtensionHost::start(jobs_tx.clone()).await;
+    match host.startup(args).await {
+        Ok(e::core::api::StartupAction::Continue(next)) => args = next,
+        Ok(e::core::api::StartupAction::Relaunch { argv, request }) => {
+            host.shutdown().await;
+            return relaunch_self(&request.cwd, &argv, &request.env);
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            host.shutdown().await;
+            std::process::exit(1);
+        }
+    }
+
     if args.first().map(String::as_str) == Some("auth") {
         e::core::auth::login::auth_status();
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("ask") {
-        return ask(args[1..].join(" ")).await;
+        return ask(args[1..].join(" "), host).await;
     }
     if args.first().map(String::as_str) == Some("update") {
         if e::core::update::is_dev_build() {
@@ -1360,17 +1542,21 @@ e -v, --version"
     // Raw mode first: background detection needs the reply un-line-buffered.
     terminal::enable_raw_mode()?;
     let _guard = RawGuard;
-    execute!(std::io::stdout(), EnableBracketedPaste)?;
+    execute!(
+        std::io::stdout(),
+        EnableBracketedPaste,
+        // The kitty keyboard protocol: without it, terminals send plain Enter
+        // for shift+enter and multi-line entry is unreachable.
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
     let detected = e::tui::background::detect_light().unwrap_or(false);
     let theme = e::tui::theme::resolve(&e::core::config::settings::theme(), detected);
 
     let (cols, rows) = terminal::size()?;
     let mut screen = Screen::new(cols, rows);
     let (mut agent, mut session_events) = Agent::new(model::default_model());
-    let (jobs_tx, mut jobs_rx) = tokio::sync::mpsc::channel::<String>(16);
     let (logins_tx, mut logins_rx) = tokio::sync::mpsc::channel::<e::core::auth::login::Outcome>(4);
     let (results_tx, mut results_rx) = tokio::sync::mpsc::channel::<AppJob>(16);
-    let host = e::core::api::ExtensionHost::start(jobs_tx.clone()).await;
     agent.set_host(host.clone());
     let mut app = App {
         theme,
@@ -1396,6 +1582,7 @@ e -v, --version"
         trust: None,
         shell_block: None,
         reloading: false,
+        reload_block: None,
         outputs: Vec::new(),
         viewer: None,
         update_installed: None,
@@ -1721,10 +1908,7 @@ e -v, --version"
                         app.host = host.clone();
                         app.agent.set_host(host);
                         app.apply_theme();
-                        app.notice(
-                            "reloaded extensions, themes, and config — skills, prompts, and AGENTS.md are always read fresh"
-                                .into(),
-                        );
+                        finish_reload_notice(&mut app.transcript, app.reload_block.take());
                         for text in std::mem::take(&mut app.held_prompts) {
                             app.prompt(text);
                         }
@@ -1732,8 +1916,9 @@ e -v, --version"
                     Some(AppJob::Shell { cmd, output }) => {
                         // Display a trimmed tail in the live block; history
                         // gets the full (tool-truncated) output.
+                        let display_output = e::core::tools::sanitize_display(&output.content);
                         let shown: String = {
-                            let lines: Vec<&str> = output.content.lines().collect();
+                            let lines: Vec<&str> = display_output.lines().collect();
                             let tail = &lines[lines.len().saturating_sub(20)..];
                             let mut text = tail.join("\n");
                             if lines.len() > 20 {
@@ -1744,13 +1929,13 @@ e -v, --version"
                         if let Some(idx) = app.shell_block.take() {
                             if let Some(block) = app.transcript.blocks.get_mut(idx) {
                                 block.done = true;
-                                block.is_error = output.is_error;
+                                block.is_error = output.is_error();
                                 block.detail = Some(shown);
                                 block.touch();
                             }
                         }
                         if !output.content.trim().is_empty() {
-                            app.remember_output(format!("$ {cmd}"), output.content.clone());
+                            app.remember_output(format!("$ {cmd}"), display_output);
                         }
                         app.agent.record_user(format!(
                             "I ran `{cmd}` in my shell. Output:\n```\n{}\n```",
@@ -1811,7 +1996,11 @@ e -v, --version"
     }
 
     app.host.shutdown().await;
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    let _ = execute!(
+        std::io::stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste
+    );
     drop(_guard);
     let mut out = std::io::stdout();
     write!(out, "\r\n\x1b[?25h")?;
@@ -1819,10 +2008,13 @@ e -v, --version"
     if app.relaunch {
         // The terminal is restored and the host is down: replace this
         // process with the updated binary, continuing the same session.
-        use std::os::unix::process::CommandExt;
-        if let Ok(exe) = std::env::current_exe() {
-            let err = std::process::Command::new(exe).arg("-c").exec();
-            eprintln!("relaunch failed: {err} — start e again by hand");
+        let cwd = std::env::current_dir()
+            .unwrap_or_default()
+            .display()
+            .to_string();
+        let args = vec!["-c".to_string()];
+        if let Err(error) = relaunch_self(&cwd, &args, &std::collections::BTreeMap::new()) {
+            eprintln!("relaunch failed: {error} — start e again by hand");
         }
     }
     Ok(())
@@ -1832,7 +2024,10 @@ e -v, --version"
 /// the full styled look once complete (tool activity streams as dim rows);
 /// piped, raw text streams to stdout as it arrives. The session is saved
 /// like any other, so `e -c` picks it up.
-async fn ask(prompt: String) -> std::io::Result<()> {
+async fn ask(
+    prompt: String,
+    host: std::sync::Arc<e::core::api::ExtensionHost>,
+) -> std::io::Result<()> {
     if prompt.trim().is_empty() {
         eprintln!("usage: e ask \"prompt\"");
         std::process::exit(2);
@@ -1845,8 +2040,7 @@ async fn ask(prompt: String) -> std::io::Result<()> {
         .min(100);
 
     let (mut agent, mut events) = Agent::new(model::default_model());
-    let host = e::core::api::ExtensionHost::empty();
-    agent.set_host(host);
+    agent.set_host(host.clone());
     agent.submit(prompt, system_prompt());
 
     use std::io::Write as _;
@@ -1862,15 +2056,33 @@ async fn ask(prompt: String) -> std::io::Result<()> {
                     let _ = std::io::stdout().flush();
                 }
             }
-            SessionEvent::ToolStart { verb, target, .. } => {
+            SessionEvent::ToolBatchStart { calls } => {
                 if tty {
-                    println!("{}", theme.fg("dim", &format!("● {verb} {target}")));
+                    println!(
+                        "{}",
+                        theme.fg(
+                            "dim",
+                            &format!(
+                                "● {} tool call{}",
+                                calls.len(),
+                                if calls.len() == 1 { "" } else { "s" }
+                            )
+                        )
+                    );
+                }
+            }
+            SessionEvent::ToolStart { .. } => {}
+            SessionEvent::ToolOutput { chunk, .. } => {
+                if tty {
+                    for line in chunk.lines() {
+                        println!("{}", theme.fg("dim", &format!("│ {line}")));
+                    }
                 }
             }
             SessionEvent::ToolEnd {
-                summary, is_error, ..
+                summary, outcome, ..
             } => {
-                if tty && is_error {
+                if tty && outcome.is_error() {
                     println!("{}", theme.fg("dim", &format!("└ {summary}")));
                 }
             }
@@ -1894,6 +2106,7 @@ async fn ask(prompt: String) -> std::io::Result<()> {
     if !tty {
         println!();
     }
+    host.shutdown().await;
     if failed {
         std::process::exit(1);
     }
@@ -1909,5 +2122,26 @@ struct RawGuard;
 impl Drop for RawGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reload_result_replaces_the_in_progress_notice() {
+        let mut transcript = Transcript::default();
+        let reload_block = transcript.push(Block::new(Kind::Notice, "reloading…"));
+        transcript.push(Block::new(Kind::Notice, "an unrelated notice"));
+
+        finish_reload_notice(&mut transcript, Some(reload_block));
+
+        assert_eq!(transcript.blocks.len(), 2);
+        assert_eq!(
+            transcript.blocks[reload_block].text,
+            "reloaded extensions, themes, and config — skills, prompts, and AGENTS.md are always read fresh"
+        );
+        assert_eq!(transcript.blocks[1].text, "an unrelated notice");
     }
 }
