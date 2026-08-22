@@ -9,24 +9,20 @@
   supporting terminals (alt+enter remains the universal fallback).
 - Sessions begin only with user intent. Merely opening and closing e creates no
   session, and `/resume` plus `-c` ignore header-only or assistant-only logs.
-- Reference-grammar pass, from frame-by-frame comparison against the
-  reference design: tool
-  groups run flush left at column zero; command pipe rows render only while a
-  command owns focus and are withdrawn on completion (full output stays behind
-  ctrl+o); reasoning summaries are counted but never drawn; the user rail and
-  composer use the thin `|`; thinking shows token estimates from the first
-  second; tool batches execute concurrently with results committed in source
-  order; turns end with the reference's dim duration-and-tokens trailer;
-  cancellation reads `● System: cancelled`.
-- Tool calls now have one lifecycle-driven transcript projection. Provider
-  batches group from first start, including single calls; running labels turn
-  into completed, failed, timed-out, blocked, or cancelled labels in place;
-  command pipes stream live in observed stdout/stderr order; compact previews
-  keep the five-row budget and put process status before the expansion hint.
-  Full workspace-relative targets, explicit ellipsis clipping, focused-marker
-  blinking, mutation statistics and diff previews, bounded detail retention,
-  and tool-result resume metadata complete the surface. Responses now
-  advertise serial execution truthfully.
+- Reference-grammar pass over the tool surface, from frame-by-frame comparison
+  against the reference design's own recordings: provider batches group from
+  first start (single calls included) at column zero, with stable child order
+  and in-place gerund-to-terminal transitions; command pipes stream live only
+  while a command owns focus and are withdrawn on completion, full output
+  staying behind ctrl+o; batches execute concurrently with results committed
+  in assistant source order; failures tally in the header and wear their own
+  label; full workspace-relative targets clip with an explicit ellipsis; the
+  focused marker blinks and activity no longer duplicates as a footer row;
+  reasoning summaries are counted but never drawn; thinking shows token
+  estimates from the first second; turns end with the reference's dim
+  duration-and-tokens trailer while cancellation reads `● System:
+  cancelled`; and tool results persist outcome metadata so resume rebuilds
+  groups faithfully.
 - Extensions may advertise a fatal `startup` hook that rewrites raw argv,
   adjusts environment variables, and requests a same-binary relaunch in a new
   cwd — enough to build managed Git worktree launches (`-w`) as plain

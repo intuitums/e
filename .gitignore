@@ -26,4 +26,4 @@ __pycache__/
 # never ship from here (force-add with -f if something belongs in-repo).
 /examples/
 workspaces.py
-collect.sh
+.build/

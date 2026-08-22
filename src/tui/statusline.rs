@@ -17,9 +17,6 @@ pub struct Turn {
     pub output: u64,
     pub estimated_output: u64,
     streamed_chars: u64,
-    /// True while the counters hold a request-size seed rather than real
-    /// usage; the first Usage event replaces them.
-    pub seeded: bool,
     pub phase: TurnPhase,
 }
 
@@ -36,7 +33,6 @@ impl Turn {
             output: 0,
             estimated_output: 0,
             streamed_chars: 0,
-            seeded: false,
             phase: TurnPhase::Thinking,
         }
     }

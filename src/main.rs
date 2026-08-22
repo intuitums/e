@@ -948,7 +948,6 @@ impl App {
                             .map(|m| m.content.chars().count())
                             .sum::<usize>();
                     s.turn.input = (chars / 4) as u64;
-                    s.turn.seeded = true;
                 }
             }
             SessionEvent::Steered(text) => {
