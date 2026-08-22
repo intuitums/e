@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- Composer typing feel: drafts word-wrap (a word that crosses the edge
+  comes down whole instead of tearing mid-letter); ↑/↓ move between wrapped
+  or multi-line rows, falling back to history recall at the edges; and the
+  kitty keyboard protocol is enabled so shift+enter inserts a newline in
+  supporting terminals (alt+enter remains the universal fallback).
+- Sessions begin only with user intent. Merely opening and closing e creates no
+  session, and `/resume` plus `-c` ignore header-only or assistant-only logs.
+- Reference-grammar pass, from frame-by-frame comparison against the
+  reference design: tool
+  groups run flush left at column zero; command pipe rows render only while a
+  command owns focus and are withdrawn on completion (full output stays behind
+  ctrl+o); reasoning summaries are counted but never drawn; the user rail and
+  composer use the thin `|`; thinking shows token estimates from the first
+  second; tool batches execute concurrently with results committed in source
+  order; turns end with the reference's dim duration-and-tokens trailer;
+  cancellation reads `● System: cancelled`.
+- Tool calls now have one lifecycle-driven transcript projection. Provider
+  batches group from first start, including single calls; running labels turn
+  into completed, failed, timed-out, blocked, or cancelled labels in place;
+  command pipes stream live in observed stdout/stderr order; compact previews
+  keep the five-row budget and put process status before the expansion hint.
+  Full workspace-relative targets, explicit ellipsis clipping, focused-marker
+  blinking, mutation statistics and diff previews, bounded detail retention,
+  and tool-result resume metadata complete the surface. Responses now
+  advertise serial execution truthfully.
+- Extensions may advertise a fatal `startup` hook that rewrites raw argv,
+  adjusts environment variables, and requests a same-binary relaunch in a new
+  cwd — enough to build managed Git worktree launches (`-w`) as plain
+  extensions. Broader capability parity with the leading harnesses over e's
+  language-neutral line protocol is on the roadmap.
+- `/reload` replaces its `reloading…` notice with the completion text instead
+  of appending a second transcript line.
+
 ## 0.4.1 — 2026-08-21
 
 - Release notes now carry the version's changelog section and install
@@ -244,10 +277,10 @@
 - JSONL sessions under `~/.e/sessions/<cwd-slug>/`; `-c` and `/resume`.
 - Context: system prompt (overridable via `settings.json`), global and
   project `AGENTS.md`, skills catalog.
-- The full fx-shape TUI in Rust: line-differ renderer, markdown, code
+- The full reference-shape TUI in Rust: line-differ renderer, markdown, code
   panels, pickers, settings, auth panel — pinned by the parity suite.
 
 ## 0.1.0 — 2026-08
 
-- First release: a TypeScript TUI frontend with the fx visual design and
+- First release: a TypeScript TUI frontend with the reference visual design and
   the byte-for-byte parity test suite that still governs the look.

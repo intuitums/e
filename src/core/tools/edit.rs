@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
-use super::{resolve, schema_object, ToolOutput};
+use super::{resolve, schema_object, ToolOutcome, ToolOutput};
 
 pub fn schema() -> Value {
     schema_object(
@@ -21,7 +21,7 @@ pub fn schema() -> Value {
 pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
     let err = |m: String| ToolOutput {
         content: m,
-        is_error: true,
+        outcome: ToolOutcome::Failed,
         summary: "error".into(),
     };
     let Some(path) = args["path"].as_str() else {
@@ -48,10 +48,27 @@ pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
     match std::fs::write(&full, &updated) {
         Ok(()) => {
             let delta = updated.lines().count() as isize - text.lines().count() as isize;
+            let additions = new.lines().count();
+            let deletions = old.lines().count();
+            let mut detail = format!("edited {path}");
+            if !old.is_empty() || !new.is_empty() {
+                detail.push_str("\n--- before\n");
+                for line in old.lines() {
+                    detail.push_str(&format!("-{line}\n"));
+                }
+                detail.push_str("+++ after\n");
+                for line in new.lines() {
+                    detail.push_str(&format!("+{line}\n"));
+                }
+            }
             ToolOutput {
-                content: format!("edited {path}"),
-                is_error: false,
-                summary: format!("{delta:+} lines"),
+                content: super::truncate(detail.trim_end().to_string()),
+                outcome: ToolOutcome::Completed,
+                summary: if additions == 0 && deletions == 0 {
+                    format!("{delta:+} lines")
+                } else {
+                    format!("+{additions} -{deletions}")
+                },
             }
         }
         Err(e) => err(format!("edit {path}: {e}")),

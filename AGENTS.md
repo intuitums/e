@@ -53,8 +53,8 @@ src/main.rs  the frame loop, key handling, command dispatch
 
 Every colour comes from the theme (`theme.fg("token", text)`), never a raw SGR
 literal — the palette is the single source of truth, and it is the reference
-design's, audited value-for-value. Dividers are the `border` token (fx's
-`divider_style`, 240/250), not `dim`. Selection is brightness alone — bold
+design's, audited value-for-value. Dividers are the `border` token
+(divider_style, 240/250), not `dim`. Selection is brightness alone — bold
 bright ink for the current row, `dim` for the rest, no caret.
 
 Every footer surface (the `/@$` pickers, `/settings`) frames through

@@ -51,23 +51,40 @@ fn clone_request(r: &Request) -> Request {
     }
 }
 
+/// Presentation contract for one call in a provider-issued tool batch.
+#[derive(Clone, Debug)]
+pub struct ToolCallPresentation {
+    pub id: u64,
+    pub category: String,
+    pub running: String,
+    pub completed: String,
+    pub target: String,
+}
+
 #[derive(Debug)]
 pub enum SessionEvent {
     TurnStart,
     TextDelta(String),
     ReasoningDelta(String),
-    /// A tool is about to run: display verb + target.
+    /// All calls from one assistant message, known before serial execution.
+    ToolBatchStart {
+        calls: Vec<ToolCallPresentation>,
+    },
+    /// One member of the batch now owns execution focus.
     ToolStart {
         id: u64,
-        verb: String,
-        target: String,
     },
-    /// A tool finished: its one-line summary, whether it errored, and the
-    /// full (already tool-truncated) output for the preview and the viewer.
+    /// A command pipe chunk observed before process completion.
+    ToolOutput {
+        id: u64,
+        stream: tools::OutputStream,
+        chunk: String,
+    },
+    /// A tool finished with a typed outcome and bounded full output.
     ToolEnd {
         id: u64,
+        outcome: tools::ToolOutcome,
         summary: String,
-        is_error: bool,
         content: String,
     },
     Usage {
@@ -340,6 +357,7 @@ impl Agent {
                             content: item,
                             tool_calls: Vec::new(),
                             tool_call_id: None,
+                            tool_meta: None,
                         },
                     );
                 }
@@ -362,33 +380,92 @@ impl Agent {
                     break false;
                 }
 
-                // Run each tool (yolo: no gate), append results, loop.
-                for call in calls {
+                // Resolve the complete batch before serial execution so the
+                // transcript has one stable group from the first call.
+                let mut batch = Vec::with_capacity(calls.len());
+                for call in &calls {
                     let args: serde_json::Value =
                         serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
-                    let (verb, target) = tools::present(&call.name, &args);
+                    let presentation = tools::present(&call.name, &args);
                     tool_seq += 1;
-                    let id = tool_seq;
-                    let _ = events
-                        .send(SessionEvent::ToolStart { id, verb, target })
-                        .await;
+                    batch.push((
+                        tool_seq,
+                        call.clone(),
+                        ToolCallPresentation {
+                            id: tool_seq,
+                            category: presentation.category,
+                            running: presentation.running,
+                            completed: presentation.completed,
+                            target: presentation.target,
+                        },
+                    ));
+                }
+                let _ = events
+                    .send(SessionEvent::ToolBatchStart {
+                        calls: batch.iter().map(|(_, _, shown)| shown.clone()).collect(),
+                    })
+                    .await;
 
-                    let output = run_tool(&host, &call.name, &call.arguments, &cwd).await;
-                    let _ = events
-                        .send(SessionEvent::ToolEnd {
-                            id,
-                            summary: output.summary.clone(),
-                            is_error: output.is_error,
-                            content: output.content.clone(),
-                        })
-                        .await;
+                // Run the batch concurrently (the reference behavior): every
+                // child streams its own lifecycle on the shared channel as it
+                // progresses. Results commit in assistant source order.
+                let mut handles = Vec::with_capacity(batch.len());
+                for (id, call, _) in batch {
+                    let host = host.clone();
+                    let cancel = cancel.clone();
+                    let events = events.clone();
+                    let cwd = cwd.clone();
+                    handles.push((
+                        call.clone(),
+                        tokio::spawn(async move {
+                            let _ = events.send(SessionEvent::ToolStart { id }).await;
+                            let output = run_tool(
+                                &host,
+                                &call.name,
+                                &call.arguments,
+                                &cwd,
+                                cancel,
+                                id,
+                                events.clone(),
+                            )
+                            .await;
+                            let _ = events
+                                .send(SessionEvent::ToolEnd {
+                                    id,
+                                    outcome: output.outcome,
+                                    summary: output.summary.clone(),
+                                    content: output.content.clone(),
+                                })
+                                .await;
+                            output
+                        }),
+                    ));
+                }
+
+                for (call, handle) in handles {
+                    let output = match handle.await {
+                        Ok(output) => output,
+                        Err(_) => tools::ToolOutput {
+                            content: "tool panicked".into(),
+                            outcome: tools::ToolOutcome::Failed,
+                            summary: "error".into(),
+                        },
+                    };
                     commit(
                         &history,
                         &session,
                         &cwd,
                         &model,
-                        ChatMessage::tool_result(call.id, output.content),
+                        ChatMessage::tool_result_with_meta(
+                            call.id,
+                            output.content,
+                            output.outcome,
+                            output.summary,
+                        ),
                     );
+                }
+                if cancel.load(Ordering::SeqCst) {
+                    break 'turn true;
                 }
             };
             let _ = events.send(SessionEvent::TurnEnd { aborted }).await;
@@ -421,36 +498,63 @@ async fn run_tool(
     name: &str,
     arguments: &str,
     cwd: &std::path::Path,
+    cancel: Arc<AtomicBool>,
+    id: u64,
+    events: mpsc::Sender<SessionEvent>,
 ) -> tools::ToolOutput {
     if let Some(h) = host {
         if let Some(reason) = h.hook_tool_call(name, arguments).await {
             return tools::ToolOutput {
                 content: format!("Tool call blocked by extension: {reason}"),
-                is_error: true,
+                outcome: tools::ToolOutcome::Blocked,
                 summary: "blocked".into(),
             };
         }
         if h.owns_tool(name) {
-            let result = h.call_tool(name, arguments).await;
-            return tools::ToolOutput {
-                content: result.content,
-                is_error: result.is_error,
-                summary: if result.is_error {
-                    "error".into()
-                } else {
-                    "done".into()
-                },
-            };
+            let call = h.call_tool(name, arguments);
+            tokio::pin!(call);
+            loop {
+                tokio::select! {
+                    result = &mut call => {
+                        let outcome = if result.is_error {
+                            tools::ToolOutcome::Failed
+                        } else {
+                            tools::ToolOutcome::Completed
+                        };
+                        return tools::ToolOutput {
+                            content: result.content,
+                            outcome,
+                            summary: if outcome.is_error() { "error".into() } else { "done".into() },
+                        };
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                        if cancel.load(Ordering::SeqCst) {
+                            return tools::ToolOutput {
+                                content: "extension tool cancelled".into(),
+                                outcome: tools::ToolOutcome::Cancelled,
+                                summary: "cancelled".into(),
+                            };
+                        }
+                    }
+                }
+            }
         }
     }
     let name = name.to_string();
     let arguments = arguments.to_string();
     let cwd = cwd.to_path_buf();
-    tokio::task::spawn_blocking(move || tools::run(&name, &arguments, &cwd))
-        .await
-        .unwrap_or(tools::ToolOutput {
-            content: "tool panicked".into(),
-            is_error: true,
-            summary: "error".into(),
+    tokio::task::spawn_blocking(move || {
+        tools::run_streaming(&name, &arguments, &cwd, &cancel, |stream, chunk| {
+            let chunk = tools::sanitize_display(chunk);
+            if !chunk.is_empty() {
+                let _ = events.blocking_send(SessionEvent::ToolOutput { id, stream, chunk });
+            }
         })
+    })
+    .await
+    .unwrap_or(tools::ToolOutput {
+        content: "tool panicked".into(),
+        outcome: tools::ToolOutcome::Failed,
+        summary: "error".into(),
+    })
 }

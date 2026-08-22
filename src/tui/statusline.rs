@@ -3,25 +3,25 @@
 use crate::core::output::{compact_model_label, format_tokens};
 use crate::tui::markdown::visible_width;
 use crate::tui::theme::Theme;
-use std::collections::BTreeMap;
-
-/// Per-turn activity: verb, tool tally, token flow, clock.
-pub struct Turn {
-    pub counts: BTreeMap<&'static str, u64>,
-    pub last_verb: Option<&'static str>,
-    pub input: u64,
-    pub output: u64,
-    pub started_at: std::time::Instant,
+/// Which transient progress surface owns the current turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnPhase {
+    Thinking,
+    Tool,
+    AssistantText,
 }
 
-const TOOLS: &[(&str, &str, &str, &str, &str)] = &[
-    // name, verb, singular, plural, past
-    ("read", "reading", "file", "files", "read"),
-    ("ls", "listing", "directory", "directories", "listed"),
-    ("write", "writing", "file", "files", "wrote"),
-    ("edit", "editing", "file", "files", "edited"),
-    ("bash", "running", "command", "commands", "started"),
-];
+/// Per-turn token flow and focused activity phase.
+pub struct Turn {
+    pub input: u64,
+    pub output: u64,
+    pub estimated_output: u64,
+    streamed_chars: u64,
+    /// True while the counters hold a request-size seed rather than real
+    /// usage; the first Usage event replaces them.
+    pub seeded: bool,
+    pub phase: TurnPhase,
+}
 
 impl Default for Turn {
     fn default() -> Self {
@@ -32,74 +32,52 @@ impl Default for Turn {
 impl Turn {
     pub fn new() -> Self {
         Turn {
-            counts: BTreeMap::new(),
-            last_verb: None,
             input: 0,
             output: 0,
-            started_at: std::time::Instant::now(),
+            estimated_output: 0,
+            streamed_chars: 0,
+            seeded: false,
+            phase: TurnPhase::Thinking,
         }
     }
 
-    /// Count a tool by the display verb the agent already resolved.
-    pub fn note_tool_verb(&mut self, verb: &str) {
-        let name = match verb {
-            "Read" | "Searched" | "Listed" => "read",
-            "Wrote" => "write",
-            "Edited" => "edit",
-            "Ran" => "bash",
-            _ => return,
-        };
-        if let Some((k, v, ..)) = TOOLS.iter().find(|(n, ..)| *n == name) {
-            *self.counts.entry(k).or_insert(0) += 1;
-            self.last_verb = Some(v);
-        }
+    pub fn note_text(&mut self, text: &str) {
+        self.streamed_chars = self
+            .streamed_chars
+            .saturating_add(text.chars().count() as u64);
+        self.estimated_output = self.streamed_chars.div_ceil(4);
     }
 
-    pub fn note_tool(&mut self, name: &str) {
-        let key = match name {
-            "find" | "grep" | "glob" => "read",
-            other => other,
-        };
-        if let Some((k, verb, ..)) = TOOLS.iter().find(|(n, ..)| *n == key) {
-            *self.counts.entry(k).or_insert(0) += 1;
-            self.last_verb = Some(verb);
-        }
-    }
-
-    pub fn label(&self, elapsed_secs: u64) -> String {
-        let tokens = if self.input == 0 && self.output == 0 {
+    pub fn tokens(&self) -> String {
+        let output = self.output.max(self.estimated_output);
+        if self.input == 0 && output == 0 {
             String::new()
         } else {
             format!(
-                " (↑{} ↓{})",
+                "(↑{} ↓{})",
                 format_tokens(self.input),
-                format_tokens(self.output)
+                format_tokens(output)
             )
-        };
-        match self.last_verb {
-            None => {
-                let clock = if elapsed_secs >= 3 {
-                    format!(" ({elapsed_secs}s)")
-                } else {
+        }
+    }
+
+    /// The tool phase renders inside its transcript group, not in a duplicate
+    /// footer row. Assistant text needs only markerless token progress.
+    pub fn label(&self, elapsed_secs: u64) -> Option<String> {
+        match self.phase {
+            TurnPhase::Thinking => {
+                let tokens = self.tokens();
+                let suffix = if tokens.is_empty() {
                     String::new()
-                };
-                format!("Thinking{clock}{tokens}")
-            }
-            Some(verb) => {
-                let mut parts = Vec::new();
-                for (name, _, singular, plural, past) in TOOLS {
-                    if let Some(&count) = self.counts.get(name) {
-                        if count > 0 {
-                            let noun = if count == 1 { singular } else { plural };
-                            parts.push(format!("{count} {noun} {past}"));
-                        }
-                    }
-                }
-                if parts.is_empty() {
-                    format!("{verb}{tokens}")
                 } else {
-                    format!("{verb} | {}{tokens}", parts.join(", "))
-                }
+                    format!(" {tokens}")
+                };
+                Some(format!("Thinking ({elapsed_secs}s){suffix}"))
+            }
+            TurnPhase::Tool => None,
+            TurnPhase::AssistantText => {
+                let tokens = self.tokens();
+                (!tokens.is_empty()).then_some(tokens)
             }
         }
     }
@@ -162,4 +140,26 @@ pub fn statusline(
         }
     }
     vec![String::new(), line]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Turn, TurnPhase};
+
+    #[test]
+    fn activity_has_one_owner_per_phase() {
+        let mut turn = Turn::new();
+        assert_eq!(turn.label(0).as_deref(), Some("Thinking (0s)"));
+
+        turn.phase = TurnPhase::Tool;
+        assert_eq!(turn.label(1), None, "the focused group owns tool activity");
+
+        turn.input = 1_000;
+        turn.output = 20;
+        turn.phase = TurnPhase::AssistantText;
+        assert_eq!(turn.label(2).as_deref(), Some("(↑1k ↓20)"));
+
+        turn.phase = TurnPhase::Thinking;
+        assert_eq!(turn.label(3).as_deref(), Some("Thinking (3s) (↑1k ↓20)"));
+    }
 }

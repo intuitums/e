@@ -1,8 +1,9 @@
 //! The composer: a `┃`-railed editor at column zero, no rules, no tint.
 //!
-//! Fixed v1 key set: insert/delete, arrows, home/end, word-left/right,
-//! ctrl+a/e/k/u/w, history up/down, shift+enter (or alt+enter) newline.
-//! Anything else waits until asked for.
+//! Fixed v1 key set: insert/delete, arrows (line movement in wrapped or
+//! multi-line drafts, history at the edges), home/end, word-left/right,
+//! ctrl+a/e/k/u/w, shift+enter (or alt+enter) newline. Anything else waits
+//! until asked for.
 
 use crate::tui::theme::Theme;
 
@@ -17,6 +18,9 @@ pub struct Editor {
     history: Vec<String>,
     history_pos: Option<usize>,
     draft: String,
+    /// Inner width from the latest render; vertical arrow keys need the
+    /// visual layout to know whether a line movement is possible.
+    inner_width: Option<usize>,
 }
 
 pub enum EditorResult {
@@ -31,6 +35,49 @@ impl Default for Editor {
     }
 }
 
+/// Wrap one buffer into visual rows of at most `inner` columns. Breaks at
+/// word boundaries whenever the row has one — a word that would cross the
+/// edge comes down whole; only space-less runs hard-break mid-word.
+fn layout_rows(chars: &[char], inner: usize) -> Vec<VisualRow> {
+    let mut rows = Vec::new();
+    let mut i = 0usize;
+    loop {
+        if i >= chars.len() {
+            rows.push(VisualRow { start: i, end: i });
+            break;
+        }
+        if chars[i] == '\n' {
+            rows.push(VisualRow { start: i, end: i });
+            i += 1;
+            continue;
+        }
+        // Consume one visual row, remembering the last word boundary.
+        let mut j = i;
+        let mut col = 0usize;
+        let mut brk: Option<usize> = None;
+        while j < chars.len() && chars[j] != '\n' && col < inner {
+            if chars[j].is_whitespace() {
+                brk = Some(j + 1);
+            }
+            col += 1;
+            j += 1;
+        }
+        if j < chars.len() && chars[j] != '\n' {
+            // Row full with more line remaining: prefer the word boundary.
+            let end = brk.filter(|&b| b > i).unwrap_or(j);
+            rows.push(VisualRow { start: i, end });
+            i = end;
+        } else {
+            rows.push(VisualRow { start: i, end: j });
+            if j >= chars.len() {
+                break;
+            }
+            i = j + 1; // step over the newline
+        }
+    }
+    rows
+}
+
 impl Editor {
     pub fn new() -> Self {
         Editor {
@@ -42,11 +89,16 @@ impl Editor {
             draft: String::new(),
             pastes: Vec::new(),
             paste_seq: 0,
+            inner_width: None,
         }
     }
 
     pub fn text(&self) -> String {
         self.text.iter().collect()
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
     }
 
     pub fn set_text(&mut self, s: &str) {
@@ -128,6 +180,64 @@ impl Editor {
         }
     }
 
+    /// Vertical arrows: move between visual rows of the draft when there is
+    /// one above/below — preserving the column where possible — otherwise
+    /// fall through to input history recall, the single-line behavior.
+    fn move_line(&mut self, direction: isize) {
+        let Some(inner) = self.inner_width else {
+            return;
+        };
+        let chars: Vec<char> = self.text.clone();
+        let rows = layout_rows(&chars, inner);
+        let Some(index) = rows.iter().position(|row| row.contains(self.cursor)) else {
+            return;
+        };
+        let target = match direction {
+            -1 if index > 0 => Some(&rows[index - 1]),
+            1 if index + 1 < rows.len() => Some(&rows[index + 1]),
+            _ => None,
+        };
+        if let Some(target) = target {
+            let col = self.cursor.saturating_sub(rows[index].start);
+            self.cursor = (target.start + col).min(target.end);
+            return;
+        }
+        // At the top or bottom edge: history recall.
+        match direction {
+            -1 => {
+                if self.history.is_empty() {
+                    return;
+                }
+                match self.history_pos {
+                    None => {
+                        self.draft = self.text();
+                        self.history_pos = Some(self.history.len() - 1);
+                    }
+                    Some(0) => {}
+                    Some(p) => self.history_pos = Some(p - 1),
+                }
+                if let Some(p) = self.history_pos {
+                    let entry = self.history[p].clone();
+                    self.set_text(&entry);
+                    self.history_pos = Some(p);
+                }
+            }
+            _ => match self.history_pos {
+                Some(p) if p + 1 < self.history.len() => {
+                    let entry = self.history[p + 1].clone();
+                    self.set_text(&entry);
+                    self.history_pos = Some(p + 1);
+                }
+                Some(_) => {
+                    let draft = self.draft.clone();
+                    self.set_text(&draft);
+                    self.history_pos = None;
+                }
+                None => {}
+            },
+        }
+    }
+
     pub fn key(&mut self, key: Key) -> EditorResult {
         use EditorResult::*;
         match key {
@@ -175,6 +285,14 @@ impl Editor {
                 self.cursor = self.word_right();
                 Consumed
             }
+            Key::Up => {
+                self.move_line(-1);
+                Consumed
+            }
+            Key::Down => {
+                self.move_line(1);
+                Consumed
+            }
             Key::Home => {
                 self.cursor = 0;
                 Consumed
@@ -198,50 +316,15 @@ impl Editor {
                 self.cursor = start;
                 Consumed
             }
-            Key::HistoryPrev => {
-                if self.history.is_empty() {
-                    return Consumed;
-                }
-                match self.history_pos {
-                    None => {
-                        self.draft = self.text();
-                        self.history_pos = Some(self.history.len() - 1);
-                    }
-                    Some(0) => {}
-                    Some(p) => self.history_pos = Some(p - 1),
-                }
-                if let Some(p) = self.history_pos {
-                    let entry = self.history[p].clone();
-                    self.set_text(&entry);
-                    self.history_pos = Some(p);
-                }
-                Consumed
-            }
-            Key::HistoryNext => {
-                match self.history_pos {
-                    None => {}
-                    Some(p) if p + 1 < self.history.len() => {
-                        let entry = self.history[p + 1].clone();
-                        self.set_text(&entry);
-                        self.history_pos = Some(p + 1);
-                    }
-                    Some(_) => {
-                        let draft = self.draft.clone();
-                        self.set_text(&draft);
-                        self.history_pos = None;
-                    }
-                }
-                Consumed
-            }
         }
     }
 
     /// Render the composer band: leading blank, then railed rows with a
     /// reverse-video cursor cell.
-    pub fn render(&self, theme: &Theme, width: usize) -> Vec<String> {
+    pub fn render(&mut self, theme: &Theme, width: usize) -> Vec<String> {
         // A draft starting with `!` is a shell command: the rail turns the
         // bash-mode color — the whole indicator, no words (the reference
-        // convention: pi flips its editor border the same way).
+        // convention: the reference flips its editor border the same way).
         let rail_token =
             if !self.mask && self.text.iter().find(|c| !c.is_whitespace()) == Some(&'!') {
                 "bashMode"
@@ -250,71 +333,64 @@ impl Editor {
             };
         let rail = format!("{} ", theme.fg(rail_token, "┃"));
         let inner = width.saturating_sub(2).max(8);
-        let mut rows = vec![String::new()];
+        self.inner_width = Some(inner);
+        let mut out = vec![String::new()];
 
-        // Logical lines wrap to `inner`-wide visual rows, every row carrying
-        // the rail — the reference shape. The cursor maps to its visual row.
+        // Logical lines wrap at word boundaries to `inner`-wide visual rows,
+        // every row carrying the rail. The cursor maps to its visual row.
         let text = if self.mask {
             "•".repeat(self.text.len())
         } else {
             self.text()
         };
-        let mut consumed = 0usize;
-        let logical: Vec<&str> = if text.is_empty() {
-            vec![""]
-        } else {
-            text.split('\n').collect()
-        };
-        for (li, line) in logical.iter().enumerate() {
-            let line_start = consumed;
-            let chars: Vec<char> = line.chars().collect();
-            consumed += chars.len() + 1; // + the newline
-            let cursor_here = self.cursor >= line_start
-                && self.cursor <= line_start + chars.len()
-                && (li + 1 == logical.len() || self.cursor < consumed);
-            let cursor_col = if cursor_here {
-                Some(self.cursor - line_start)
+        let chars: Vec<char> = text.chars().collect();
+        let rows = layout_rows(&chars, inner);
+        let last = rows.len() - 1;
+        for (index, row) in rows.iter().enumerate() {
+            let slice = &chars[row.start..row.end];
+            let full_final_row = index == last
+                && self.cursor == self.text.len()
+                && self.cursor == row.end
+                && row.end - row.start == inner;
+            let cursor_here = self.cursor >= row.start && self.cursor <= row.end;
+            let rendered = if cursor_here && !full_final_row {
+                let at = self.cursor - row.start;
+                let before: String = slice[..at].iter().collect();
+                let cursor_char = slice
+                    .get(at)
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| " ".into());
+                let after: String = slice[at..].iter().skip(1).collect();
+                format!("{before}\x1b[7m{cursor_char}\x1b[27m{after}")
             } else {
-                None
+                slice.iter().collect()
             };
-
-            // Visual rows: chunks of `inner` chars; the cursor resting past a
-            // full final chunk needs one extra empty row to sit on.
-            let mut chunk_count = chars.len().div_ceil(inner).max(1);
-            if cursor_col == Some(chars.len())
-                && !chars.is_empty()
-                && chars.len().is_multiple_of(inner)
-            {
-                chunk_count += 1;
-            }
-            for row in 0..chunk_count {
-                let begin = row * inner;
-                let slice: &[char] = if begin < chars.len() {
-                    &chars[begin..(begin + inner).min(chars.len())]
-                } else {
-                    &[]
-                };
-                let rendered = match cursor_col {
-                    Some(col) if col >= begin && col < begin + inner => {
-                        let at = col - begin;
-                        let before: String = slice[..at.min(slice.len())].iter().collect();
-                        let cursor_char = slice
-                            .get(at)
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| " ".into());
-                        let after: String = if at < slice.len() {
-                            slice[at + 1..].iter().collect()
-                        } else {
-                            String::new()
-                        };
-                        format!("{before}\x1b[7m{cursor_char}\x1b[27m{after}")
-                    }
-                    _ => slice.iter().collect(),
-                };
-                rows.push(format!("{rail}{rendered}"));
-            }
+            out.push(format!("{rail}{rendered}"));
         }
-        rows
+        // A cursor resting past a full final row needs one extra empty row.
+        if rows.last().is_some_and(|row| {
+            self.cursor == self.text.len()
+                && !self.text.is_empty()
+                && self.cursor == row.end
+                && row.end - row.start == inner
+        }) {
+            out.push(format!("{rail}\x1b[7m \x1b[27m"));
+        }
+        out
+    }
+}
+
+/// One visual row: an absolute char range in the buffer. Newline characters
+/// belong to no row — they are zero-width row terminators.
+struct VisualRow {
+    start: usize,
+    end: usize,
+}
+
+impl VisualRow {
+    /// A newline-positioned cursor belongs to the row it terminates.
+    fn contains(&self, cursor: usize) -> bool {
+        cursor >= self.start && cursor <= self.end
     }
 }
 
@@ -326,6 +402,8 @@ pub enum Key {
     Delete,
     Left,
     Right,
+    Up,
+    Down,
     WordLeft,
     WordRight,
     Home,
@@ -333,6 +411,4 @@ pub enum Key {
     KillToEnd,
     KillToStart,
     KillWord,
-    HistoryPrev,
-    HistoryNext,
 }

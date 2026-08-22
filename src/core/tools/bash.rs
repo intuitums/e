@@ -1,18 +1,19 @@
-//! The bash tool: spawn a shell command, capture combined output.
+//! The bash tool: spawn a shell command and stream its captured pipes.
 //!
-//! Spawn-and-capture, not a terminal daemon (DESIGN.md §3). A wall-clock
-//! timeout bounds runaway commands: the command runs as its own process
-//! group and the whole group is killed at the deadline; output is truncated
-//! by the caller.
+//! This remains spawn-and-capture, not a terminal daemon. A wall-clock timeout
+//! or turn cancellation kills the command's process group. Pipe readers feed
+//! one tagged queue so display and retained output keep observed ordering.
 
 use serde_json::{json, Value};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::{schema_object, truncate, ToolOutput};
+use super::{schema_object, OutputStream, ToolOutcome, ToolOutput};
 
 pub fn schema() -> Value {
     schema_object(
@@ -26,8 +27,7 @@ pub fn schema() -> Value {
     )
 }
 
-/// Kill a process group (the child was started as its own group leader).
-/// Falls back to the direct child if the group signal fails.
+/// Kill a process group whose child is its group leader.
 fn kill_group(pid: u32) {
     #[cfg(unix)]
     unsafe {
@@ -40,18 +40,26 @@ fn kill_group(pid: u32) {
     }
 }
 
+/// Compatibility entry point for non-streaming callers.
 pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
+    run_streaming(args, cwd, &AtomicBool::new(false), |_, _| {})
+}
+
+/// Run bash and publish decoded stdout/stderr chunks while the process lives.
+pub fn run_streaming<F>(
+    args: &Value,
+    cwd: &Path,
+    cancel: &AtomicBool,
+    mut on_output: F,
+) -> ToolOutput
+where
+    F: FnMut(OutputStream, &str),
+{
     let Some(command) = args["command"].as_str() else {
-        return ToolOutput {
-            content: "bash: missing command".into(),
-            is_error: true,
-            summary: "error".into(),
-        };
+        return failure("bash: missing command");
     };
     let timeout = args["timeout"].as_u64().unwrap_or(120).clamp(1, 600);
 
-    // The child leads its own process group, so the timeout kill reaches
-    // everything a `bash -lc` script spawned, not just the shell itself.
     let mut cmd = Command::new("bash");
     cmd.arg("-lc")
         .arg(command)
@@ -69,94 +77,157 @@ pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
         });
     }
     let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            return ToolOutput {
-                content: format!("bash: {e}"),
-                is_error: true,
-                summary: "error".into(),
-            }
-        }
+        Ok(child) => child,
+        Err(error) => return failure(&format!("bash: {error}")),
     };
 
-    // Drain both pipes on threads while we poll: a command whose output
-    // exceeds the pipe buffer must not block on write and deadlock the wait.
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
-    let out_reader = std::thread::spawn(move || {
-        let mut buf = String::new();
-        if let Some(pipe) = stdout_pipe.as_mut() {
-            let _ = std::io::Read::read_to_string(pipe, &mut buf);
-        }
-        buf
-    });
-    let err_reader = std::thread::spawn(move || {
-        let mut buf = String::new();
-        if let Some(pipe) = stderr_pipe.as_mut() {
-            let _ = std::io::Read::read_to_string(pipe, &mut buf);
-        }
-        buf
-    });
+    let (tx, rx) = mpsc::channel::<(OutputStream, Vec<u8>)>();
+    let mut readers = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        readers.push(spawn_reader(stdout, OutputStream::Stdout, tx.clone()));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        readers.push(spawn_reader(stderr, OutputStream::Stderr, tx.clone()));
+    }
+    drop(tx);
 
-    // Poll for exit; at the deadline, kill the group and reap.
     let deadline = Instant::now() + Duration::from_secs(timeout);
     let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
-                timed_out = true;
-                kill_group(child.id());
-                match child.wait() {
-                    Ok(status) => break status,
-                    Err(e) => {
-                        return ToolOutput {
-                            content: format!("bash: {e}"),
-                            is_error: true,
-                            summary: "error".into(),
-                        }
-                    }
-                }
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => {
-                return ToolOutput {
-                    content: format!("bash: {e}"),
-                    is_error: true,
-                    summary: "error".into(),
-                }
-            }
-        }
-    };
+    let mut cancelled = false;
+    let mut status = None;
+    let mut retained = Vec::<u8>::new();
+    let mut total_bytes = 0usize;
 
-    let mut combined = out_reader.join().unwrap_or_default();
-    let stderr = err_reader.join().unwrap_or_default();
-    if !stderr.trim().is_empty() {
-        if !combined.trim_end().is_empty() {
+    while status.is_none() {
+        while let Ok((stream, bytes)) = rx.try_recv() {
+            retain_and_publish(
+                &mut retained,
+                &mut total_bytes,
+                stream,
+                &bytes,
+                &mut on_output,
+            );
+        }
+        if cancel.load(Ordering::SeqCst) {
+            cancelled = true;
+            kill_group(child.id());
+        } else if Instant::now() >= deadline {
+            timed_out = true;
+            kill_group(child.id());
+        }
+        match child.try_wait() {
+            Ok(found) => status = found,
+            Err(error) => return failure(&format!("bash: {error}")),
+        }
+        if status.is_none() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    for reader in readers {
+        let _ = reader.join();
+    }
+    while let Ok((stream, bytes)) = rx.try_recv() {
+        retain_and_publish(
+            &mut retained,
+            &mut total_bytes,
+            stream,
+            &bytes,
+            &mut on_output,
+        );
+    }
+
+    let status = status.expect("loop stops only after child exit");
+    let mut combined = String::from_utf8_lossy(&retained).trim_end().to_string();
+    if total_bytes > retained.len() {
+        if !combined.is_empty() {
             combined.push('\n');
         }
-        combined.push_str(stderr.trim_start());
+        combined.push_str(&format!(
+            "… [truncated: {total_bytes} bytes total, cap {}]",
+            retained.len()
+        ));
     }
-    let mut combined = combined.trim_end().to_string();
-    if timed_out {
+    let (outcome, summary) = if cancelled {
+        (ToolOutcome::Cancelled, "cancelled".to_string())
+    } else if timed_out {
+        (ToolOutcome::TimedOut, format!("timeout {timeout}s"))
+    } else if status.success() {
+        (ToolOutcome::Completed, "done".to_string())
+    } else {
+        (
+            ToolOutcome::Failed,
+            format!("exit {}", status.code().unwrap_or(-1)),
+        )
+    };
+    if outcome == ToolOutcome::TimedOut {
         if !combined.is_empty() {
             combined.push('\n');
         }
         combined.push_str(&format!("… [killed: exceeded the {timeout}s timeout]"));
+    } else if outcome == ToolOutcome::Cancelled {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str("… [cancelled]");
     }
 
-    let code = status.code().unwrap_or(-1);
-    let is_error = !status.success();
-    let summary = if timed_out {
-        format!("timeout {timeout}s")
-    } else if is_error {
-        format!("exit {code}")
-    } else {
-        "done".into()
-    };
     ToolOutput {
-        content: truncate(combined),
-        is_error,
+        content: combined,
+        outcome,
         summary,
+    }
+}
+
+/// Drain one process pipe and tag every chunk before joining the shared queue.
+fn spawn_reader<R>(
+    mut pipe: R,
+    stream: OutputStream,
+    tx: mpsc::Sender<(OutputStream, Vec<u8>)>,
+) -> std::thread::JoinHandle<()>
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match pipe.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => {
+                    if tx.send((stream, buffer[..count].to_vec())).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Retain a bounded prefix and publish every chunk so pipe draining never
+/// depends on the model-output cap.
+fn retain_and_publish<F>(
+    retained: &mut Vec<u8>,
+    total_bytes: &mut usize,
+    stream: OutputStream,
+    bytes: &[u8],
+    on_output: &mut F,
+) where
+    F: FnMut(OutputStream, &str),
+{
+    const RETAIN_LIMIT: usize = 32 * 1024;
+    *total_bytes = total_bytes.saturating_add(bytes.len());
+    if retained.len() < RETAIN_LIMIT {
+        let keep = (RETAIN_LIMIT - retained.len()).min(bytes.len());
+        retained.extend_from_slice(&bytes[..keep]);
+    }
+    let text = String::from_utf8_lossy(bytes);
+    on_output(stream, &text);
+}
+
+fn failure(message: &str) -> ToolOutput {
+    ToolOutput {
+        content: message.into(),
+        outcome: ToolOutcome::Failed,
+        summary: "error".into(),
     }
 }
