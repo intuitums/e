@@ -1,4 +1,29 @@
-target/
-.build/
+# Build
+/target/
+
+# Profiling and logs
 *.log
+*.cpuprofile
+
+# OS
+.DS_Store
+
+# Environment
+.env
+
+# Editor files
+.vscode/
+.zed/
+.idea/
+*.swp
+*.swo
+*~
+
+# Package specific
 __pycache__/
+
+# Local development scratch — personal extensions, notes, captures;
+# never ship from here (force-add with -f if something belongs in-repo).
+/examples/
+workspaces.py
+.build/

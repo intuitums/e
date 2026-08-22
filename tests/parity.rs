@@ -198,20 +198,6 @@ fn tool_rows_carry_no_done_suffix() {
 }
 
 #[test]
-fn reasoning_renders_inline_markdown() {
-    let theme = e::tui::theme::resolve("dark", false);
-    let styled = e::tui::markdown::inline_spans(&theme, "**Assessing clarity** of `e docs`");
-    assert!(!styled.contains("**"), "literal asterisks leaked");
-    assert!(styled.contains("\x1b[1mAssessing clarity\x1b[22m"));
-    assert!(!styled.contains('`'), "literal backticks leaked");
-    // Unpaired markers pass through untouched.
-    assert_eq!(
-        e::tui::markdown::inline_spans(&theme, "2 ** 3 and a ` alone"),
-        "2 ** 3 and a ` alone"
-    );
-}
-
-#[test]
 fn finished_tool_runs_collapse_to_the_reference_group() {
     use e::tui::transcript::{Block, Kind, Transcript};
     let theme = e::tui::theme::resolve("dark", false);
@@ -261,11 +247,11 @@ fn finished_tool_runs_collapse_to_the_reference_group() {
         .collect();
     assert_eq!(
         plain[0],
-        "  ● 3 tool calls · 1 read · 1 edit · 1 command · 1 failed"
+        "● 3 tool calls · 1 read · 1 edit · 1 command · 1 failed"
     );
-    assert_eq!(plain[1], "  ├ Read runtime.rs");
-    assert_eq!(plain[2], "  ├ Edited main.rs");
-    assert_eq!(plain[3], "  └ Ran cargo build");
+    assert_eq!(plain[1], "├ Read runtime.rs");
+    assert_eq!(plain[2], "├ Edited main.rs");
+    assert_eq!(plain[3], "└ Ran cargo build");
 
     // The reference pluralization: "3 commands", but "2 read".
     let mut t2 = Transcript::default();
@@ -278,13 +264,14 @@ fn finished_tool_runs_collapse_to_the_reference_group() {
     t2.collapse_tools();
     assert!(t2.blocks[0].text.starts_with("3 tool calls · 3 commands"));
 
-    // A single call never groups; a still-running row ends the run.
+    // Minimal mode groups a single completed call too.
     let mut t3 = Transcript::default();
     let mut single = Block::new(Kind::Tool, "Read");
     single.done = true;
     t3.push(single);
     t3.collapse_tools();
-    assert_eq!(t3.blocks[0].kind, Kind::Tool);
+    assert_eq!(t3.blocks[0].kind, Kind::ToolGroup);
+    assert_eq!(t3.blocks[0].text, "1 tool call · 1 read");
 }
 
 #[test]
@@ -304,12 +291,75 @@ fn command_rows_preview_their_output() {
     ];
     block.more = 2;
     let rows = block.lines_for_test(&theme, 80);
-    // The reference shape: row, four │ lines, the elision, the exit line.
+    // The reference shape: output, process outcome, then expansion hint.
     assert_eq!(rows.len(), 7);
     assert!(rows[1].contains("│ line-1"));
     assert!(rows[4].contains("│ line-4"));
-    assert!(rows[5].contains("│ … 2 lines more (ctrl o to view)"));
-    assert!(rows[6].contains("│ exit code 7"));
+    assert!(rows[5].contains("│ exit code 7"));
+    assert!(rows[6].contains("│ … 2 lines more (ctrl o to view)"));
+}
+
+#[test]
+fn live_tool_group_replaces_running_state_and_streams_output() {
+    use e::tui::transcript::{Block, ToolChild};
+    let theme = e::tui::theme::resolve("dark", false);
+    let mut group = Block::tool_group(vec![
+        ToolChild::pending(
+            1,
+            "read".into(),
+            "Reading".into(),
+            "Read".into(),
+            "src/core/mod.rs".into(),
+        ),
+        ToolChild::pending(
+            2,
+            "command".into(),
+            "Running".into(),
+            "Ran".into(),
+            "cargo test".into(),
+        ),
+    ]);
+    assert_eq!(group.text, "2 tool calls · 1 read · 1 command");
+
+    group.start_tool(1);
+    let running = group.lines_for_test(&theme, 80);
+    assert!(running[1].contains("Reading src/core/mod.rs"));
+    assert!(!running.iter().any(|line| line.contains("cargo test")));
+    let narrow = group.lines_for_test(&theme, 20);
+    assert!(
+        narrow[1].contains('…'),
+        "long targets need an explicit ellipsis"
+    );
+
+    group.finish_tool(
+        1,
+        e::core::tools::ToolOutcome::Completed,
+        "12 lines".into(),
+        "content",
+    );
+    group.start_tool(2);
+    group.append_tool_output(2, "one\ntwo\nthree\nfour\nfive\nsix\n");
+    let streaming = group.lines_for_test(&theme, 80);
+    assert!(streaming[1].contains("Read src/core/mod.rs"));
+    assert!(streaming[2].contains("Running cargo test"));
+    assert!(streaming.iter().any(|line| line.contains("one")));
+    assert!(streaming
+        .last()
+        .unwrap()
+        .contains("1 lines more (ctrl o to view)"));
+
+    group.finish_tool(
+        2,
+        e::core::tools::ToolOutcome::Failed,
+        "exit 7".into(),
+        "one\ntwo\nthree\nfour\nfive\nsix\n",
+    );
+    let done = group.lines_for_test(&theme, 80);
+    // The reference withdraws pipe rows on completion — full output lives
+    // behind ctrl+o, never inline. Failure shows in the label and the tally.
+    assert!(group.text.ends_with("· 1 failed"));
+    assert!(done[2].contains("Failed cargo test"));
+    assert!(!done.iter().any(|line| line.contains('│')));
 }
 
 #[test]

@@ -2,9 +2,11 @@
 //! `~/.e/sessions/<cwd-slug>/<timestamp>_<uuid>.jsonl`.
 //!
 //! One line per entry: a `session` header, then `message` entries carrying
-//! the same ChatMessage the agent uses. Resume replays the messages back into
-//! the agent. The title is derived from the first user message (first line,
-//! eight words) — never model-generated.
+//! the same ChatMessage the agent uses. The agent creates the file lazily on
+//! the first user send, and listing also rejects header-only or assistant-only
+//! files, so opening and closing e never counts as a session. Resume replays
+//! messages back into the agent. The title is derived from the first user
+//! message (first line, eight words), never model-generated.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -137,11 +139,12 @@ fn info(path: &Path) -> Option<SessionInfo> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_millis() as u64;
+    // A session begins with user intent. Header-only files, or malformed logs
+    // containing only assistant/tool entries, never appear in /resume or -c.
     let title = messages
         .iter()
-        .find(|m| m.role == "user")
-        .map(|m| title_of(&m.content))
-        .unwrap_or_else(|| "Untitled".into());
+        .find(|message| message.role == "user")
+        .map(|message| title_of(&message.content))?;
     Some(SessionInfo {
         path: path.to_path_buf(),
         title,

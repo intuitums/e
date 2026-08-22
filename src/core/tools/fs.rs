@@ -3,19 +3,19 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
-use super::{resolve, schema_object, truncate, ToolOutput};
+use super::{resolve, schema_object, truncate, ToolOutcome, ToolOutput};
 
 fn ok(content: String, summary: String) -> ToolOutput {
     ToolOutput {
         content,
-        is_error: false,
+        outcome: ToolOutcome::Completed,
         summary,
     }
 }
 fn err(message: String) -> ToolOutput {
     ToolOutput {
         content: message,
-        is_error: true,
+        outcome: ToolOutcome::Failed,
         summary: "error".into(),
     }
 }
@@ -72,14 +72,42 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
     };
     let content = args["content"].as_str().unwrap_or("");
     let full = resolve(cwd, path);
+    let before = std::fs::read_to_string(&full).unwrap_or_default();
     if let Some(parent) = full.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     match std::fs::write(&full, content) {
-        Ok(()) => ok(
-            format!("wrote {path}"),
-            format!("{} lines", content.lines().count()),
-        ),
+        Ok(()) => {
+            let additions = if before == content {
+                0
+            } else {
+                content.lines().count()
+            };
+            let deletions = if before.is_empty() || before == content {
+                0
+            } else {
+                before.lines().count()
+            };
+            let mut detail = format!("wrote {path}");
+            if before != content {
+                if !before.is_empty() {
+                    detail.push_str("\n--- before\n");
+                    for line in before.lines() {
+                        detail.push_str(&format!("-{line}\n"));
+                    }
+                }
+                if !content.is_empty() {
+                    detail.push_str("+++ after\n");
+                    for line in content.lines() {
+                        detail.push_str(&format!("+{line}\n"));
+                    }
+                }
+            }
+            ok(
+                truncate(detail.trim_end().to_string()),
+                format!("+{additions} -{deletions}"),
+            )
+        }
         Err(e) => err(format!("write {path}: {e}")),
     }
 }

@@ -51,3 +51,39 @@ fn newlines_still_break_rows() {
     assert!(rendered[1].contains("one"));
     assert!(rendered[2].contains("two"));
 }
+
+#[test]
+fn words_wrap_whole() {
+    // "hello world extra" at inner width 8: each word lands whole on its
+    // own row — no letter-level tearing.
+    let rendered = rows("hello world extra", 10);
+    assert!(rendered[1].contains("hello"));
+    assert!(!rendered[1].contains("world"));
+    assert!(rendered[2].contains("world"));
+    assert!(!rendered[2].contains("extra"));
+    assert!(rendered[3].contains("extra"));
+}
+
+#[test]
+fn up_down_move_between_visual_rows_and_fall_back_to_history() {
+    let theme = theme::resolve("dark", false);
+
+    // Wrapped single line: Up leaves the draft alone and moves the cursor
+    // into the first visual row.
+    let mut editor = Editor::new();
+    editor.set_text("hello world extra");
+    editor.render(&theme, 10); // establishes the layout width
+    let end = editor.cursor();
+    use e::tui::composer::Key;
+    editor.key(Key::Up);
+    assert!(editor.cursor() < end, "cursor moved up a visual row");
+    assert_eq!(editor.text(), "hello world extra");
+
+    // Single-row drafts fall through to history at the top edge.
+    let mut editor = Editor::new();
+    editor.set_text("draft");
+    editor.push_history("older".into());
+    editor.render(&theme, 40);
+    editor.key(Key::Up);
+    assert_eq!(editor.text(), "older");
+}

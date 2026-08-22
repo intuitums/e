@@ -25,6 +25,14 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// Presentation metadata persisted beside a tool result, ignored by provider
+/// dialects and used to reconstruct the transcript on resume.
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct ToolResultMeta {
+    pub outcome: crate::core::tools::ToolOutcome,
+    pub summary: String,
+}
+
 #[derive(Clone, Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     pub role: String, // "user" | "assistant" | "tool" | "system"
@@ -33,6 +41,8 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_meta: Option<ToolResultMeta>,
 }
 
 impl ChatMessage {
@@ -42,6 +52,7 @@ impl ChatMessage {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tool_meta: None,
         }
     }
     pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
@@ -50,6 +61,7 @@ impl ChatMessage {
             content: content.into(),
             tool_calls,
             tool_call_id: None,
+            tool_meta: None,
         }
     }
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
@@ -58,6 +70,25 @@ impl ChatMessage {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
+            tool_meta: None,
+        }
+    }
+
+    pub fn tool_result_with_meta(
+        call_id: impl Into<String>,
+        content: impl Into<String>,
+        outcome: crate::core::tools::ToolOutcome,
+        summary: impl Into<String>,
+    ) -> Self {
+        ChatMessage {
+            role: "tool".into(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(call_id.into()),
+            tool_meta: Some(ToolResultMeta {
+                outcome,
+                summary: summary.into(),
+            }),
         }
     }
 }

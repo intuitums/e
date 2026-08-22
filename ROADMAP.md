@@ -6,7 +6,7 @@ list, not quietly on it.
 
 ## Landed
 
-- **0.1** — the look: fx-shape TUI, byte-pinned parity suite
+- **0.1** — the look: the reference-shape TUI, byte-pinned parity suite
 - **0.2** — the harness: Rust rewrite; agent loop, tools, steering; two wire
   dialects (chat-completions, responses) with OAuth; JSONL sessions;
   AGENTS.md + skills context; sovereign `~/.e/` home
@@ -19,10 +19,19 @@ list, not quietly on it.
   (groups, output previews, ctrl+o viewer, paste placeholders, cancelled
   state); a live model catalog from each gateway's own /models with
   providers as data (registry + env-var keys); per-directory trust;
-  `e ask`; prompt templates; `!` shell passthrough; `e docs`
+  `e ask`; prompt templates; `!` shell passthrough; `e docs`; lifecycle-driven
+  tool groups with live command output and stable resume metadata; extension
+  startup hooks for custom flags and same-binary worktree relaunches
 
 ## Next
 
+- **Fuller extension capabilities over the line protocol** — capability
+  parity with the leading harnesses, not runtime parity. Add input transforms; `session_start`,
+  `turn_start`, streamed tool updates, and `tool_result` hooks; resource path
+  contributions; active-tool control; persistent extension entries; model
+  provider registration. Each addition lands when a real extension needs it.
+  Startup argument rewriting and safe same-binary relaunch are already landed,
+  which is enough for extensions like managed Git worktree launchers.
 - **Session branching** — session entries already log ids; a parent-id
   field and a rewind picker would make sessions trees (the reference
   harness's most distinctive session feature)
@@ -37,12 +46,12 @@ list, not quietly on it.
 - **Permission modes** — yolo is the only mode today, by decision; an
   ask/auto gate is designed (allow · deny · ask, read-only fallback) but
   waits for demand
-- **More events and hooks** — `turn_start`, `session_start`, a
-  `tool_result` post-hook; grow the protocol by need, not symmetry
 - **Windows** — the harness is portable in principle; the pty test rig and
   the executable-bit discovery are not
 
 ## Not planned
 
 MCP, subagents, an embedded scripting runtime, a PTY terminal daemon,
-telemetry, accounts. See "What e is not" in DESIGN.md.
+telemetry, accounts. Custom TUI components and renderers are not protocol
+promises yet; they need a bounded declarative design rather than remote code
+reaching into renderer internals. See "What e is not" in DESIGN.md.

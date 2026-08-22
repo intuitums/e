@@ -1,4 +1,5 @@
-//! The system prompt: the base shape, the settings override, layered context.
+//! The system prompt: the reference's structure, the settings override,
+//! layered context.
 
 use e::core::agent::context::system_prompt;
 use std::path::Path;
@@ -49,7 +50,8 @@ fn settings_prompt_replaces_the_base() {
         .unwrap();
         let prompt = system_prompt(Path::new("/tmp/proj"));
         assert!(prompt.starts_with("You are Custom. Do custom things."));
-        // The base is gone, but the cwd tail still appends.
+        // The base is gone, but the cwd tail still appends (the reference's
+        // contract).
         assert!(!prompt.contains("Available tools:"));
         assert!(prompt.contains("Current working directory: /tmp/proj"));
     });

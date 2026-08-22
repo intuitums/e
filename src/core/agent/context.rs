@@ -1,10 +1,11 @@
-//! Context assembly: the system prompt.
+//! Context assembly: the system prompt, following the reference's
+//! layered structure.
 //!
 //! The base prompt is e's identity, an explicit tools list, and the
 //! guidelines. A user's `settings.json` `system_prompt` replaces that base
-//! wholesale. Either way, the layered context is appended in a fixed order:
-//! project instructions (AGENTS.md), then the working directory. AGENTS.md
-//! ships as nothing — the user fills it.
+//! wholesale (the custom-prompt path). Either way, the layered context is
+//! appended in the reference's order: project instructions (AGENTS.md), then
+//! the working directory. AGENTS.md ships as nothing — the user fills it.
 
 use serde::Deserialize;
 use std::path::Path;
@@ -47,7 +48,8 @@ const GUIDELINES: &[&str] = &[
     "When you finish a task, stop — don't narrate what you could do next",
 ];
 
-/// The default base: identity, tools, guidelines.
+/// The default base: identity, tools, guidelines (the reference's shape,
+/// e's name).
 fn default_base() -> String {
     let tools = TOOL_SNIPPETS
         .iter()
@@ -93,12 +95,13 @@ fn custom_prompt() -> Option<String> {
 pub fn system_prompt(cwd: &Path) -> String {
     let mut prompt = custom_prompt().unwrap_or_else(default_base);
 
-    // Skills catalog (auto-invocable).
+    // Skills catalog (auto-invocable), like the reference's skills section.
     if let Some(catalog) = crate::core::resources::skills::catalog(cwd) {
         prompt.push_str(&format!("\n\n{catalog}"));
     }
 
-    // Project instructions: AGENTS.md, global then project, in one block.
+    // Project instructions: AGENTS.md, global then project, in the
+    // reference's block shape.
     let mut context_files: Vec<(String, String)> = Vec::new();
     if let Some(rules) = read_trimmed(&home::agents_md_path()) {
         context_files.push((home::agents_md_path().to_string_lossy().into_owned(), rules));

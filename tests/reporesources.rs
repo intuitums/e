@@ -101,7 +101,7 @@ fn trusted_repo_adds_its_own_and_shadows_on_name_clash() {
 
     // The skill tool resolves through the same merge.
     let out = e::core::tools::run("skill", r#"{"name":"release"}"#, &f.repo);
-    assert!(!out.is_error);
+    assert!(!out.is_error());
     assert_eq!(out.summary, "release");
 }
 
