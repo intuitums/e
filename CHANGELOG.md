@@ -39,17 +39,17 @@
 - Picker order: /models groups models by provider (registry order, live
   additions inline with their provider); /scoped-models lists the scoped
   entries first; ctrl+x on the scoped picker resets the scope entirely.
-+- The Zen provider's id is `opencode-zen`, matching its display name and
-+  `opencode-go` — the two OpenCode gateways now read as a pair. Auth.json
-+  keys written under the old `opencode` id still sign in (read-only
-+  alias, the file is untouched); a saved `opencode/…` model slug falls
-+  back to the picker once, then persists under the new id.
+- The Zen provider's id is `opencode-zen`, matching its display name and
+  `opencode-go` — the two OpenCode gateways now read as a pair. Auth.json
+  keys written under the old `opencode` id still sign in (read-only
+  alias, the file is untouched); a saved `opencode/…` model slug falls
+  back to the picker once, then persists under the new id.
 
-+- The catalog splits along its one real seam: `catalog/mod.rs` decides
-+  which models exist (registry projection, models.json overrides,
-+  resolution, scope) and `catalog/remote.rs` owns the live sync (the
-+  GET /models refresh, its cache, and the window-precedence overlay).
-+  External paths are unchanged.
+- The catalog splits along its one real seam: `catalog/mod.rs` decides
+  which models exist (registry projection, models.json overrides,
+  resolution, scope) and `catalog/remote.rs` owns the live sync (the
+  GET /models refresh, its cache, and the window-precedence overlay).
+  External paths are unchanged.
 
 - Providers are data, the reference architecture: each built-in lives in
   `src/core/provider/providers/<name>.json` — gateway, dialect, auth
