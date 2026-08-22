@@ -5,6 +5,7 @@
 //!   {"id":1,"method":"initialize","params":{"protocol":1,"e_version":"…","cwd":"…"}}
 //!   {"id":7,"method":"tool_call","params":{"name":"…","arguments":{…}}}
 //!   {"id":9,"method":"command","params":{"name":"…","args":"…"}}
+//!   {"id":2,"method":"hook.startup","params":{"cwd":"…","argv":[…]}}
 //!   {"id":4,"method":"hook.tool_call","params":{"name":"…","arguments":{…}}}
 //! e → extension notifications (no response):
 //!   {"method":"event","params":{"name":"turn_end","aborted":false}}
@@ -17,7 +18,9 @@
 //!   {"name":"…","version":"…",
 //!    "tools":[{"name","description","parameters":{JSON Schema}}…],
 //!    "commands":[{"name","description"}…],
-//!    "hooks":["tool_call"…]}
+//!    "hooks":["startup","tool_call"…]}
+
+use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -79,6 +82,24 @@ pub struct HookVerdict {
     pub block: bool,
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// A startup hook may consume arguments and request a same-binary relaunch.
+#[derive(Debug, Default, Deserialize)]
+pub struct StartupResult {
+    #[serde(default)]
+    pub argv: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: BTreeMap<String, Option<String>>,
+    #[serde(default)]
+    pub relaunch: Option<Relaunch>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Relaunch {
+    pub cwd: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, Option<String>>,
 }
 
 /// One parsed line arriving from an extension.

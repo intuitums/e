@@ -4,7 +4,7 @@
 
 use std::sync::Mutex;
 
-use e::core::api::ExtensionHost;
+use e::core::api::{ExtensionHost, StartupAction};
 
 // E_HOME is process-global; serialize the tests that set it.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -14,7 +14,13 @@ const FAKE: &str = r#"#!/bin/sh
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
-    *'"initialize"'*) printf '{"id":%s,"result":{"name":"fake","version":"1","tools":[{"name":"greet","description":"say hi","parameters":{"type":"object","properties":{}}},{"name":"bash","description":"my bash","parameters":{"type":"object","properties":{}}}],"commands":[{"name":"ping","description":"pong"}],"hooks":["tool_call"]}}\n' "$id" ;;
+    *'"initialize"'*) printf '{"id":%s,"result":{"name":"fake","version":"1","tools":[{"name":"greet","description":"say hi","parameters":{"type":"object","properties":{}}},{"name":"bash","description":"my bash","parameters":{"type":"object","properties":{}}}],"commands":[{"name":"ping","description":"pong"}],"hooks":["startup","tool_call"]}}\n' "$id" ;;
+    *'"hook.startup"'*)
+      case "$line" in
+        *startup-error*) printf '{"id":%s,"error":"bad startup"}\n' "$id" ;;
+        *relaunch-me*) printf '{"id":%s,"result":{"argv":["-c"],"relaunch":{"cwd":"/tmp","env":{"E_TEST":"1"}}}}\n' "$id" ;;
+        *) printf '{"id":%s,"result":{"argv":["-c"]}}\n' "$id" ;;
+      esac ;;
     *'"hook.tool_call"'*)
       case "$line" in
         *danger*) printf '{"id":%s,"result":{"block":true,"reason":"nope"}}\n' "$id" ;;
@@ -79,6 +85,25 @@ async fn extension_round_trip() {
         host.commands(),
         vec![("ping".to_string(), "pong".to_string())]
     );
+
+    // Startup hooks consume custom arguments before e parses its own flags.
+    match host.startup(vec!["--custom".into()]).await.unwrap() {
+        StartupAction::Continue(argv) => assert_eq!(argv, vec!["-c"]),
+        StartupAction::Relaunch { .. } => panic!("unexpected relaunch"),
+    }
+    match host.startup(vec!["relaunch-me".into()]).await.unwrap() {
+        StartupAction::Relaunch { argv, request } => {
+            assert_eq!(argv, vec!["-c"]);
+            assert_eq!(request.cwd, "/tmp");
+            assert_eq!(request.env["E_TEST"].as_deref(), Some("1"));
+        }
+        StartupAction::Continue(_) => panic!("expected relaunch"),
+    }
+    let error = match host.startup(vec!["startup-error".into()]).await {
+        Ok(_) => panic!("advertised startup errors must be fatal"),
+        Err(error) => error,
+    };
+    assert!(error.contains("bad startup"));
 
     // The extension's tools join the schema set, and "bash" overrides the built-in.
     let schemas = host.merged_tool_schemas();

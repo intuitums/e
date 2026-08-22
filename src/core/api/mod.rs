@@ -3,7 +3,8 @@
 //! An extension is any executable in `~/.e/extensions/`, in any language,
 //! speaking the line protocol in `protocol.rs`. Extensions can add tools the
 //! model calls (overriding built-ins by name), add slash commands, observe
-//! lifecycle events, and gate tool calls via the `tool_call` hook. There is no
+//! lifecycle events, gate tool calls, and rewrite startup arguments through
+//! hooks. There is no
 //! embedded scripting runtime — the process boundary is the API, which keeps
 //! the harness inside its budget and extensions in whatever language their
 //! author likes.
@@ -13,5 +14,5 @@
 mod host;
 mod protocol;
 
-pub use host::ExtensionHost;
+pub use host::{ExtensionHost, StartupAction};
 pub use protocol::{CommandResult, HookVerdict, Manifest, ToolResult, PROTOCOL_VERSION};
