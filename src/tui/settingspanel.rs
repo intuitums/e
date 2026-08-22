@@ -17,16 +17,12 @@ pub struct SettingsPanel {
 const VALUE_COL: usize = 20;
 pub const HINT: &str = "↑↓ Navigate     ←→ Change     Esc Close";
 
-impl Default for SettingsPanel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl SettingsPanel {
-    pub fn new() -> Self {
+    /// `effort_levels`: the current model's declared effort levels, so the
+    /// panel cycles exactly what the model supports.
+    pub fn new(effort_levels: Vec<String>) -> Self {
         SettingsPanel {
-            settings: settings::all(),
+            settings: settings::all(effort_levels),
             selected: 0,
         }
     }

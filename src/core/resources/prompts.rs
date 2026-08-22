@@ -1,11 +1,15 @@
-//! Prompt templates: `~/.e/prompts/<name>.md` becomes the `/name` command.
+//! Prompt templates: `~/.e/prompts/<name>.md` becomes the `/name` command,
+//! and a trusted repo's `.e/prompts/<name>.md` adds `/name` too — shadowing a
+//! global template of the same name, the closer context wins.
 //!
 //! Frontmatter (optional): `description:` for the picker, `argument-hint:`
 //! shown after the name. The body is submitted as the prompt after bash-style
 //! substitution: `$1`..`$9`, `$@` / `$ARGUMENTS` (all args), `${N:-default}`,
 //! `${@:-default}`, and `${@:N}` (args from N on).
 
-use crate::core::config::home;
+use std::path::Path;
+
+use crate::core::config::{home, trust};
 
 pub struct Template {
     pub name: String,
@@ -14,12 +18,28 @@ pub struct Template {
     pub content: String,
 }
 
-/// Every template in `~/.e/prompts/`, sorted by name.
-pub fn list() -> Vec<Template> {
-    let Ok(entries) = std::fs::read_dir(home::home().join("prompts")) else {
+/// Global templates plus, when `cwd` is trusted, its own `.e/prompts/`; on
+/// a name clash the repo's template wins.
+pub fn list(cwd: &Path) -> Vec<Template> {
+    let mut templates = read_dir(&home::prompts_dir());
+    if trust::trusted(cwd) {
+        let local = read_dir(&cwd.join(".e").join("prompts"));
+        templates.retain(|g| !local.iter().any(|l| l.name == g.name));
+        templates.extend(local);
+    }
+    templates.sort_by(|a, b| a.name.cmp(&b.name));
+    templates
+}
+
+pub fn find(name: &str, cwd: &Path) -> Option<Template> {
+    list(cwd).into_iter().find(|t| t.name == name)
+}
+
+fn read_dir(dir: &Path) -> Vec<Template> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut templates: Vec<Template> = entries
+    entries
         .flatten()
         .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
         .filter_map(|e| {
@@ -27,13 +47,7 @@ pub fn list() -> Vec<Template> {
             let raw = std::fs::read_to_string(e.path()).ok()?;
             Some(parse(name, &raw))
         })
-        .collect();
-    templates.sort_by(|a, b| a.name.cmp(&b.name));
-    templates
-}
-
-pub fn find(name: &str) -> Option<Template> {
-    list().into_iter().find(|t| t.name == name)
+        .collect()
 }
 
 fn parse(name: String, raw: &str) -> Template {

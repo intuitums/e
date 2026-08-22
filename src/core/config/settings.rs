@@ -95,8 +95,10 @@ pub fn theme_names() -> Vec<String> {
     names
 }
 
-/// The settings shown in /settings, in category order.
-pub fn all() -> Vec<Setting> {
+/// The settings shown in /settings, in category order. `effort_levels` are
+/// the current model's declared effort levels — the cycle is whatever the
+/// model supports, not a fixed list.
+pub fn all(effort_levels: Vec<String>) -> Vec<Setting> {
     vec![
         Setting {
             key: "theme".into(),
@@ -116,16 +118,14 @@ pub fn all() -> Vec<Setting> {
             key: "effort".into(),
             label: "Reasoning effort".into(),
             category: "Agent",
-            options: vec!["low".into(), "medium".into(), "high".into()],
+            options: if effort_levels.is_empty() {
+                vec!["low".into(), "medium".into(), "high".into()]
+            } else {
+                effort_levels
+            },
             default: "high".into(),
         },
     ]
-}
-
-pub fn effort() -> String {
-    get_string("effort")
-        .filter(|v| ["low", "medium", "high"].contains(&v.as_str()))
-        .unwrap_or_else(|| "high".into())
 }
 
 pub fn theme() -> String {

@@ -15,7 +15,7 @@ pub fn render(stage: &TrustStage, theme: &Theme, width: usize, dir: &str) -> Vec
     vec![
         String::new(),
         dim(&format!("   Trust {dir}?")),
-        dim("   e reads the directory's AGENTS.md into context and runs tools here."),
+        dim("   e reads the directory's AGENTS.md and .e/ skills+prompts into context, and runs tools here."),
         String::new(),
         choice_row(
             theme,

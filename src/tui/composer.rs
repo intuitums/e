@@ -240,8 +240,7 @@ impl Editor {
     /// reverse-video cursor cell.
     pub fn render(&self, theme: &Theme, width: usize) -> Vec<String> {
         // A draft starting with `!` is a shell command: the rail turns the
-        // bash-mode color — the whole indicator, no words (the reference
-        // convention: pi flips its editor border the same way).
+        // bash-mode color — the whole indicator, no words.
         let rail_token =
             if !self.mask && self.text.iter().find(|c| !c.is_whitespace()) == Some(&'!') {
                 "bashMode"
