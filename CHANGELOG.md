@@ -30,6 +30,12 @@
   language-neutral line protocol is on the roadmap.
 - `/reload` replaces its `reloading…` notice with the completion text instead
   of appending a second transcript line.
+- Repo-local resources: a trusted directory's `.e/skills/` and
+  `.e/prompts/` load beside the global ones (same formats, same trust gate
+  as AGENTS.md); a repo resource shadows a global of the same name.
+- Shift+Tab cycles the reasoning effort through the levels the current model
+  declares (low/medium/high today; xhigh and friends as models expose them);
+  the choice persists in settings and shows in the status line.
 
 ## 0.4.1 — 2026-08-21
 

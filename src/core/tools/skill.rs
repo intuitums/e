@@ -15,7 +15,7 @@ pub fn schema() -> Value {
     )
 }
 
-pub fn run(args: &Value, _cwd: &Path) -> ToolOutput {
+pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
     let Some(name) = args["name"].as_str() else {
         return ToolOutput {
             content: "skill: missing name".into(),
@@ -23,7 +23,7 @@ pub fn run(args: &Value, _cwd: &Path) -> ToolOutput {
             summary: "error".into(),
         };
     };
-    match skills::get(name) {
+    match skills::get(name, cwd) {
         Some(skill) if !skill.disable_model_invocation => ToolOutput {
             content: truncate(skill.body),
             outcome: ToolOutcome::Completed,

@@ -49,6 +49,11 @@ sessions are plain JSONL in an established schema, prompts are frontmatter
 markdown. Other tools can read e's home without e installed; that is the
 interop, and it points outward.
 
+The home reaches into the workspace under the same rules: a trusted
+repository may carry its own `.e/` folder (skills, prompts), loaded beside
+the global ones and gated by the same per-directory trust as its AGENTS.md.
+That is still e's namespace — `.e/`, not some other tool's dot-folder.
+
 Migration is **explicit, never implicit**: `e import` copies credentials or
 sessions from another tool's store once, with the user watching. e never
 silently borrows at runtime — if it isn't in `~/.e/`, e doesn't have it.

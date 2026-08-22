@@ -77,7 +77,7 @@ struct ProviderEntry {
 }
 
 /// A model in models.json: a bare id string, or an object when the model
-/// needs its own context window.
+/// needs its own context window or effort levels.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ModelEntry {
@@ -86,6 +86,8 @@ enum ModelEntry {
         id: String,
         #[serde(default)]
         context_window: Option<u64>,
+        #[serde(default)]
+        efforts: Vec<String>,
     },
 }
 
@@ -110,16 +112,20 @@ pub fn catalog() -> Vec<Model> {
                         .unwrap_or_default()
                 });
                 for model in entry.models {
-                    let (id, window) = match model {
-                        ModelEntry::Id(id) => (id, None),
-                        ModelEntry::Detailed { id, context_window } => (id, context_window),
+                    let (id, window, efforts) = match model {
+                        ModelEntry::Id(id) => (id, None, Vec::new()),
+                        ModelEntry::Detailed {
+                            id,
+                            context_window,
+                            efforts,
+                        } => (id, context_window, efforts),
                     };
                     let resolved = Model {
                         provider: provider.clone(),
                         id,
                         base_url: base.clone(),
                         api,
-                        efforts: Vec::new(),
+                        efforts,
                         context_window: window.or(entry.context_window).unwrap_or(200_000),
                     };
                     models.retain(|m| !(m.provider == resolved.provider && m.id == resolved.id));

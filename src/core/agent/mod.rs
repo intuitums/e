@@ -105,6 +105,30 @@ pub enum SessionEvent {
     },
 }
 
+/// The effort a model would use given its declared `levels` and the saved
+/// setting: the saved value when this model supports it, else the model's
+/// strong default — `high` when declared, otherwise its first level. None
+/// when the model has no reasoning knob at all.
+pub fn effort(levels: &[String], saved: Option<&str>) -> Option<String> {
+    if levels.is_empty() {
+        return None;
+    }
+    match saved {
+        Some(v) if levels.iter().any(|l| l == v) => Some(v.to_string()),
+        _ => Some(if levels.iter().any(|l| l == "high") {
+            "high".to_string()
+        } else {
+            levels[0].clone()
+        }),
+    }
+}
+
+/// The next level after `current` in the model's cycle, wrapping around.
+pub fn next_effort(levels: &[String], current: &str) -> String {
+    let idx = levels.iter().position(|l| l == current).unwrap_or(0);
+    levels[(idx + 1) % levels.len()].clone()
+}
+
 pub struct Agent {
     pub model: Model,
     /// The extension host; None means built-in tools only.
@@ -149,12 +173,30 @@ impl Agent {
     pub fn model_slug(&self) -> String {
         slug(&self.model)
     }
+    /// The model's declared effort levels, in order; empty when it has no
+    /// reasoning knob.
+    pub fn efforts(&self) -> Vec<String> {
+        self.model.efforts.clone()
+    }
+    /// The effort for the next request: the saved setting when this model
+    /// supports it, else the model's strong default (`high` when declared,
+    /// otherwise its first level).
     pub fn effort(&self) -> Option<String> {
-        if self.model.efforts.is_empty() {
-            None
-        } else {
-            Some(crate::core::config::settings::effort())
+        effort(
+            &self.model.efforts,
+            crate::core::config::settings::get_string("effort").as_deref(),
+        )
+    }
+    /// Advance to the model's next effort level and persist it. None when
+    /// the model has no reasoning knob.
+    pub fn cycle_effort(&self) -> Option<String> {
+        let levels = self.efforts();
+        if levels.is_empty() {
+            return None;
         }
+        let next = next_effort(&levels, self.effort()?.as_str());
+        crate::core::config::settings::set_string("effort", &next);
+        Some(next)
     }
     pub fn history_snapshot(&self) -> Vec<ChatMessage> {
         self.history.lock().unwrap().clone()

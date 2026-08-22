@@ -24,6 +24,10 @@ built-in's provider and id replaces it — the file wins, like themes.
 - `context_window` may sit on the provider (default for its models) or on a
   model object; it drives the statusline percentage and auto-compaction, so
   set it truthfully. Default: 200000.
+- `efforts` on a model object declares its reasoning levels, in cycle order —
+  shift+tab walks exactly this list (e.g. `["low", "medium", "high",
+  "xhigh"]`). Built-ins carry their own; a file entry without `efforts` has
+  no reasoning knob.
 - Credentials: `/login <provider>` stores an API key for any provider name.
 - Only models whose provider has credentials appear in `/models`; scope a
   cycling shortlist with `/scoped-models` (ctrl+p cycles).

@@ -5,8 +5,7 @@
 //! guidelines. A user's `settings.json` `system_prompt` replaces that base
 //! wholesale (the custom-prompt path). Either way, the layered context is
 //! appended in the reference's order: project instructions (AGENTS.md), then
-//! the working
-//! directory. AGENTS.md ships as nothing — the user fills it.
+//! the working directory. AGENTS.md ships as nothing — the user fills it.
 
 use serde::Deserialize;
 use std::path::Path;
@@ -97,7 +96,7 @@ pub fn system_prompt(cwd: &Path) -> String {
     let mut prompt = custom_prompt().unwrap_or_else(default_base);
 
     // Skills catalog (auto-invocable), like the reference's skills section.
-    if let Some(catalog) = crate::core::resources::skills::catalog() {
+    if let Some(catalog) = crate::core::resources::skills::catalog(cwd) {
         prompt.push_str(&format!("\n\n{catalog}"));
     }
 

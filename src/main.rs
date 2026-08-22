@@ -259,7 +259,7 @@ impl App {
             MenuItem::new("/compact", "summarize into a fresh session", "/compact"),
             MenuItem::new(
                 "/trust",
-                "trust this directory (loads its AGENTS.md)",
+                "trust this directory (loads its AGENTS.md, .e resources)",
                 "/trust",
             ),
             MenuItem::new("/settings", "change preferences", "/settings"),
@@ -267,7 +267,7 @@ impl App {
             MenuItem::new("/version", "show the version", "/version"),
             MenuItem::new("/quit", "exit", "/quit"),
         ];
-        for template in e::core::resources::prompts::list() {
+        for template in e::core::resources::prompts::list(&self.agent.cwd()) {
             let slash = format!("/{}", template.name);
             let description = if template.argument_hint.is_empty() {
                 template.description.clone()
@@ -499,7 +499,9 @@ impl App {
 
     fn open_settings(&mut self) {
         self.menu = None;
-        self.settings = Some(e::tui::settingspanel::SettingsPanel::new());
+        self.settings = Some(e::tui::settingspanel::SettingsPanel::new(
+            self.agent.efforts(),
+        ));
     }
 
     fn open_model_menu(&mut self) {
@@ -595,7 +597,7 @@ impl App {
     }
 
     fn open_skills_menu(&mut self, query: &str) {
-        let items: Vec<MenuItem> = e::core::resources::skills::list()
+        let items: Vec<MenuItem> = e::core::resources::skills::list(&self.agent.cwd())
             .into_iter()
             .map(|s| MenuItem::new(&s.name, &s.description, &s.name))
             .collect();
@@ -713,7 +715,8 @@ impl App {
                     None => String::new(),
                 };
                 self.editor.set_text("");
-                if let Some(skill) = e::core::resources::skills::get(&item.value) {
+                if let Some(skill) = e::core::resources::skills::get(&item.value, &self.agent.cwd())
+                {
                     let combined = if rest.is_empty() {
                         skill.body
                     } else {
@@ -821,7 +824,7 @@ impl App {
             "/quit" | "/exit" => self.should_quit = true,
             "/version" => self.notice(format!("e {}", e::VERSION)),
             "/help" => self.notice(
-                "commands:\n  /login [provider]   sign in (API key or account)\n  /models [name]      list or switch models\n  /scoped-models      choose which models ctrl+p cycles\n  /reload             reload extensions, themes, and config\n  /new                fresh session\n  /compact            summarize into a fresh session\n  /trust              trust this directory\n  !<cmd>              run a shell command; the model sees the output\n  /version            show the version\n  /quit               exit"
+                "commands:\n  /login [provider]   sign in (API key or account)\n  /models [name]      list or switch models\n  /scoped-models      choose which models ctrl+p cycles\n  /reload             reload extensions, themes, and config\n  /new                fresh session\n  /compact            summarize into a fresh session\n  /trust              trust this directory (loads its AGENTS.md, .e skills and prompts)\n  ! <cmd>              run a shell command; the model sees the output\n  shift+tab           cycle reasoning effort (per model)\n  /version            show the version\n  /quit               exit"
                     .into(),
             ),
             "/new" | "/clear" => {
@@ -842,12 +845,14 @@ impl App {
             "/compact" => self.compact_now(),
             "/reload" => self.reload(),
             "/trust" => match e::core::config::trust::set(&self.agent.cwd(), true) {
-                Ok(()) => self.notice("directory trusted — its AGENTS.md now loads".into()),
+                Ok(()) => self.notice("directory trusted — its AGENTS.md and .e skills/prompts now load".into()),
                 Err(e) => self.notice(format!("trust: {e}")),
             },
             _ if trimmed.starts_with('/') => {
                 let (name, args) = trimmed[1..].split_once(' ').unwrap_or((&trimmed[1..], ""));
-                if let Some(template) = e::core::resources::prompts::find(name) {
+                if let Some(template) =
+                    e::core::resources::prompts::find(name, &self.agent.cwd())
+                {
                     let expanded = e::core::resources::prompts::substitute(&template.content, args);
                     self.prompt(expanded);
                 } else if self.host.has_command(name) {
@@ -1722,7 +1727,7 @@ e -v, --version"
                                     if let Err(e) = e::core::config::trust::set(&app.agent.cwd(), trusted) {
                                         app.notice(format!("trust: {e}"));
                                     } else if !trusted {
-                                        app.notice("working untrusted — project AGENTS.md ignored (/trust to allow)".into());
+                                        app.notice("working untrusted — project AGENTS.md and .e skills/prompts ignored (/trust to allow)".into());
                                     }
                                 }
                                 _ => {}
@@ -1833,6 +1838,17 @@ e -v, --version"
                             app.cycle_model(!backward);
                         } else if ctrl && k.code == KeyCode::Char('d') && app.editor.is_empty() {
                             break;
+                        } else if k.code == KeyCode::BackTab
+                            || (k.code == KeyCode::Tab
+                                && !ctrl
+                                && k.modifiers.contains(KeyModifiers::SHIFT))
+                        {
+                            // Shift+tab cycles the reasoning effort through
+                            // whatever levels this model declares.
+                            match app.agent.cycle_effort() {
+                                Some(next) => app.notice(format!("reasoning effort: {next}")),
+                                None => app.notice("this model has no reasoning effort control".into()),
+                            }
                         } else if let Some(key) = key_of(&k) {
                             if let EditorResult::Submit(text) = app.editor.key(key) {
                                 app.submit(text);
