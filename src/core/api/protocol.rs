@@ -66,14 +66,51 @@ pub struct CommandDecl {
     pub description: String,
 }
 
-/// A command-line flag an extension understands, for `--help`/`/help`.
-/// Flags are not parsed by e — the startup hook sees raw argv — but
-/// declaring them makes the surface discoverable.
+/// A command-line flag an extension understands, for `--help`/`/help` and
+/// for startup-arg parsing. A `type` of `"string"` (or the default
+/// `"boolean"`) makes e parse the flag from startup argv: booleans match
+/// `--name`, `--name=true|false`, `--no-name`; strings match
+/// `--name=value` or `--name value` (a following token that starts with
+/// `-` is not consumed as a value). Parsed values ride the startup hook's
+/// `flags` params. A name that isn't a clean `--name` token (e.g. a
+/// display string `"-w, --worktree"`) is surfaced in `--help` only and
+/// never parsed.
 #[derive(Debug, Deserialize)]
 pub struct FlagDecl {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// "boolean" (default) or "string" — whether e parses this flag.
+    #[serde(default = "default_flag_type", rename = "type")]
+    pub flag_type: String,
+}
+
+fn default_flag_type() -> String {
+    "boolean".into()
+}
+
+impl FlagDecl {
+    /// The `--name` token this flag parses, when the name is a clean
+    /// identifier; None for display-only strings.
+    pub fn long_form(&self) -> Option<String> {
+        let clean = !self.name.is_empty()
+            && self
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-');
+        clean.then(|| format!("--{}", self.name))
+    }
+
+    /// How this flag renders in `--help`/`/help`: `--name` (or
+    /// `--name <value>` for string flags) when typed, its raw name
+    /// otherwise (display strings like `"-w, --worktree"`).
+    pub fn help_token(&self) -> String {
+        match self.long_form() {
+            Some(long) if self.flag_type == "string" => format!("{long} <value>"),
+            Some(long) => long,
+            None => self.name.clone(),
+        }
+    }
 }
 
 /// A tool result from an extension.

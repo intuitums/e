@@ -51,23 +51,21 @@ function prepareWorktree(cwd, requestedBranch) {
   return path;
 }
 
-connect({
+const ext = connect({
   manifest: {
     name: "worktree",
-    version: "1.0",
+    version: "1.1",
     description: "e -w: managed Git worktree launch (example)",
-    flags: [{ name: "-w, --worktree", description: "launch e in a fresh worktree" }],
+    flags: [{ name: "worktree", type: "string", description: "launch e in a fresh worktree" }],
     hooks: ["startup"],
   },
   startup({ cwd, argv }) {
-    const idx = argv.findIndex(
-      (a) => a === "-w" || a === "--worktree" || a.startsWith("--w=") || a.startsWith("--worktree=")
-    );
-    if (idx === -1) return { argv }; // no flag: pass through untouched
-    const branch =
-      argv[idx].includes("=") ? argv[idx].slice(argv[idx].indexOf("=") + 1) : undefined;
-    const next = [...argv];
-    next.splice(idx, 1); // consume the flag
-    return { argv: next, relaunch: { cwd: prepareWorktree(cwd, branch) } };
+    // The typed flag was parsed by e: a string (branch name), null for a
+    // bare --worktree (pick a random name), undefined when not given.
+    const branch = ext.flag("worktree");
+    if (branch === undefined) return { argv }; // no --worktree: pass through
+    const next = argv.filter((a) => a !== "--worktree" && !a.startsWith("--worktree="));
+    return { argv: next, relaunch: { cwd: prepareWorktree(cwd, branch || undefined) } };
   },
-}).run();
+});
+ext.run();

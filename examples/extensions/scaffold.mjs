@@ -18,7 +18,10 @@
  *
  *   initialize(params)     — stash config ({extensions_config}), before the
  *                            manifest is answered
- *   startup({cwd, argv})   — {"argv": […], "env": {"K": "v"|null}, "relaunch": {"cwd": …}}
+ *   startup({cwd, argv, flags}) — {"argv": […], "env": {"K": "v"|null},
+ *                            "relaunch": {"cwd": …}}. `flags` are the
+ *                            parsed values of your typed flag declarations
+ *                            (see flag() below).
  *   command({name, args})  — {"notice": …} | {"prompt": …} | {"session_name": …}
  *   tool({name, arguments})— {"content": …, "is_error"?: bool, "session_name"?: …}
  *   hookToolCall({name, arguments}) — {"block": true, "reason": …} | {"block": false}
@@ -60,6 +63,9 @@ export function connect({ manifest = {}, ...handlers } = {}) {
     }
   }
 
+  // Last startup's parsed flags; flag() reads them after startup runs.
+  let lastFlags = {};
+
   function route(request) {
     const { id, method, params } = request;
     switch (method) {
@@ -81,7 +87,10 @@ export function connect({ manifest = {}, ...handlers } = {}) {
         break;
     }
     const handler = {
-      "hook.startup": handlers.startup,
+      "hook.startup": (params) => {
+        if (params && typeof params.flags === "object") lastFlags = params.flags;
+        return handlers.startup ? handlers.startup(params) : undefined;
+      },
       "command": handlers.command,
       "tool_call": handlers.tool,
       "hook.tool_call": handlers.hookToolCall,
@@ -96,6 +105,12 @@ export function connect({ manifest = {}, ...handlers } = {}) {
   }
 
   return {
+    /** The parsed value of a typed flag (string, boolean, or null when a
+     *  string flag was bare). Undefined for flags never given. Works after
+     *  startup ran — the pi getFlag analog for e's wire protocol. */
+    flag(name) {
+      return lastFlags[name];
+    },
     run() {
       rl.on("line", (line) => {
         let request;

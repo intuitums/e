@@ -8,6 +8,16 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
++- Flags become typed: an extension declares `"type":"boolean"` (default)
++  or `"string"` on a flag, and e parses it from startup argv — booleans
++  match `--name`, `--name=true|false`, `--no-name`; strings match
++  `--name=value` or `--name value` (a following `-` token is never taken
++  as a value). Parsed values ride `hook.startup`'s new `flags` params, so
++  extensions read them without hand-scanning argv; display-only flag names
++  (like `"-w, --worktree"`) are unchanged. `e --help` renders typed flags
++  as `--name`/`--name <value>`. The scaffold gains a `flag()` getter and
++  the worktree example moves onto typed flags.
+
 +- `examples/extensions/scaffold.mjs`: the extension protocol's shared
 +  plumbing — framing, id routing, a `connect({manifest, handlers})`
 +  that reads like an SDK with nothing to import but Node. The examples

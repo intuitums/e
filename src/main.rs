@@ -37,8 +37,8 @@ e -v, --version"
         let commands = host.commands();
         if !flags.is_empty() {
             println!("\nextension flags:");
-            for (name, description) in flags {
-                println!("  e {name:<18} {description}");
+            for (token, description) in flags {
+                println!("  e {token:<20} {description}");
             }
         }
         if !commands.is_empty() {

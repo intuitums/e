@@ -89,14 +89,85 @@ impl ExtensionHost {
         self.extensions.is_empty()
     }
 
+    /// Parse argv against every extension's typed flag declarations. Returns
+    /// `{"name": value}` for flags that appeared — booleans as true/false,
+    /// strings as their value (null when a string flag is bare or followed
+    /// by another flag). The argv is not modified; an extension still
+    /// decides what reaches the next stage.
+    fn parse_flags(&self, argv: &[String]) -> serde_json::Value {
+        let mut parsed = serde_json::Map::new();
+        let mut i = 0;
+        while i < argv.len() {
+            let arg = &argv[i];
+            if arg == "--" {
+                break;
+            }
+            // Match this arg against every declared flag. A separated string
+            // value (`--name value`) is consumed at most once, whichever
+            // declaration matches first.
+            let mut consumed_value = false;
+            let mut match_flag = |parsed: &mut serde_json::Map<String, serde_json::Value>| {
+                for ext in &self.extensions {
+                    for flag in &ext.manifest.flags {
+                        let Some(long) = flag.long_form() else {
+                            continue; // display-only name
+                        };
+                        if flag.flag_type == "string" {
+                            if let Some(value) = arg.strip_prefix(&format!("{long}=")) {
+                                parsed.insert(flag.name.clone(), serde_json::json!(value));
+                            } else if &long == arg {
+                                // `--name value`, or null when the next
+                                // token is another flag or absent.
+                                match argv.get(i + 1) {
+                                    Some(next) if next != "-" && !next.starts_with('-') => {
+                                        if !consumed_value {
+                                            parsed
+                                                .insert(flag.name.clone(), serde_json::json!(next));
+                                            consumed_value = true;
+                                        }
+                                    }
+                                    _ => {
+                                        parsed.insert(flag.name.clone(), serde_json::Value::Null);
+                                    }
+                                }
+                            }
+                        } else if &long == arg {
+                            parsed.insert(flag.name.clone(), serde_json::json!(true));
+                        } else if let Some(value) = arg.strip_prefix(&format!("{long}=")) {
+                            let on = matches!(
+                                value.to_ascii_lowercase().as_str(),
+                                "1" | "true" | "yes" | "on"
+                            );
+                            parsed.insert(flag.name.clone(), serde_json::json!(on));
+                        } else if let Some(rest) = arg.strip_prefix("--no-") {
+                            if rest == flag.name {
+                                parsed.insert(flag.name.clone(), serde_json::json!(false));
+                            }
+                        }
+                    }
+                }
+            };
+            match_flag(&mut parsed);
+            if consumed_value {
+                i += 1; // skip the separated value slot
+            }
+            i += 1;
+        }
+        serde_json::Value::Object(parsed)
+    }
+
     /// Chain startup-capable extensions over raw argv. Unlike runtime hooks,
     /// an explicit startup-hook failure is fatal because silently treating a
-    /// consumed branch name as a prompt is unsafe and surprising.
+    /// consumed branch name as a prompt is unsafe and surprising. Parsed
+    /// flag values (from every extension's typed flag declarations) ride
+    /// along as `flags` so extensions read `--name=value` / `--name` without
+    /// hand-scanning argv.
     pub async fn startup(&self, mut argv: Vec<String>) -> Result<StartupAction, String> {
         let cwd = std::env::current_dir()
             .unwrap_or_default()
             .display()
             .to_string();
+        let parsed = self.parse_flags(&argv);
         for ext in &self.extensions {
             if !ext.manifest.hooks.iter().any(|hook| hook == "startup") {
                 continue;
@@ -105,7 +176,7 @@ impl ExtensionHost {
                 .request(
                     ext,
                     "hook.startup",
-                    json!({"cwd": cwd, "argv": argv.clone()}),
+                    json!({ "cwd": cwd, "argv": argv.clone(), "flags": parsed }),
                     HOOK_TIMEOUT,
                 )
                 .await
@@ -191,9 +262,9 @@ impl ExtensionHost {
             .collect()
     }
 
-    /// `(name, description)` of every extension flag, for `--help`/`/help`.
-    /// Flags are declared for discoverability only — e does not parse them;
-    /// the startup hook sees raw argv.
+    /// `(name, description, type)` of every extension flag, for `--help`/`/help`.
+    /// Flags are declared for discoverability — e does not parse them; the
+    /// startup hook sees raw argv.
     pub fn flags(&self) -> Vec<(String, String)> {
         self.extensions
             .iter()
@@ -201,7 +272,7 @@ impl ExtensionHost {
                 e.manifest
                     .flags
                     .iter()
-                    .map(|f| (f.name.clone(), f.description.clone()))
+                    .map(|f| (f.help_token(), f.description.clone()))
             })
             .collect()
     }

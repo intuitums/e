@@ -21,7 +21,7 @@ e → extension, requests (each carries an `id` to answer with):
 
 ```
 {"id":1,"method":"initialize","params":{"protocol":1,"e_version":"0.4.0-dev","cwd":"/path","extensions_config":{…}}}
-{"id":2,"method":"hook.startup","params":{"cwd":"/path","argv":["--worktree","feature"]}}
+{"id":2,"method":"hook.startup","params":{"cwd":"/path","argv":["--worktree","feature"],"flags":{"worktree":"feature"}}}
 {"id":3,"method":"tool_call","params":{"name":"greet","arguments":{...}}}
 {"id":4,"method":"command","params":{"name":"ping","args":"rest of the line"}}
 {"id":5,"method":"hook.tool_call","params":{"name":"bash","arguments":{...}}}
@@ -55,12 +55,21 @@ squatting on a top-level key:
 {"name":"my-ext","version":"1.0",
  "tools":[{"name":"greet","description":"say hi","parameters":{"type":"object","properties":{}}}],
  "commands":[{"name":"ping","description":"check the extension"}],
- "flags":[{"name":"-w, --worktree","description":"run in a fresh worktree"}],
+ "flags":[{"name":"worktree","type":"string","description":"run in a fresh worktree"},
+           {"name":"plan","type":"boolean","description":"plan mode"}],
  "hooks":["tool_call","input"]}
 ```
 
-`flags` are for discoverability only — e does not parse them (the startup
-hook sees raw argv); they appear under **extension flags** in `e --help`.
+`flags` are **declared** for discoverability and useful so e can *parse*
+them. A flag with `"type":"boolean"` (the default) or `"type":"string"`
+is recognized in startup argv — booleans match `--name`, `--name=true|false`,
+`--no-name`; strings match `--name=value` or `--name value` (a following
+`-` token is never consumed as a value). Parsed values ride the startup
+hook's `flags` params: `{"worktree":"feature"}`. A bare string flag at
+end-of-argv parses as `null` (flag present, no value). Last occurrence
+wins; `--` stops parsing. A name that isn't a clean `--name` token (e.g.
+`"-w, --worktree"`) appears in `e --help` but is never parsed — those
+flags still need the startup hook's raw argv.
 
 **tool_call** → `{"content":"text the model sees","is_error":false,
 "session_name":"optional new session name"}`
@@ -84,7 +93,9 @@ order; the first extension to consume or replace wins:
 An empty result allows the line through untouched. A pasted API key is
 handled before the hook and never reaches it.
 
-**hook.startup** → rewritten arguments and optional process changes:
+**hook.startup** → rewritten arguments and optional process changes, given
+`{cwd, argv, flags}` where `flags` are the parsed values of every typed
+flag declaration:
 
 ```json
 {"argv":["-c"],

@@ -23,6 +23,7 @@ while IFS= read -r line; do
       case "$line" in
         *startup-error*) printf '{"id":%s,"error":"bad startup"}\n' "$id" ;;
         *relaunch-me*) printf '{"id":%s,"result":{"argv":["-c"],"relaunch":{"cwd":"/tmp","env":{"E_TEST":"1"}}}}\n' "$id" ;;
+        *probe-flags*) printf '{"id":%s,"result":{"argv":["-c"]}}\n' "$id" ;;
         *) printf '{"id":%s,"result":{"argv":["-c"]}}\n' "$id" ;;
       esac ;;
     *'"hook.tool_call"'*)
@@ -62,15 +63,21 @@ mod tempdir {
     }
     impl TempHome {
         pub fn with_extension(name: &str, body: &str) -> TempHome {
+            Self::with_extensions(&[(name, body)])
+        }
+        pub fn with_extensions(names_bodies: &[(&str, &str)]) -> TempHome {
             let dir = std::env::temp_dir().join(format!("e-api-test-{}", std::process::id()));
             let ext = dir.join("extensions");
             std::fs::create_dir_all(&ext).unwrap();
-            let path = ext.join(name);
-            std::fs::write(&path, body).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            for (name, body) in names_bodies {
+                let path = ext.join(name);
+                std::fs::write(&path, body).unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
             }
             std::env::set_var("E_HOME", &dir);
             TempHome { dir }
@@ -236,5 +243,169 @@ done
         "config-carrying extension must initialize"
     );
     assert_eq!(host.commands(), vec![("cfg".to_string(), "d".to_string())]);
+    host.shutdown().await;
+}
+
+/// Typed flags are parsed from startup argv by e and handed to the hook as
+/// `params.flags`. The fake echoes them back over notify; the test asserts
+/// boolean (bare / =value / --no-), string (=value / value / bare-null),
+/// last-wins, and that a display-only flag name is never parsed.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn startup_parses_typed_flags_into_params() {
+    const FLAGS_FAKE: &str = r#"#!/usr/bin/env node
+const rl = require("node:readline").createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  let req; try { req = JSON.parse(line); } catch { return; }
+  if (req.method === "initialize") {
+    process.stdout.write(JSON.stringify({ id: req.id, result: {
+      name: "flagsprobe", version: "1",
+      flags: [
+        { name: "worktree", type: "string", description: "branch" },
+        { name: "plan", type: "boolean", description: "plan mode" },
+        { name: "-x, --extra", description: "display only" },
+      ],
+      hooks: ["startup"],
+    }}) + "\n");
+  } else if (req.method === "hook.startup") {
+    process.stdout.write(JSON.stringify({ id: req.id, result: { argv: ["-c"] } }) + "\n");
+    // Report what e parsed (notify is a no-reply extension->e message).
+    if (req.params && req.params.flags) {
+      process.stdout.write(JSON.stringify({ method: "notify", params: { message: "FLAGS " + JSON.stringify(req.params.flags) } }) + "\n");
+    }
+  } else if (req.method === "shutdown") process.exit(0);
+});
+"#;
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _home = tempdir::TempHome::with_extension("flagsprobe.sh", FLAGS_FAKE);
+    let (notices, mut rx) = tokio::sync::mpsc::channel(16);
+    let host = ExtensionHost::start(notices).await;
+    assert!(!host.is_empty());
+
+    let mut flags: Option<serde_json::Value> = None;
+    // Drive the startup with a mixed argv; the fake's hook echoes the flags.
+    match host
+        .startup(vec!["--worktree=feat".into(), "--plan".into(), "-c".into()])
+        .await
+        .unwrap()
+    {
+        StartupAction::Continue(_) => {}
+        StartupAction::Relaunch { .. } => panic!("no relaunch"),
+    }
+    while let Some(msg) = rx.recv().await {
+        if let Some(rest) = msg.strip_prefix("FLAGS ") {
+            flags = serde_json::from_str(rest).ok();
+            break;
+        }
+    }
+    let flags = flags.expect("notify echoed the parsed flags");
+    assert_eq!(flags["worktree"], "feat");
+    assert_eq!(flags["plan"], true);
+    assert_eq!(flags["-x, --extra"], serde_json::Value::Null); // display-only, unparsed
+
+    // Boolean variants: =false, --no-, last-wins; string separating value.
+    let mut flags: Option<serde_json::Value> = None;
+    match host
+        .startup(vec![
+            "--plan=false".into(),
+            "--worktree".into(),
+            "feature-x".into(),
+        ])
+        .await
+        .unwrap()
+    {
+        StartupAction::Continue(_) => {}
+        StartupAction::Relaunch { .. } => panic!("no relaunch"),
+    }
+    while let Some(msg) = rx.recv().await {
+        if let Some(rest) = msg.strip_prefix("FLAGS ") {
+            flags = serde_json::from_str(rest).ok();
+            break;
+        }
+    }
+    let flags = flags.expect("second echo");
+    assert_eq!(flags["plan"], false);
+    assert_eq!(flags["worktree"], "feature-x");
+
+    // A bare string flag parses as null whether at the end or followed by
+    // another flag; and it never consumes the next flag as a value.
+    let mut flags: Option<serde_json::Value> = None;
+    match host
+        .startup(vec!["--worktree".into(), "--plan".into()])
+        .await
+        .unwrap()
+    {
+        StartupAction::Continue(_) => {}
+        StartupAction::Relaunch { .. } => panic!("no relaunch"),
+    }
+    while let Some(msg) = rx.recv().await {
+        if let Some(rest) = msg.strip_prefix("FLAGS ") {
+            flags = serde_json::from_str(rest).ok();
+            break;
+        }
+    }
+    let flags = flags.expect("third echo");
+    assert_eq!(flags["worktree"], serde_json::Value::Null);
+
+    host.shutdown().await;
+}
+
+/// Two extensions declaring the same string flag must consume the
+/// separated value exactly once — a second declaration must not skip a
+/// following flag. argv is never modified by parsing; the value stays put.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn shared_string_flag_consumes_one_value() {
+    const BOTH_FAKE: &str = r#"#!/usr/bin/env node
+const rl = require("node:readline").createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  let req; try { req = JSON.parse(line); } catch { return; }
+  if (req.method === "initialize") {
+    process.stdout.write(JSON.stringify({ id: req.id, result: {
+      name: "shared", version: "1",
+      flags: [
+        { name: "dir", type: "string", description: "target" },
+        { name: "plan", type: "boolean", description: "plan mode" },
+      ],
+      hooks: ["startup"],
+    }}) + "\n");
+  } else if (req.method === "hook.startup") {
+    process.stdout.write(JSON.stringify({ id: req.id, result: { argv: req.params.argv } }) + "\n");
+    if (req.params.flags) {
+      process.stdout.write(JSON.stringify({ method: "notify", params: { message: "FLAGS " + JSON.stringify(req.params.flags) } }) + "\n");
+    }
+  } else if (req.method === "shutdown") process.exit(0);
+});
+"#;
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _home = tempdir::TempHome::with_extensions(&[("a.sh", BOTH_FAKE), ("b.sh", BOTH_FAKE)]);
+    let (notices, mut rx) = tokio::sync::mpsc::channel(16);
+    let host = ExtensionHost::start(notices).await;
+    assert!(!host.is_empty());
+
+    let mut flags = None;
+    match host
+        .startup(vec!["--dir".into(), "target".into(), "--plan".into()])
+        .await
+        .unwrap()
+    {
+        StartupAction::Continue(argv) => {
+            // Parsing never modifies argv — the value and following flag
+            // stay untouched.
+            assert_eq!(argv, vec!["--dir", "target", "--plan"]);
+        }
+        StartupAction::Relaunch { .. } => panic!("no relaunch"),
+    }
+    while let Some(msg) = rx.recv().await {
+        if let Some(rest) = msg.strip_prefix("FLAGS ") {
+            flags = serde_json::from_str::<serde_json::Value>(rest).ok();
+            break;
+        }
+    }
+    let flags = flags.expect("echoed flags");
+    // The separated value was consumed once...
+    assert_eq!(flags["dir"], "target");
+    // ...and the following flag was still parsed (not skipped).
+    assert_eq!(flags["plan"], true);
     host.shutdown().await;
 }
