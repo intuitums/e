@@ -68,8 +68,6 @@
   declares (low/medium/high today; xhigh and friends as models expose them);
   the choice persists in settings and shows in the status line.
 
-## 0.4.1 — 2026-08-21
-
 - Release notes now carry the version's changelog section and install
   instructions; `e docs models` documents env-var credentials and the
   live catalog; ROADMAP records the 0.4 line.
@@ -146,8 +144,6 @@
   with a `│ <outcome>` continuation line (`│ exit 128`) beneath.
   Reasoning summaries render their inline markdown (**bold titles**, code
   spans) instead of showing literal asterisks.
-## 0.4.0 — 2026-08-21
-
 - Installation: `install.sh` (curl-able, checksum-verified, macOS and
   Linux on both architectures) and a Homebrew tap, both fed by a release
   workflow that builds and publishes the four binaries on every version
