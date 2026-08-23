@@ -395,3 +395,24 @@ fn interrupted_tools_wear_the_cancelled_glyph() {
         t.blocks[0].text
     );
 }
+
+#[test]
+fn a_malformed_user_theme_falls_back_instead_of_panicking() {
+    use e::tui::theme::Theme;
+    // Every shape that used to slice out of bounds, plus a non-ASCII value
+    // whose byte length lies about its char count.
+    for broken in [
+        r##"{"vars":{},"colors":{"text":"#f"}}"##,
+        r##"{"vars":{},"colors":{"text":"#12345"}}"##,
+        r##"{"vars":{},"colors":{"text":"#1234567"}}"##,
+        r##"{"vars":{},"colors":{"text":"#zzzzzz"}}"##,
+        r##"{"vars":{},"colors":{"text":"#é2é4é6"}}"##,
+        r#"{"vars":{},"colors":{"text":"nothex"}}"#,
+    ] {
+        // Must return Err (or Ok with the token dropped) — never unwind.
+        let _ = Theme::from_json(broken);
+    }
+    // A valid theme still resolves its hex colors.
+    let ok = Theme::from_json(r##"{"vars":{"ink":235},"colors":{"text":"#a1b2c3"}}"##).unwrap();
+    assert_eq!(ok.fg_prefix("text"), "\x1b[38;2;161;178;195m");
+}

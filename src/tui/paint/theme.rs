@@ -27,7 +27,12 @@ fn fg_code(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Number(n) => Some(format!("\x1b[38;5;{}m", n.as_i64()?)),
         serde_json::Value::String(s) if s.is_empty() => Some("\x1b[39m".to_string()),
         serde_json::Value::String(s) if s.starts_with('#') => {
+            // Exactly six ASCII hex digits after '#'; anything else is a
+            // user-edit typo and must fall back, not panic on a slice.
             let hex = &s[1..];
+            if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
             let (r, g, b) = (
                 u8::from_str_radix(&hex[0..2], 16).ok()?,
                 u8::from_str_radix(&hex[2..4], 16).ok()?,
