@@ -15,4 +15,6 @@ mod host;
 mod protocol;
 
 pub use host::{ExtensionHost, StartupAction};
-pub use protocol::{CommandResult, HookVerdict, Manifest, ToolResult, PROTOCOL_VERSION};
+pub use protocol::{
+    CommandResult, HookVerdict, InputVerdict, Manifest, ToolResult, PROTOCOL_VERSION,
+};

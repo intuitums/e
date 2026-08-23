@@ -8,6 +8,16 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
++- The extension surface grows the pieces real extensions reach for:
++  `input` hook (consume/rewrite a submitted line, fail-open, API keys
++  never reach it), `session_name` from commands and tools (shown in
++  /resume), a `flags` manifest entry surfaced in `e --help`, and a
++  namespaced config key (`settings.json` `extensions.<name>`) delivered
++  with every initialize. `e --help` now lists extension flags and
++  commands; `/help` lists extension commands; `examples/extensions/`
++  ships `hello.mjs` (every surface in ~90 lines) and `worktree.mjs` (a
++  minimal -w launcher); docs/extensions.md documents the new results.
+
 - Retries now show their work instead of a scrollback notice: a retryable
   failure (429/408/5xx, a network drop, a stalled request, or a provider
   error frame naming an outage or rate limit) replaces the Thinking row in

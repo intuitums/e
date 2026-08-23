@@ -32,11 +32,17 @@ fn commit(
     cwd: &std::path::Path,
     model: &Model,
     message: ChatMessage,
+    session_name: &Arc<Mutex<Option<String>>>,
 ) {
     history.lock().unwrap().push(message.clone());
     let mut guard = session.lock().unwrap();
     if guard.is_none() {
         *guard = Session::create(cwd, &slug(model)).ok();
+        if let Some(s) = guard.as_mut() {
+            if let Some(name) = session_name.lock().unwrap().clone() {
+                s.set_name(&name);
+            }
+        }
     }
     if let Some(s) = guard.as_mut() {
         s.append(&message);
@@ -109,6 +115,8 @@ pub enum SessionEvent {
         summary: String,
         content: String,
     },
+    /// An extension tool named the session.
+    Named(String),
     Usage {
         input: u64,
         output: u64,
@@ -173,6 +181,9 @@ pub struct Agent {
     running: bool,
     /// The session log; every committed message is appended.
     session: Arc<Mutex<Option<Session>>>,
+    /// An extension-set display name, applied when the log exists or when it
+    /// is created on the first message.
+    session_name: Arc<Mutex<Option<String>>>,
 }
 
 impl Agent {
@@ -188,6 +199,7 @@ impl Agent {
             cancel: Arc::new(AtomicBool::new(false)),
             running: false,
             session: Arc::new(Mutex::new(None)),
+            session_name: Arc::new(Mutex::new(None)),
         };
         (agent, rx)
     }
@@ -249,6 +261,7 @@ impl Agent {
             &self.cwd,
             &self.model,
             ChatMessage::user(text),
+            &self.session_name,
         );
     }
 
@@ -265,6 +278,7 @@ impl Agent {
             &self.cwd,
             &self.model,
             ChatMessage::user(crate::core::agent::compact::seed(summary)),
+            &self.session_name,
         );
         for message in kept {
             commit(
@@ -273,6 +287,7 @@ impl Agent {
                 &self.cwd,
                 &self.model,
                 message,
+                &self.session_name,
             );
         }
     }
@@ -281,6 +296,25 @@ impl Agent {
     pub fn set_session(&self, session: Option<Session>) {
         *self.session.lock().unwrap() = session;
     }
+
+    /// Name this session: applies immediately when a log exists, otherwise
+    /// when the log is created on the first message. Either way the name is
+    /// idempotent — the last one wins.
+    pub fn set_session_name(&self, name: String) {
+        *self.session_name.lock().unwrap() = Some(name);
+        if let Some(s) = self.session.lock().unwrap().as_mut() {
+            if let Some(name) = self.session_name.lock().unwrap().clone() {
+                s.set_name(&name);
+            }
+        }
+    }
+
+    /// The extension-set session name, if any (the derived title still
+    /// exists but the name overrides it in /resume).
+    pub fn session_name(&self) -> Option<String> {
+        self.session_name.lock().unwrap().clone()
+    }
+
     pub fn cwd(&self) -> PathBuf {
         self.cwd.clone()
     }
@@ -301,6 +335,7 @@ impl Agent {
             &self.cwd,
             &self.model,
             ChatMessage::user(text),
+            &self.session_name,
         );
         self.start(system);
         false
@@ -319,6 +354,7 @@ impl Agent {
         let session = self.session.clone();
         let pending = self.pending.clone();
         let host = self.host.clone();
+        let session_name = self.session_name.clone();
 
         tokio::spawn(async move {
             let _ = events.send(SessionEvent::TurnStart).await;
@@ -331,7 +367,14 @@ impl Agent {
                 let steered: Vec<String> = { pending.lock().unwrap().drain(..).collect() };
                 for message in steered {
                     let _ = events.send(SessionEvent::Steered(message.clone())).await;
-                    commit(&history, &session, &cwd, &model, ChatMessage::user(message));
+                    commit(
+                        &history,
+                        &session,
+                        &cwd,
+                        &model,
+                        ChatMessage::user(message),
+                        &session_name,
+                    );
                 }
 
                 let messages = { history.lock().unwrap().clone() };
@@ -488,6 +531,7 @@ impl Agent {
                             tool_call_id: None,
                             tool_meta: None,
                         },
+                        &session_name,
                     );
                 }
                 // Commit the assistant turn (text + any calls).
@@ -497,6 +541,7 @@ impl Agent {
                     &cwd,
                     &model,
                     ChatMessage::assistant(text, calls.clone()),
+                    &session_name,
                 );
 
                 if calls.is_empty() {
@@ -591,6 +636,7 @@ impl Agent {
                             output.outcome,
                             output.summary,
                         ),
+                        &session_name,
                     );
                 }
                 if cancel.load(Ordering::SeqCst) {
@@ -645,6 +691,13 @@ async fn run_tool(
             loop {
                 tokio::select! {
                     result = &mut call => {
+                        // An extension tool may name the session as a side
+                        // effect; the UI applies it on SessionEvent::Named.
+                        if let Some(new_name) = result.session_name.clone() {
+                            let _ = events
+                                .send(SessionEvent::Named(new_name))
+                                .await;
+                        }
                         let outcome = if result.is_error {
                             tools::ToolOutcome::Failed
                         } else {

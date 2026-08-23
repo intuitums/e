@@ -49,8 +49,17 @@ pub fn remove(key: &str) {
     });
 }
 
-/// A settings choice: a label, a category, and the options to cycle through.
-/// Options are owned so some (theme) can be computed from `~/.e/` at runtime —
+/// The whole `extensions` object from settings — each entry namespaced by
+/// extension name (`{"extensions":{"<name>":{…}}}`), passed to every
+/// extension's initialize so none has to squat on a top-level key.
+pub fn extensions_config() -> serde_json::Value {
+    crate::core::config::store::read_object(&home::settings_path())
+        .get("extensions")
+        .cloned()
+        .unwrap_or(serde_json::Value::Object(Default::default()))
+}
+
+/// A settings choice: a label, a category, and the options to cycle through./// Options are owned so some (theme) can be computed from `~/.e/` at runtime —
 /// user themes are just files, not a compiled list.
 pub struct Setting {
     pub key: String,

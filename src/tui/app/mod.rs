@@ -58,6 +58,13 @@ enum AppJob {
     Notice(String),
     /// A prompt an extension command asked to submit as the user.
     Prompt(String),
+    /// An input hook's verdict on a submitted line: consume/replace/notice.
+    InputVerdict {
+        text: String,
+        verdict: crate::core::api::InputVerdict,
+    },
+    /// An extension named the session (tool or command result).
+    Rename(String),
     /// A finished /compact: the summary and the recent messages kept verbatim.
     Compacted {
         summary: String,
@@ -771,6 +778,27 @@ impl App {
             return;
         }
 
+        // An input hook can consume or rewrite the line before anything else
+        // sees it (a pasted API key is handled below and never reaches it).
+        if self.host.has_input_hook() {
+            let host = self.host.clone();
+            let results = self.results.clone();
+            tokio::spawn(async move {
+                let verdict = host.hook_input(&trimmed).await;
+                let _ = results.send(AppJob::InputVerdict { text, verdict }).await;
+            });
+            return;
+        }
+        self.submit_direct(trimmed);
+    }
+
+    /// The real submit flow, after the input hook (if any) has had its say.
+    fn submit_direct(&mut self, text: String) {
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+
         if let Some(secret_for) = self.pending_key.take() {
             // A pasted API key goes to auth.json and nowhere else — in
             // particular not into the composer's recall history below.
@@ -838,10 +866,17 @@ impl App {
         match trimmed.as_str() {
             "/quit" | "/exit" => self.should_quit = true,
             "/version" => self.notice(format!("e {}", crate::VERSION)),
-            "/help" => self.notice(
-                "commands:\n  /login [provider]   sign in (API key or account)\n  /models [name]      list or switch models\n  /scoped-models      choose which models ctrl+p cycles\n  /reload             reload extensions, themes, and config\n  /new                fresh session\n  /compact            summarize into a fresh session\n  /trust              trust this directory (loads its AGENTS.md, .e skills and prompts)\n  ! <cmd>              run a shell command; the model sees the output\n  shift+tab           cycle reasoning effort (per model)\n  /version            show the version\n  /quit               exit"
-                    .into(),
-            ),
+            "/help" => {
+                let mut help = "commands:\n  /login [provider]   sign in (API key or account)\n  /models [name]      list or switch models\n  /scoped-models      choose which models ctrl+p cycles\n  /reload             reload extensions, themes, and config\n  /new                fresh session\n  /compact            summarize into a fresh session\n  /trust              trust this directory (loads its AGENTS.md, .e skills and prompts)\n  ! <cmd>              run a shell command; the model sees the output\n  shift+tab           cycle reasoning effort (per model)\n  /version            show the version\n  /quit               exit".to_string();
+                let ext_commands = self.host.commands();
+                if !ext_commands.is_empty() {
+                    help.push_str("\n\nextension commands:");
+                    for (name, description) in ext_commands {
+                        help.push_str(&format!("\n  /{name:<21}{description}"));
+                    }
+                }
+                self.notice(help);
+            }
             "/new" | "/clear" => {
                 self.compacting = false;
                 self.compact_requested = false;
@@ -852,7 +887,8 @@ impl App {
                 self.agent.clear();
                 self.agent.set_session(None);
                 self.transcript.clear();
-                self.transcript.push(Block::new(Kind::Banner, crate::VERSION));
+                self.transcript
+                    .push(Block::new(Kind::Banner, crate::VERSION));
             }
             "/resume" => self.open_resume_menu(),
             "/settings" => self.open_settings(),
@@ -860,7 +896,9 @@ impl App {
             "/compact" => self.compact_now(),
             "/reload" => self.reload(),
             "/trust" => match crate::core::config::trust::set(&self.agent.cwd(), true) {
-                Ok(()) => self.notice("directory trusted — its AGENTS.md and .e skills/prompts now load".into()),
+                Ok(()) => self.notice(
+                    "directory trusted — its AGENTS.md and .e skills/prompts now load".into(),
+                ),
                 Err(e) => self.notice(format!("trust: {e}")),
             },
             _ if trimmed.starts_with('/') => {
@@ -868,7 +906,8 @@ impl App {
                 if let Some(template) =
                     crate::core::resources::prompts::find(name, &self.agent.cwd())
                 {
-                    let expanded = crate::core::resources::prompts::substitute(&template.content, args);
+                    let expanded =
+                        crate::core::resources::prompts::substitute(&template.content, args);
                     self.prompt(expanded);
                 } else if self.host.has_command(name) {
                     let host = self.host.clone();
@@ -881,6 +920,9 @@ impl App {
                         }
                         if let Some(prompt) = out.prompt {
                             let _ = results.send(AppJob::Prompt(prompt)).await;
+                        }
+                        if let Some(rename) = out.session_name.filter(|n| !n.trim().is_empty()) {
+                            let _ = results.send(AppJob::Rename(rename)).await;
                         }
                     });
                 } else {
@@ -1049,6 +1091,10 @@ impl App {
                         }
                     }
                 }
+            }
+            SessionEvent::Named(name) => {
+                self.agent.set_session_name(name.clone());
+                self.notice(format!("session: {name}"));
             }
             SessionEvent::ToolEnd {
                 id,
@@ -1849,6 +1895,24 @@ pub async fn run(
                 match job {
                     Some(AppJob::Notice(notice)) => app.notice(notice),
                     Some(AppJob::Prompt(prompt)) => app.prompt(prompt),
+                    Some(AppJob::InputVerdict { text, verdict }) => {
+                        if let Some(notice) = verdict.notice.filter(|n| !n.trim().is_empty()) {
+                            app.notice(notice);
+                        }
+                        if verdict.consume {
+                            // Swallowed entirely — nothing reaches the agent.
+                        } else if let Some(replace) = verdict.replace {
+                            // The extension rewrote the line; it already saw
+                            // the original, so no second hook pass.
+                            app.submit_direct(replace);
+                        } else {
+                            app.submit(text);
+                        }
+                    }
+                    Some(AppJob::Rename(name)) => {
+                        app.agent.set_session_name(name.clone());
+                        app.notice(format!("session: {name}"));
+                    }
                     Some(AppJob::Compacted { summary, kept }) => {
                         // Ignore a result that outlived its session (/new won).
                         if app.compacting {

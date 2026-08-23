@@ -29,6 +29,10 @@ enum Entry {
     },
     #[serde(rename = "message")]
     Message { message: ChatMessage },
+    /// A display name an extension set via session_name — shown in /resume,
+    /// overriding the title derived from the first user message.
+    #[serde(rename = "name")]
+    Name { name: String },
 }
 
 pub struct Session {
@@ -76,6 +80,20 @@ impl Session {
         }
     }
 
+    /// Set the display name e shows for this session. Idempotent; appends a
+    /// name entry, so the most recent name wins on resume.
+    pub fn set_name(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        if let Ok(line) = serde_json::to_string(&Entry::Name {
+            name: name.to_string(),
+        }) {
+            let _ = writeln!(self.file, "{line}");
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -103,11 +121,14 @@ impl Session {
     }
 }
 
+#[derive(Debug, Clone, Default)]
 pub struct SessionInfo {
     pub path: PathBuf,
     pub title: String,
     pub modified: u64,
     pub message_count: usize,
+    /// A name an extension set, overriding the derived title.
+    pub name: Option<String>,
 }
 
 /// List this workspace's sessions, newest first.
@@ -131,7 +152,18 @@ pub fn most_recent(cwd: &Path) -> Option<PathBuf> {
 }
 
 fn info(path: &Path) -> Option<SessionInfo> {
-    let messages = Session::load(path).ok()?;
+    // Read messages and any extension-set name in one pass.
+    let reader = BufReader::new(File::open(path).ok()?);
+    let mut messages = Vec::new();
+    let mut name = None;
+    for line in reader.lines() {
+        let line = line.ok()?;
+        if let Ok(Entry::Message { message }) = serde_json::from_str(&line) {
+            messages.push(message);
+        } else if let Ok(Entry::Name { name: n }) = serde_json::from_str(&line) {
+            name = Some(n);
+        }
+    }
     let modified = std::fs::metadata(path)
         .ok()?
         .modified()
@@ -147,9 +179,10 @@ fn info(path: &Path) -> Option<SessionInfo> {
         .map(|message| title_of(&message.content))?;
     Some(SessionInfo {
         path: path.to_path_buf(),
-        title,
+        title: name.clone().unwrap_or(title),
         modified,
         message_count: messages.len(),
+        name,
     })
 }
 

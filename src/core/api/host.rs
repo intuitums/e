@@ -19,7 +19,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::protocol::{
-    self, CommandResult, HookVerdict, Incoming, Manifest, Relaunch, StartupResult, ToolResult,
+    self, CommandResult, HookVerdict, Incoming, InputVerdict, Manifest, Relaunch, StartupResult,
+    ToolResult,
 };
 use crate::core::config::home;
 
@@ -190,6 +191,21 @@ impl ExtensionHost {
             .collect()
     }
 
+    /// `(name, description)` of every extension flag, for `--help`/`/help`.
+    /// Flags are declared for discoverability only — e does not parse them;
+    /// the startup hook sees raw argv.
+    pub fn flags(&self) -> Vec<(String, String)> {
+        self.extensions
+            .iter()
+            .flat_map(|e| {
+                e.manifest
+                    .flags
+                    .iter()
+                    .map(|f| (f.name.clone(), f.description.clone()))
+            })
+            .collect()
+    }
+
     pub fn has_command(&self, name: &str) -> bool {
         self.extensions
             .iter()
@@ -205,6 +221,7 @@ impl ExtensionHost {
             return ToolResult {
                 content: format!("no extension owns tool {name}"),
                 is_error: true,
+                session_name: None,
             };
         };
         let args: Value =
@@ -218,10 +235,15 @@ impl ExtensionHost {
             )
             .await
         {
-            Ok(value) => serde_json::from_value(value).unwrap_or_default(),
+            Ok(value) => serde_json::from_value(value).unwrap_or_else(|_| ToolResult {
+                content: format!("{name}: bad result"),
+                is_error: true,
+                session_name: None,
+            }),
             Err(reason) => ToolResult {
                 content: format!("{name}: {reason}"),
                 is_error: true,
+                session_name: None,
             },
         }
     }
@@ -235,6 +257,7 @@ impl ExtensionHost {
             return CommandResult {
                 notice: Some(format!("no extension owns /{name}")),
                 prompt: None,
+                session_name: None,
             };
         };
         match self
@@ -246,10 +269,15 @@ impl ExtensionHost {
             )
             .await
         {
-            Ok(value) => serde_json::from_value(value).unwrap_or_default(),
+            Ok(value) => serde_json::from_value(value).unwrap_or_else(|_| CommandResult {
+                notice: Some(format!("/{name}: bad result")),
+                prompt: None,
+                session_name: None,
+            }),
             Err(reason) => CommandResult {
                 notice: Some(format!("/{name}: {reason}")),
                 prompt: None,
+                session_name: None,
             },
         }
     }
@@ -283,6 +311,43 @@ impl ExtensionHost {
             }
         }
         None
+    }
+
+    /// Whether any extension listens for input — the app skips the hook
+    /// round-trip entirely when none does.
+    pub fn has_input_hook(&self) -> bool {
+        self.extensions
+            .iter()
+            .any(|e| e.manifest.hooks.iter().any(|h| h == "input"))
+    }
+
+    /// Ask every extension with the `input` hook. The first extension to
+    /// consume or replace a line wins; transport failures and timeouts allow
+    /// (fail open — a slow extension never eats a user's message).
+    pub async fn hook_input(&self, text: &str) -> InputVerdict {
+        // Fast path: no extension listens at all.
+        if !self
+            .extensions
+            .iter()
+            .any(|e| e.manifest.hooks.iter().any(|h| h == "input"))
+        {
+            return InputVerdict::default();
+        }
+        for ext in &self.extensions {
+            if !ext.manifest.hooks.iter().any(|h| h == "input") {
+                continue;
+            }
+            if let Ok(value) = self
+                .request(ext, "hook.input", json!({"text": text}), HOOK_TIMEOUT)
+                .await
+            {
+                let verdict: InputVerdict = serde_json::from_value(value).unwrap_or_default();
+                if verdict.consume || verdict.replace.as_deref().is_some_and(|r| !r.is_empty()) {
+                    return verdict;
+                }
+            }
+        }
+        InputVerdict::default()
     }
 
     /// Fire-and-forget lifecycle event to every extension.
@@ -439,6 +504,9 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
         "protocol": protocol::PROTOCOL_VERSION,
         "e_version": crate::VERSION,
         "cwd": std::env::current_dir().unwrap_or_default().display().to_string(),
+        // Namespaced extension config from ~/.e/settings.json:
+        // {"extensions":{"<name>":{…}}} — each extension reads its own key.
+        "extensions_config": crate::core::config::settings::extensions_config(),
     });
     let manifest_value = host_shim
         .request(&ext, "initialize", init, INIT_TIMEOUT)

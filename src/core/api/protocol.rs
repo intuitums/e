@@ -2,11 +2,12 @@
 //! extension process's stdin/stdout.
 //!
 //! e → extension requests (each expects a response with the same `id`):
-//!   {"id":1,"method":"initialize","params":{"protocol":1,"e_version":"…","cwd":"…"}}
+//!   {"id":1,"method":"initialize","params":{"protocol":1,"e_version":"…","cwd":"…","config":{…}}}
 //!   {"id":7,"method":"tool_call","params":{"name":"…","arguments":{…}}}
 //!   {"id":9,"method":"command","params":{"name":"…","args":"…"}}
 //!   {"id":2,"method":"hook.startup","params":{"cwd":"…","argv":[…]}}
 //!   {"id":4,"method":"hook.tool_call","params":{"name":"…","arguments":{…}}}
+//!   {"id":5,"method":"hook.input","params":{"text":"…"}}
 //! e → extension notifications (no response):
 //!   {"method":"event","params":{"name":"turn_end","aborted":false}}
 //!   {"method":"shutdown"}
@@ -18,7 +19,13 @@
 //!   {"name":"…","version":"…",
 //!    "tools":[{"name","description","parameters":{JSON Schema}}…],
 //!    "commands":[{"name","description"}…],
-//!    "hooks":["startup","tool_call"…]}
+//!    "flags":[{"name","description"}…],   (shown in --help /help)
+//!    "hooks":["startup","tool_call","input"…]}
+//!
+//! `initialize` params carry the extension's own config from
+//! `~/.e/settings.json` under `"extensions":{"<name>":{…}}` — a
+//! namespaced place to keep extension options without squatting on a
+//! top-level settings key.
 
 use std::collections::BTreeMap;
 
@@ -37,6 +44,8 @@ pub struct Manifest {
     pub tools: Vec<ToolDecl>,
     #[serde(default)]
     pub commands: Vec<CommandDecl>,
+    #[serde(default)]
+    pub flags: Vec<FlagDecl>,
     #[serde(default)]
     pub hooks: Vec<String>,
 }
@@ -57,6 +66,16 @@ pub struct CommandDecl {
     pub description: String,
 }
 
+/// A command-line flag an extension understands, for `--help`/`/help`.
+/// Flags are not parsed by e — the startup hook sees raw argv — but
+/// declaring them makes the surface discoverable.
+#[derive(Debug, Deserialize)]
+pub struct FlagDecl {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 /// A tool result from an extension.
 #[derive(Debug, Default, Deserialize)]
 pub struct ToolResult {
@@ -64,15 +83,21 @@ pub struct ToolResult {
     pub content: String,
     #[serde(default)]
     pub is_error: bool,
+    /// Name this session; shown in /resume and the transcript.
+    #[serde(default)]
+    pub session_name: Option<String>,
 }
 
-/// A command result: a transcript notice and/or a prompt to submit.
+/// A command result: a transcript notice and/or a prompt to submit, and
+/// optionally a session name.
 #[derive(Debug, Default, Deserialize)]
 pub struct CommandResult {
     #[serde(default)]
     pub notice: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
+    #[serde(default)]
+    pub session_name: Option<String>,
 }
 
 /// A tool_call hook verdict. Empty object means allow.
@@ -82,6 +107,18 @@ pub struct HookVerdict {
     pub block: bool,
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// An input-hook verdict. `consume` drops the line (an optional notice
+/// replaces it); `replace` submits different text instead. Empty allows.
+#[derive(Debug, Default, Deserialize)]
+pub struct InputVerdict {
+    #[serde(default)]
+    pub consume: bool,
+    #[serde(default)]
+    pub replace: Option<String>,
+    #[serde(default)]
+    pub notice: Option<String>,
 }
 
 /// A startup hook may consume arguments and request a same-binary relaunch.

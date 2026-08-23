@@ -16,6 +16,11 @@ async fn main() -> std::io::Result<()> {
         println!("e {}", e::VERSION);
         return Ok(());
     }
+    // Extensions start before normal argument parsing so the startup hook can
+    // consume custom flags and safely relaunch this same binary in a new cwd,
+    // and so --help can list the flags and commands extensions declare.
+    let (jobs_tx, jobs_rx) = tokio::sync::mpsc::channel::<String>(256);
+    let host = e::core::api::ExtensionHost::start(jobs_tx.clone()).await;
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
             "e — a coding agent for your terminal\n\n\
@@ -28,12 +33,23 @@ e update              update e to the latest release\n  \
 e auth                show sign-in status\n  \
 e -v, --version"
         );
+        let flags = host.flags();
+        let commands = host.commands();
+        if !flags.is_empty() {
+            println!("\nextension flags:");
+            for (name, description) in flags {
+                println!("  e {name:<18} {description}");
+            }
+        }
+        if !commands.is_empty() {
+            println!("\nextension commands:");
+            for (name, description) in commands {
+                println!("  /{name:<17} {description}");
+            }
+        }
+        host.shutdown().await;
         return Ok(());
     }
-    // Extensions start before normal argument parsing so the startup hook can
-    // consume custom flags and safely relaunch this same binary in a new cwd.
-    let (jobs_tx, jobs_rx) = tokio::sync::mpsc::channel::<String>(256);
-    let host = e::core::api::ExtensionHost::start(jobs_tx.clone()).await;
     match host.startup(args).await {
         Ok(e::core::api::StartupAction::Continue(next)) => args = next,
         Ok(e::core::api::StartupAction::Relaunch { argv, request }) => {

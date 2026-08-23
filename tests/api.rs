@@ -14,7 +14,11 @@ const FAKE: &str = r#"#!/bin/sh
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
-    *'"initialize"'*) printf '{"id":%s,"result":{"name":"fake","version":"1","tools":[{"name":"greet","description":"say hi","parameters":{"type":"object","properties":{}}},{"name":"bash","description":"my bash","parameters":{"type":"object","properties":{}}}],"commands":[{"name":"ping","description":"pong"}],"hooks":["startup","tool_call"]}}\n' "$id" ;;
+    *'"initialize"'*)
+      case "$line" in
+        *'"extensions_config":{"fake":{"mode":"x"}}'*) config_seen=yes ;;
+      esac
+      printf '{"id":%s,"result":{"name":"fake","version":"1","tools":[{"name":"greet","description":"say hi","parameters":{"type":"object","properties":{}}},{"name":"bash","description":"my bash","parameters":{"type":"object","properties":{}}}],"commands":[{"name":"ping","description":"pong"}],"flags":[{"name":"-x, --extra","description":"an extension flag"}],"hooks":["startup","tool_call","input"]}}\n' "$id" ;;
     *'"hook.startup"'*)
       case "$line" in
         *startup-error*) printf '{"id":%s,"error":"bad startup"}\n' "$id" ;;
@@ -26,8 +30,22 @@ while IFS= read -r line; do
         *danger*) printf '{"id":%s,"result":{"block":true,"reason":"nope"}}\n' "$id" ;;
         *) printf '{"id":%s,"result":{"block":false}}\n' "$id" ;;
       esac ;;
-    *'"tool_call"'*) printf '{"id":%s,"result":{"content":"hello from fake"}}\n' "$id" ;;
-    *'"command"'*) printf '{"id":%s,"result":{"notice":"pong"}}\n' "$id" ;;
+    *'"hook.input"'*)
+      case "$line" in
+        *secret-word*) printf '{"id":%s,"result":{"consume":true,"notice":"swallowed"}}\n' "$id" ;;
+        *rewrite-me*) printf '{"id":%s,"result":{"replace":"new text"}}\n' "$id" ;;
+        *) printf '{"id":%s,"result":{}}\n' "$id" ;;
+      esac ;;
+    *'"tool_call"'*)
+      case "$line" in
+        *name-me*) printf '{"id":%s,"result":{"content":"named","session_name":"my-session"}}\n' "$id" ;;
+        *) printf '{"id":%s,"result":{"content":"hello from fake"}}\n' "$id" ;;
+      esac ;;
+    *'"command"'*)
+      case "$line" in
+        *name-me*) printf '{"id":%s,"result":{"notice":"pong","session_name":"cmd-session"}}\n' "$id" ;;
+        *) printf '{"id":%s,"result":{"notice":"pong"}}\n' "$id" ;;
+      esac ;;
     *'"shutdown"'*) exit 0 ;;
   esac
 done
@@ -85,6 +103,10 @@ async fn extension_round_trip() {
         host.commands(),
         vec![("ping".to_string(), "pong".to_string())]
     );
+    assert_eq!(
+        host.flags(),
+        vec![("-x, --extra".to_string(), "an extension flag".to_string())]
+    );
 
     // Startup hooks consume custom arguments before e parses its own flags.
     match host.startup(vec!["--custom".into()]).await.unwrap() {
@@ -124,10 +146,33 @@ async fn extension_round_trip() {
     assert!(!result.is_error);
     assert_eq!(result.content, "hello from fake");
 
+    // A tool may name the session as a side effect.
+    let named = host.call_tool("greet", "name-me now").await;
+    assert_eq!(named.session_name.as_deref(), Some("my-session"));
+    // ...and an ordinary tool call leaves the name unset.
+    let plain = host.call_tool("greet", "{}").await;
+    assert!(plain.session_name.is_none());
+
     // Command dispatch.
     let out = host.run_command("ping", "").await;
     assert_eq!(out.notice.as_deref(), Some("pong"));
     assert_eq!(out.prompt, None);
+
+    // A command may name the session too.
+    let cmd_named = host.run_command("ping", "name-me").await;
+    assert_eq!(cmd_named.session_name.as_deref(), Some("cmd-session"));
+
+    // Input hook: consume, replace, and pass-through.
+    let consumed = host.hook_input("has a secret-word inside").await;
+    assert!(consumed.consume);
+    assert_eq!(consumed.notice.as_deref(), Some("swallowed"));
+    let rewritten = host.hook_input("rewrite-me now").await;
+    assert!(!rewritten.consume);
+    assert_eq!(rewritten.replace.as_deref(), Some("new text"));
+    let pass = host.hook_input("ordinary line").await;
+    assert!(!pass.consume);
+    assert!(pass.replace.is_none());
+    assert!(host.has_input_hook());
 
     // Hook: explicit block wins, everything else is allowed.
     assert_eq!(
@@ -154,4 +199,42 @@ async fn empty_host_serves_builtins() {
     assert!(names.contains(&"bash".to_string()));
     let result = host.call_tool("greet", "{}").await;
     assert!(result.is_error);
+}
+
+/// The initialize handshake carries namespaced extension config from
+/// settings.json (`extensions.<name>`), so extensions never squat on a
+/// top-level settings key. The fake answers with its manifest only when it
+/// sees its own config — discovery fails otherwise, which pins the delivery.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn initialize_carries_namespaced_config() {
+    const CONFIG_FAKE: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"initialize"'*)
+      case "$line" in
+        *'"extensions_config":{"cfg":{"mode":"x"}}'*)
+          printf '{"id":%s,"result":{"name":"cfg","version":"1","commands":[{"name":"cfg","description":"d"}]}}
+' "$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')" ;;
+        *) printf '{"id":%s,"error":"no config"}' "$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')" ;;
+      esac ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+done
+"#;
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempdir::TempHome::with_extension("cfg.sh", CONFIG_FAKE);
+    std::fs::write(
+        home.dir.join("settings.json"),
+        r#"{"extensions":{"cfg":{"mode":"x"}},"top_level":"untouched"}"#,
+    )
+    .unwrap();
+    let (notices, _rx) = tokio::sync::mpsc::channel(16);
+    let host = ExtensionHost::start(notices).await;
+    assert!(
+        !host.is_empty(),
+        "config-carrying extension must initialize"
+    );
+    assert_eq!(host.commands(), vec![("cfg".to_string(), "d".to_string())]);
+    host.shutdown().await;
 }
