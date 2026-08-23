@@ -1,8 +1,9 @@
 //! The provider seam: one request contract, one normalized event stream.
 //!
 //! Everything above this module sees `Event`s; everything below is a wire
-//! dialect. Two dialects ship: the chat-completions family and the
-//! Responses-API family (see `completions.rs` / `responses.rs`).
+//! dialect. Three dialects ship: chat-completions, Responses-API, and
+//! Anthropic Messages (see `completions.rs` / `responses.rs` / `anthropic.rs`).
+//! Providers are data (`providers/*.json`); OAuth refresh lives in `auth::login`.
 //! SSE framing is handled here — one small splitter, tested, shared.
 
 pub mod anthropic;
@@ -93,18 +94,160 @@ impl ChatMessage {
     }
 }
 
-/// Why a request failed — the retry decision hangs off this, never off
-/// matching the message text.
+/// Why a provider request failed, and what that implies for retrying it. The
+/// retry decision hangs off this alone, never off matching message text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorKind {
-    /// Credentials are missing or were rejected. Retrying cannot help; the
-    /// user must sign in.
+pub enum FailureCause {
+    /// Credentials are missing or were rejected locally, or the provider
+    /// answered 401/403. Retrying cannot help; the user must sign in.
     Auth,
-    /// The request never left: connection or setup failure. Safe to retry.
-    Transient,
-    /// The provider saw the request and failed (HTTP status, broken stream,
-    /// an error frame). Retrying could double-bill or double-run tools.
-    Delivered,
+    /// Connection/DNS/TLS/setup failure — the request never left. Safe to
+    /// retry.
+    Network,
+    /// Written but never confirmed received (a header-wait or idle-body
+    /// timeout), with nothing produced yet. May have been billed, but
+    /// nothing else can have been double-run — a retry is a calculated risk,
+    /// not a certainty.
+    Stalled,
+    /// HTTP 429, or a provider error frame naming a rate limit. Retry,
+    /// honoring `Retry-After` when the provider sent one.
+    RateLimited,
+    /// HTTP 408/500/502/503/504, or a provider error frame naming an outage
+    /// — the provider is unwell right now, not that the request was bad.
+    /// Retry.
+    ProviderUnavailable,
+    /// A rejected request (other 4xx), a provider error frame naming
+    /// something else, or a stream that broke after content already
+    /// arrived. Retrying would either fail identically or risk
+    /// double-running something.
+    Rejected,
+}
+
+impl FailureCause {
+    /// Whether this cause alone permits a retry. Callers must still confirm
+    /// nothing has streamed yet for the current attempt before acting on it.
+    pub fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            FailureCause::Network
+                | FailureCause::Stalled
+                | FailureCause::RateLimited
+                | FailureCause::ProviderUnavailable
+        )
+    }
+
+    /// Classify an HTTP status the provider actually returned.
+    fn from_status(status: reqwest::StatusCode) -> FailureCause {
+        match status.as_u16() {
+            401 | 403 => FailureCause::Auth,
+            429 => FailureCause::RateLimited,
+            408 | 500 | 502 | 503 | 504 => FailureCause::ProviderUnavailable,
+            _ => FailureCause::Rejected,
+        }
+    }
+
+    /// A short human name for the retry row and the exhausted-campaign error.
+    pub fn label(self) -> &'static str {
+        match self {
+            FailureCause::Auth => "Authentication",
+            FailureCause::Network => "Network interrupted",
+            FailureCause::Stalled => "No response from provider",
+            FailureCause::RateLimited => "Rate limited",
+            FailureCause::ProviderUnavailable => "Provider unavailable",
+            FailureCause::Rejected => "Request failed",
+        }
+    }
+}
+
+/// One provider-call failure: enough to drive the retry decision and to show
+/// two different messages a caller needs — a short reason for the live retry
+/// row, and the full detail for a terminal failure.
+#[derive(Debug, Clone)]
+pub struct ProviderError {
+    /// Full detail; a terminal error block shows this.
+    pub message: String,
+    /// Squeezed to a line the activity row can hold, e.g. "504 Gateway
+    /// Timeout". Equal to `message` when there is nothing shorter to say.
+    pub short: String,
+    pub cause: FailureCause,
+    /// Seconds the provider asked us to wait (`Retry-After`), if it sent one.
+    pub retry_after: Option<u64>,
+}
+
+impl ProviderError {
+    pub fn auth(message: impl Into<String>) -> Self {
+        let message = message.into();
+        ProviderError {
+            short: message.clone(),
+            message,
+            cause: FailureCause::Auth,
+            retry_after: None,
+        }
+    }
+    pub fn network(message: impl Into<String>) -> Self {
+        let message = message.into();
+        ProviderError {
+            short: message.clone(),
+            message,
+            cause: FailureCause::Network,
+            retry_after: None,
+        }
+    }
+    pub fn stalled(message: impl Into<String>) -> Self {
+        let message = message.into();
+        ProviderError {
+            short: message.clone(),
+            message,
+            cause: FailureCause::Stalled,
+            retry_after: None,
+        }
+    }
+    pub fn rejected(message: impl Into<String>) -> Self {
+        let message = message.into();
+        ProviderError {
+            short: message.clone(),
+            message,
+            cause: FailureCause::Rejected,
+            retry_after: None,
+        }
+    }
+    /// A provider error frame delivered mid-stream, already classified by
+    /// the dialect that parsed it (e.g. Anthropic's `overloaded_error`).
+    pub fn frame(message: impl Into<String>, cause: FailureCause) -> Self {
+        let message = message.into();
+        ProviderError {
+            short: message.clone(),
+            message,
+            cause,
+            retry_after: None,
+        }
+    }
+    /// Classify an HTTP status the provider actually returned; `body` is the
+    /// response text the caller already read.
+    pub fn from_status(status: reqwest::StatusCode, body: &str) -> Self {
+        let cause = FailureCause::from_status(status);
+        let short = format!(
+            "{} {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("error")
+        );
+        let snippet: String = body.chars().take(300).collect();
+        let message = if snippet.is_empty() {
+            short.clone()
+        } else {
+            format!("{short}: {snippet}")
+        };
+        ProviderError {
+            message,
+            short,
+            cause,
+            retry_after: None,
+        }
+    }
+    pub fn with_retry_after(mut self, seconds: Option<u64>) -> Self {
+        self.retry_after = seconds;
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -124,11 +267,9 @@ pub enum Event {
     /// stores it in history and the dialect replays it.
     ReasoningItem(String),
     Done,
-    /// `kind` says whether the failure is retryable — see ErrorKind.
-    Error {
-        message: String,
-        kind: ErrorKind,
-    },
+    /// The provider call failed; `err.cause` decides whether the agent may
+    /// retry it — see FailureCause.
+    Error(ProviderError),
 }
 
 pub struct Request {
@@ -155,8 +296,8 @@ pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHand
             Ok(()) => {
                 let _ = tx.send(Event::Done).await;
             }
-            Err((message, kind)) => {
-                let _ = tx.send(Event::Error { message, kind }).await;
+            Err(err) => {
+                let _ = tx.send(Event::Error(err)).await;
             }
         }
     });
@@ -229,13 +370,123 @@ fn skip_separator(buf: &str, pos: usize) -> usize {
 }
 
 /// The shared client: one pool for every request, so connections (and their
-/// TLS handshakes) are reused across turns and tool steps.
+/// TLS handshakes) are reused across turns and tool steps. Connect is bounded;
+/// the overall request is not — a live SSE stream can run for minutes. The
+/// wait for response headers is bounded in `send_request`, idle bodies
+/// per-chunk in `next_sse_chunk`.
 pub fn http() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .user_agent(format!("e/{}", crate::VERSION))
+            .connect_timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("http client")
     })
+}
+
+/// Seconds of provider silence — awaiting response headers or the next body
+/// chunk — before the request is declared stalled.
+pub const STREAM_IDLE_SECS: u64 = 180;
+
+/// Send the request, bounding the wait for response headers. The client
+/// bounds connect and `next_sse_chunk` bounds body reads; this closes the gap
+/// between them — an accepted request the provider never answers — with the
+/// same budget: silence is a stall wherever it happens.
+pub async fn send_request(
+    builder: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, ProviderError> {
+    send_request_within(builder, std::time::Duration::from_secs(STREAM_IDLE_SECS)).await
+}
+
+/// `send_request` with an explicit bound (tests shrink it to milliseconds).
+pub async fn send_request_within(
+    builder: reqwest::RequestBuilder,
+    wait: std::time::Duration,
+) -> Result<reqwest::Response, ProviderError> {
+    match tokio::time::timeout(wait, builder.send()).await {
+        Ok(Ok(response)) => Ok(response),
+        // Connection and setup failures: the request never left, retryable.
+        Ok(Err(e)) => Err(ProviderError::network(format!("request failed: {e}"))),
+        // The request was written but never answered — it may have been
+        // delivered, so a retry is a calculated risk, not a certainty.
+        Err(_) => Err(ProviderError::stalled(format!(
+            "no response from provider for {}s",
+            wait.as_secs()
+        ))),
+    }
+}
+
+/// Await the next SSE body chunk. An idle socket fails instead of hanging the
+/// turn forever — the agent then ends with a visible error rather than a
+/// spinner that Esc cannot clear.
+pub async fn next_sse_chunk<S, T, E>(stream: &mut S) -> Result<Option<T>, ProviderError>
+where
+    S: futures::Stream<Item = Result<T, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(STREAM_IDLE_SECS),
+        futures::StreamExt::next(stream),
+    )
+    .await
+    {
+        Ok(None) => Ok(None),
+        Ok(Some(Ok(chunk))) => Ok(Some(chunk)),
+        Ok(Some(Err(e))) => Err(ProviderError::rejected(format!("stream error: {e}"))),
+        Err(_) => Err(ProviderError::stalled(format!(
+            "stream stalled — no data for {STREAM_IDLE_SECS}s"
+        ))),
+    }
+}
+
+/// Parse `Retry-After` as whole seconds. Every provider we talk to sends the
+/// numeric form; the HTTP-date form doesn't appear in practice here.
+pub fn retry_after_seconds(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_classification_matches_retry_policy() {
+        use reqwest::StatusCode;
+        let cause = |code: u16| FailureCause::from_status(StatusCode::from_u16(code).unwrap());
+        assert_eq!(cause(401), FailureCause::Auth);
+        assert_eq!(cause(403), FailureCause::Auth);
+        assert_eq!(cause(429), FailureCause::RateLimited);
+        assert_eq!(cause(408), FailureCause::ProviderUnavailable);
+        assert_eq!(cause(500), FailureCause::ProviderUnavailable);
+        assert_eq!(cause(502), FailureCause::ProviderUnavailable);
+        assert_eq!(cause(503), FailureCause::ProviderUnavailable);
+        assert_eq!(cause(504), FailureCause::ProviderUnavailable);
+        assert_eq!(cause(400), FailureCause::Rejected);
+        assert_eq!(cause(404), FailureCause::Rejected);
+        assert_eq!(cause(422), FailureCause::Rejected);
+
+        assert!(FailureCause::RateLimited.is_retryable());
+        assert!(FailureCause::ProviderUnavailable.is_retryable());
+        assert!(FailureCause::Network.is_retryable());
+        assert!(FailureCause::Stalled.is_retryable());
+        assert!(!FailureCause::Auth.is_retryable());
+        assert!(!FailureCause::Rejected.is_retryable());
+    }
+
+    #[test]
+    fn from_status_squeezes_a_long_body_to_a_short_reason() {
+        let body = "x".repeat(2000);
+        let err = ProviderError::from_status(reqwest::StatusCode::GATEWAY_TIMEOUT, &body);
+        assert_eq!(err.short, "504 Gateway Timeout");
+        assert!(err.message.starts_with("504 Gateway Timeout: xxx"));
+        assert!(err.message.len() < body.len());
+    }
 }

@@ -32,8 +32,8 @@ fi
 # 3. Home resolution happens in one place. HOME/E_HOME lookups outside these
 #    files are a second door into the filesystem.
 if out=$(grep -rn 'env::var("HOME")\|env::var("E_HOME")' src/ --include='*.rs' |
-    grep -v '^src/core/config/home.rs:' | grep -v '^src/main.rs:'); then
-  bad "HOME/E_HOME read outside core/config/home.rs (or main.rs's title display):"
+    grep -v '^src/core/config/home.rs:' | grep -v '^src/tui/app/mod.rs:'); then
+  bad "HOME/E_HOME read outside core/config/home.rs (or tui/app's title display):"
   say "$out"
 fi
 
@@ -50,8 +50,8 @@ fi
 
 # 5. Unsafe code stays where it is audited: the libc terminal poll and the
 #    bash tool's process-group kill (setsid + SIGKILL at the timeout).
-if out=$(grep -rnE 'unsafe (fn|impl|\{)' src/ --include='*.rs' | grep -v '^src/tui/background.rs:' | grep -v '^src/core/tools/bash.rs:'); then
-  bad "unsafe code outside tui/background.rs, core/tools/bash.rs:"
+if out=$(grep -rnE 'unsafe (fn|impl|\{)' src/ --include='*.rs' | grep -v '^src/tui/paint/background.rs:' | grep -v '^src/core/tools/bash.rs:'); then
+  bad "unsafe code outside tui/paint/background.rs, core/tools/bash.rs:"
   say "$out"
 fi
 

@@ -101,7 +101,7 @@ async fn anthropic_stream_round_trip() {
                 output,
                 cache_read,
             } => usage = Some((input, output, cache_read)),
-            Event::Error { message, .. } => panic!("stream errored: {message}"),
+            Event::Error(err) => panic!("stream errored: {}", err.message),
             Event::Done => break,
             Event::ReasoningItem(_) => {}
         }

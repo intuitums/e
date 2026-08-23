@@ -39,14 +39,12 @@ src/core/    the harness, terminal-free
                   protocol (docs/extensions.md) — tools, commands, hooks
   tools/          read · write · edit · ls · grep · bash · skill
   session.rs · output.rs · workspace.rs
-src/tui/     the frontend
-  render.rs       SGR primitives          screen.rs      the diffing painter
-  markdown.rs     md → styled lines       transcript.rs  blocks + gap policy
-  highlight.rs    code tinting            composer.rs    the input editor
-  panel.rs        the shared footer frame (picker + settings both use it)
-  menu.rs · settingspanel.rs · authpanel.rs · trustpanel.rs · statusline.rs
-  · theme.rs · background.rs
-src/main.rs  the frame loop, key handling, command dispatch
+src/tui/     the frontend (short paths re-export from the groups)
+  paint/          render · screen · theme · background · highlight
+  content/        markdown · transcript · composer · statusline
+  surfaces/       panel · menu · settingspanel · authpanel · trustpanel
+  app/            the interactive frame loop (state, keys, session events)
+src/main.rs  CLI entry — flags, ask/docs/auth/update, then tui::app::run
 ```
 
 ## How the look stays consistent
@@ -58,9 +56,9 @@ design's, audited value-for-value. Dividers are the `border` token
 bright ink for the current row, `dim` for the rest, no caret.
 
 Every footer surface (the `/@$` pickers, `/settings`) frames through
-`tui/panel.rs`: top divider, header, blank, body, bottom divider, with the hint
-on the status row — never a second hint inside a panel. Add a new surface? Route
-it through `panel.rs` so it can't diverge.
+`tui/surfaces/panel.rs`: top divider, header, blank, body, bottom divider, with
+the hint on the status row — never a second hint inside a panel. Add a new
+surface? Route it through `panel.rs` so it can't diverge.
 
 ## Conventions
 

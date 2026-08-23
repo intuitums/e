@@ -23,6 +23,20 @@ pub enum Api {
     Anthropic,
 }
 
+impl Api {
+    /// Parse a dialect name from provider JSON / models.json. Unknown strings
+    /// are `None` — callers decide whether to panic (built-ins) or fall back
+    /// (user file).
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "openai-completions" | "completions" => Some(Self::Completions),
+            "codex-responses" | "openai-responses" | "responses" => Some(Self::Responses),
+            "anthropic-messages" | "anthropic" => Some(Self::Anthropic),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Model {
     pub provider: String,
@@ -99,13 +113,11 @@ pub fn catalog() -> Vec<Model> {
     if let Ok(json) = std::fs::read_to_string(home::home().join("models.json")) {
         if let Ok(file) = serde_json::from_str::<ModelsFile>(&json) {
             for (provider, entry) in file.providers {
-                let api = match entry.api.as_deref() {
-                    Some("codex-responses") | Some("responses") | Some("openai-responses") => {
-                        Api::Responses
-                    }
-                    Some("anthropic") | Some("anthropic-messages") => Api::Anthropic,
-                    _ => Api::Completions,
-                };
+                let api = entry
+                    .api
+                    .as_deref()
+                    .and_then(Api::parse)
+                    .unwrap_or(Api::Completions);
                 let base = entry.base_url.clone().unwrap_or_else(|| {
                     crate::core::provider::registry::find("opencode-go")
                         .map(|p| p.base_url.clone())

@@ -66,6 +66,9 @@ pub enum Kind {
     Shell,
     Summary,
     Notice,
+    /// A turn-level failure: the reference's error color, persisted in the
+    /// transcript — an ending you can see, not a status blip.
+    Error,
     /// A system lifecycle fact in the reference grammar: `● System: …`.
     System,
 }
@@ -389,6 +392,10 @@ impl Block {
             Kind::Notice => wrap_styled(&self.text, width.saturating_sub(2).max(8))
                 .into_iter()
                 .map(|l| format!("  {l}"))
+                .collect(),
+            Kind::Error => wrap_styled(&self.text, width.saturating_sub(2).max(8))
+                .into_iter()
+                .map(|l| theme.fg("error", &format!("  {l}")))
                 .collect(),
             Kind::System => vec![theme.fg("dim", &format!("● System: {}", self.text))],
         }

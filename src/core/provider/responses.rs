@@ -4,78 +4,18 @@
 //! `{base}/codex/responses` behind a subscription OAuth (bearer + account-id
 //! header, lazy refresh); other providers serve the same event grammar at
 //! `{base}/responses` behind a plain key. The provider id — not this module —
-//! names the account type.
+//! names the account type. OAuth refresh lives in `auth::login`.
 
-use futures::StreamExt;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::core::auth::{self, Credential};
-use crate::core::provider::{http, Event, Request, SseSplitter, ToolCall};
+use crate::core::auth::{self, login, Credential};
+use crate::core::provider::{
+    http, next_sse_chunk, retry_after_seconds, send_request, Event, FailureCause, ProviderError,
+    Request, SseSplitter, ToolCall,
+};
 
-pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-pub const AUTH_BASE: &str = "https://auth.openai.com";
-
-/// Refresh when within a minute of expiry; persist the rotated pair.
-async fn fresh_access(provider: &str) -> Result<(String, String), String> {
-    let Some(Credential::OAuth {
-        access,
-        refresh,
-        expires,
-        account_id,
-    }) = auth::load().get(provider).cloned()
-    else {
-        return Err(format!(
-            "no OAuth credentials for {provider} — run `e auth {provider}`"
-        ));
-    };
-    let account = account_id
-        .or_else(|| auth::account_id_from_jwt(&access))
-        .ok_or("credentials carry no account id")?;
-
-    if auth::now_ms() + 60_000 < expires {
-        return Ok((access, account));
-    }
-
-    let response = http()
-        .post(format!("{AUTH_BASE}/oauth/token"))
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh.as_str()),
-            ("client_id", CLIENT_ID),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("token refresh failed: {e}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        return Err(format!(
-            "token refresh rejected ({status}) — run `e auth {provider}` again"
-        ));
-    }
-    let tokens: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-    let (Some(access), Some(refresh), Some(expires_in)) = (
-        tokens["access_token"].as_str(),
-        tokens["refresh_token"].as_str(),
-        tokens["expires_in"].as_u64(),
-    ) else {
-        return Err("token refresh response missing fields".into());
-    };
-    let account = auth::account_id_from_jwt(access).unwrap_or(account);
-    auth::set(
-        provider,
-        Credential::OAuth {
-            access: access.to_string(),
-            refresh: refresh.to_string(),
-            expires: auth::now_ms() + expires_in * 1000,
-            account_id: Some(account.clone()),
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    Ok((access.to_string(), account))
-}
-
-type RunError = (String, crate::core::provider::ErrorKind);
+type RunError = ProviderError;
 
 pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
     // A plain API key means the standard platform mount (`{base}/responses`,
@@ -84,9 +24,9 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     let (access, account) = match auth::load().get(request.model.provider.as_str()) {
         Some(Credential::ApiKey { key }) => (key.clone(), None),
         _ => {
-            let (access, account) = fresh_access(&request.model.provider)
+            let (access, account) = login::codex_access(&request.model.provider)
                 .await
-                .map_err(|e| (e, crate::core::provider::ErrorKind::Auth))?;
+                .map_err(ProviderError::auth)?;
             (access, Some(account))
         }
     };
@@ -177,33 +117,20 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     builder = builder
         .bearer_auth(&access)
         .header("accept", "text/event-stream");
-    let response = builder.json(&body).send().await.map_err(|e| {
-        (
-            format!("request failed: {e}"),
-            crate::core::provider::ErrorKind::Transient,
-        )
-    })?;
+    let response = send_request(builder.json(&body)).await?;
 
     if !response.status().is_success() {
         let status = response.status();
+        let retry_after = retry_after_seconds(&response);
         let text = response.text().await.unwrap_or_default();
-        return Err((
-            format!("{status}: {}", text.chars().take(300).collect::<String>()),
-            crate::core::provider::ErrorKind::Delivered,
-        ));
+        return Err(ProviderError::from_status(status, &text).with_retry_after(retry_after));
     }
 
     let mut splitter = SseSplitter::new();
     let mut stream = response.bytes_stream();
     // function_call items accumulate argument deltas keyed by item id.
     let mut pending: std::collections::BTreeMap<String, ToolCall> = Default::default();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            (
-                format!("stream error: {e}"),
-                crate::core::provider::ErrorKind::Delivered,
-            )
-        })?;
+    while let Some(chunk) = next_sse_chunk(&mut stream).await? {
         for payload in splitter.feed(&String::from_utf8_lossy(&chunk)) {
             if payload == "[DONE]" {
                 return Ok(());
@@ -304,11 +231,16 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                         .as_str()
                         .unwrap_or("response failed")
                         .to_string();
-                    return Err((message, crate::core::provider::ErrorKind::Delivered));
+                    let cause = match value["response"]["error"]["code"].as_str().unwrap_or("") {
+                        "rate_limit_exceeded" => FailureCause::RateLimited,
+                        "server_error" | "internal_error" => FailureCause::ProviderUnavailable,
+                        _ => FailureCause::Rejected,
+                    };
+                    return Err(ProviderError::frame(message, cause));
                 }
                 _ => {}
             }
         }
     }
-    Ok(())
+    Err(ProviderError::stalled("stream ended unexpectedly"))
 }

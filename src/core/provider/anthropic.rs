@@ -5,12 +5,14 @@
 //! tool_use input JSON; message_start/message_delta carry usage. Effort maps
 //! to an extended-thinking token budget.
 
-use futures::StreamExt;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::core::auth::{self, Credential};
-use crate::core::provider::{http, Event, Request, SseSplitter, ToolCall};
+use crate::core::auth::login;
+use crate::core::provider::{
+    http, next_sse_chunk, retry_after_seconds, send_request, Event, FailureCause, ProviderError,
+    Request, SseSplitter, ToolCall,
+};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Output ceiling per reply; every cataloged model allows at least this.
@@ -25,20 +27,12 @@ fn thinking_budget(effort: &str) -> u64 {
     }
 }
 
-type RunError = (String, crate::core::provider::ErrorKind);
+type RunError = ProviderError;
 
 pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
-    let auth = auth::load();
-    let key = match auth.get(request.model.provider.as_str()) {
-        Some(Credential::ApiKey { key }) => key.clone(),
-        Some(Credential::OAuth { access, .. }) => access.clone(),
-        None => {
-            return Err((
-                format!("no credentials for {} — run /login", request.model.provider),
-                crate::core::provider::ErrorKind::Auth,
-            ))
-        }
-    };
+    let key = login::access_token(request.model.provider.as_str())
+        .await
+        .map_err(ProviderError::auth)?;
 
     // History → content blocks. Tool results ride user turns.
     let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -105,28 +99,21 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         });
     }
 
-    let response = http()
-        .post(format!("{}/v1/messages", request.model.base_url))
-        .header("x-api-key", &key)
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .header("accept", "text/event-stream")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            (
-                format!("request failed: {e}"),
-                crate::core::provider::ErrorKind::Transient,
-            )
-        })?;
+    let response = send_request(
+        http()
+            .post(format!("{}/v1/messages", request.model.base_url))
+            .header("x-api-key", &key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("accept", "text/event-stream")
+            .json(&body),
+    )
+    .await?;
 
     if !response.status().is_success() {
         let status = response.status();
+        let retry_after = retry_after_seconds(&response);
         let text = response.text().await.unwrap_or_default();
-        return Err((
-            format!("{status}: {}", text.chars().take(300).collect::<String>()),
-            crate::core::provider::ErrorKind::Delivered,
-        ));
+        return Err(ProviderError::from_status(status, &text).with_retry_after(retry_after));
     }
 
     let mut splitter = SseSplitter::new();
@@ -137,13 +124,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     let mut cache_read = 0u64;
     let mut output_tokens = 0u64;
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            (
-                format!("stream failed: {e}"),
-                crate::core::provider::ErrorKind::Delivered,
-            )
-        })?;
+    while let Some(chunk) = next_sse_chunk(&mut stream).await? {
         for payload in splitter.feed(&String::from_utf8_lossy(&chunk)) {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
                 continue;
@@ -215,11 +196,21 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                         .as_str()
                         .unwrap_or("unknown provider error")
                         .to_string();
-                    return Err((message, crate::core::provider::ErrorKind::Delivered));
+                    // A mid-stream error frame carries its own type — the
+                    // API's way of saying "overloaded" or "rate limited"
+                    // once a connection is already open, distinct from an
+                    // HTTP status.
+                    let cause = match value["error"]["type"].as_str().unwrap_or("") {
+                        "overloaded_error" | "api_error" => FailureCause::ProviderUnavailable,
+                        "rate_limit_error" => FailureCause::RateLimited,
+                        "authentication_error" | "permission_error" => FailureCause::Auth,
+                        _ => FailureCause::Rejected,
+                    };
+                    return Err(ProviderError::frame(message, cause));
                 }
                 _ => {}
             }
         }
     }
-    Ok(())
+    Err(ProviderError::stalled("stream ended unexpectedly"))
 }

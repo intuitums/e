@@ -1,16 +1,19 @@
 //! The terminal frontend.
+//!
+//! Grouped so the tree answers "what is this?":
+//! - `paint/` — SGR, screen differ, theme, background, highlight
+//! - `content/` — markdown, transcript, composer, statusline
+//! - `surfaces/` — footer panels (picker, settings, auth, trust)
+//! - `app/` — the interactive frame loop (extracted from the binary)
+//!
+//! Short paths (`tui::theme`, `tui::composer`, …) re-export from the groups
+//! so call sites and tests stay readable.
 
-pub mod authpanel;
-pub mod background;
-pub mod composer;
-pub mod highlight;
-pub mod markdown;
-pub mod menu;
-pub mod panel;
-pub mod render;
-pub mod screen;
-pub mod settingspanel;
-pub mod statusline;
-pub mod theme;
-pub mod transcript;
-pub mod trustpanel;
+pub mod app;
+pub mod content;
+pub mod paint;
+pub mod surfaces;
+
+pub use content::{composer, markdown, statusline, transcript};
+pub use paint::{background, highlight, render, screen, theme};
+pub use surfaces::{authpanel, menu, panel, settingspanel, trustpanel};

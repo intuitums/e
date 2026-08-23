@@ -70,7 +70,7 @@ async fn responses_tools_are_flat_on_the_wire() {
     while let Some(event) = rx.recv().await {
         match event {
             Event::TextDelta(d) => text.push_str(&d),
-            Event::Error { message, .. } => panic!("stream errored: {message}"),
+            Event::Error(err) => panic!("stream errored: {}", err.message),
             Event::Done => break,
             _ => {}
         }

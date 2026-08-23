@@ -12,9 +12,16 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 
 use crate::core::auth::{self, Credential};
-use crate::core::provider::responses::{AUTH_BASE, CLIENT_ID};
+
+pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+pub const AUTH_BASE: &str = "https://auth.openai.com";
 
 const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+
+/// Bound on turn-path token refreshes (whole request — they return small
+/// JSON, never a stream). Interactive login flows stay unbounded: the user
+/// is present and can abort them.
+const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn b64url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -413,6 +420,9 @@ pub async fn xai_refresh(refresh: &str) -> Result<crate::core::auth::Credential,
             ("client_id", XAI_CLIENT_ID),
             ("refresh_token", refresh),
         ])
+        // Refreshes run on the turn path: a hung token endpoint must fail
+        // the turn, not park it before the provider request even starts.
+        .timeout(REFRESH_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("xAI token refresh failed: {e}"))?;
@@ -427,6 +437,106 @@ pub async fn xai_refresh(refresh: &str) -> Result<crate::core::auth::Credential,
         .await
         .map_err(|e| format!("xAI token refresh returned invalid JSON: {e}"))?;
     xai_credential(&body, Some(refresh))
+}
+
+/// ChatGPT / Codex OAuth: refresh when within a minute of expiry; persist the
+/// rotated pair. Returns `(access_token, chatgpt_account_id)`.
+pub async fn codex_access(provider: &str) -> Result<(String, String), String> {
+    let Some(Credential::OAuth {
+        access,
+        refresh,
+        expires,
+        account_id,
+    }) = auth::load().get(provider).cloned()
+    else {
+        return Err(format!(
+            "no OAuth credentials for {provider} — run `e auth {provider}`"
+        ));
+    };
+    let account = account_id
+        .or_else(|| auth::account_id_from_jwt(&access))
+        .ok_or("credentials carry no account id")?;
+
+    if auth::now_ms() + 60_000 < expires {
+        return Ok((access, account));
+    }
+
+    let response = crate::core::provider::http()
+        .post(format!("{AUTH_BASE}/oauth/token"))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh.as_str()),
+            ("client_id", CLIENT_ID),
+        ])
+        // Refreshes run on the turn path: a hung token endpoint must fail
+        // the turn, not park it before the provider request even starts.
+        .timeout(REFRESH_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| format!("token refresh failed: {e}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(format!(
+            "token refresh rejected ({status}) — run `e auth {provider}` again"
+        ));
+    }
+    let tokens: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    let (Some(access), Some(refresh), Some(expires_in)) = (
+        tokens["access_token"].as_str(),
+        tokens["refresh_token"].as_str(),
+        tokens["expires_in"].as_u64(),
+    ) else {
+        return Err("token refresh response missing fields".into());
+    };
+    let account = auth::account_id_from_jwt(access).unwrap_or(account);
+    auth::set(
+        provider,
+        Credential::OAuth {
+            access: access.to_string(),
+            refresh: refresh.to_string(),
+            expires: auth::now_ms() + expires_in * 1000,
+            account_id: Some(account.clone()),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((access.to_string(), account))
+}
+
+/// A Bearer / x-api-key value for dialects that don't need an account header.
+/// API keys pass through; OAuth refreshes lazily via the provider's declared
+/// flow (`xai-device` or `codex`).
+pub async fn access_token(provider: &str) -> Result<String, String> {
+    match auth::load().get(provider).cloned() {
+        Some(Credential::ApiKey { key }) => Ok(key),
+        Some(Credential::OAuth {
+            access,
+            refresh,
+            expires,
+            ..
+        }) => {
+            if auth::now_ms() + 60_000 < expires {
+                return Ok(access);
+            }
+            let flow =
+                crate::core::provider::registry::find(provider).and_then(|p| p.auth.oauth.clone());
+            match flow.as_deref() {
+                Some("xai-device") => {
+                    let fresh = xai_refresh(&refresh).await?;
+                    let _ = auth::set(provider, fresh.clone());
+                    match fresh {
+                        Credential::OAuth { access, .. } => Ok(access),
+                        Credential::ApiKey { key } => Ok(key),
+                    }
+                }
+                Some("codex") => codex_access(provider).await.map(|(access, _)| access),
+                other => Err(format!(
+                    "cannot refresh {provider} (oauth flow {:?}) — run /login",
+                    other
+                )),
+            }
+        }
+        None => Err(format!("no credentials for {provider} — run /login")),
+    }
 }
 
 fn xai_credential(

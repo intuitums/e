@@ -56,12 +56,8 @@ impl Provider {
     /// The wire dialect this provider speaks. `all()` validates the string
     /// at startup, so an unknown value never reaches this match silently.
     pub fn api(&self) -> Api {
-        match self.api.as_str() {
-            "openai-completions" => Api::Completions,
-            "codex-responses" | "openai-responses" | "responses" => Api::Responses,
-            "anthropic-messages" | "anthropic" => Api::Anthropic,
-            other => panic!("provider {}: unknown api dialect `{other}`", self.name),
-        }
+        Api::parse(&self.api)
+            .unwrap_or_else(|| panic!("provider {}: unknown api dialect `{}`", self.name, self.api))
     }
 }
 

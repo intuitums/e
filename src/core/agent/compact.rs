@@ -100,7 +100,7 @@ pub async fn summarize(model: Model, history: &[ChatMessage]) -> Result<String, 
     while let Some(event) = rx.recv().await {
         match event {
             Event::TextDelta(d) => summary.push_str(&d),
-            Event::Error { message, .. } => return Err(message),
+            Event::Error(err) => return Err(err.message),
             Event::Done => break,
             _ => {}
         }

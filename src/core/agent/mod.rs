@@ -8,16 +8,18 @@
 
 pub mod compact;
 pub mod context;
+pub mod retry;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
 use crate::core::provider::catalog::{slug, Model};
 use crate::core::provider::{
-    self, ChatMessage, ErrorKind as ProviderErrorKind, Event as ProviderEvent, Request, ToolCall,
+    self, ChatMessage, Event as ProviderEvent, FailureCause, Request, ToolCall,
 };
 use crate::core::session::Session;
 use crate::core::tools;
@@ -48,6 +50,26 @@ fn clone_request(r: &Request) -> Request {
         messages: r.messages.clone(),
         effort: r.effort.clone(),
         tools: r.tools.clone(),
+    }
+}
+
+/// Resolve when Esc (or any interrupt) has been requested. Polled on a short
+/// interval so a stalled provider stream — which never yields another event —
+/// cannot strand the turn with `running` stuck true and Esc inert.
+async fn wait_cancelled(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Sleep for `delay`, but give up early the moment Esc is pressed. A retry
+/// backoff can run up to 30 seconds — a bare `sleep` would leave Esc inert
+/// for the whole wait, the same stalled-spinner bug the stream loop already
+/// guards against. Returns false when cancelled before the delay elapsed.
+async fn sleep_cancellable(delay: Duration, cancel: &AtomicBool) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => true,
+        _ = wait_cancelled(cancel) => false,
     }
 }
 
@@ -93,10 +115,19 @@ pub enum SessionEvent {
         cache_read: u64,
     },
     Error(String),
-    /// A transient failure is being retried.
+    /// A retryable failure is being backed off before another attempt.
     Retry {
         attempt: u32,
-        message: String,
+        limit: u32,
+        delay_secs: u64,
+        cause: FailureCause,
+        reason: String,
+    },
+    /// The first attempt after one or more retries produced something —
+    /// shown briefly before the row reverts to normal turn activity.
+    Recovered {
+        attempt: u32,
+        limit: u32,
     },
     /// A steering message was accepted mid-turn (for display as a user block).
     Steered(String),
@@ -322,10 +353,41 @@ impl Agent {
                 let mut calls: Vec<ToolCall> = Vec::new();
                 let mut reasoning_items: Vec<String> = Vec::new();
                 let mut errored = false;
-                'stream: while let Some(event) = rx.recv().await {
-                    if cancel.load(Ordering::SeqCst) {
-                        handle.abort();
-                        break 'turn true;
+                // True once this attempt has streamed anything at all — the
+                // signal both for "recovered" (first content after a retry)
+                // and for whether a fresh failure is still safe to retry.
+                let mut recovered_notified = false;
+                // Cancel must win even when the provider yields nothing: a
+                // prior `while let Some(event) = rx.recv()` only checked Esc
+                // after the next byte arrived, so a stalled SSE left the
+                // spinner running and Esc inert until the socket moved.
+                'stream: loop {
+                    let event = tokio::select! {
+                        event = rx.recv() => event,
+                        _ = wait_cancelled(&cancel) => {
+                            handle.abort();
+                            break 'turn true;
+                        }
+                    };
+                    let Some(event) = event else {
+                        break 'stream;
+                    };
+                    // The new stream (after one or more retries) just
+                    // produced its first non-error event — the retry
+                    // worked. An immediate second failure is not a recovery,
+                    // so this excludes Error and lets that arm decide
+                    // whether to retry again instead.
+                    if attempt > 0
+                        && !recovered_notified
+                        && !matches!(event, ProviderEvent::Error(_))
+                    {
+                        recovered_notified = true;
+                        let _ = events
+                            .send(SessionEvent::Recovered {
+                                attempt,
+                                limit: retry::MAX_ATTEMPTS,
+                            })
+                            .await;
                     }
                     match event {
                         ProviderEvent::TextDelta(d) => {
@@ -350,32 +412,57 @@ impl Agent {
                                 })
                                 .await;
                         }
-                        ProviderEvent::Error { message, kind } => {
-                            // Only a Transient (definitely-unsent) failure is
-                            // safe to retry: a delivered request may have run
-                            // tools or been billed; an auth failure needs a
-                            // sign-in, not a retry.
-                            if kind == ProviderErrorKind::Transient
-                                && text.is_empty()
-                                && calls.is_empty()
-                                && reasoning_items.is_empty()
-                                && attempt < 2
+                        ProviderEvent::Error(err) => {
+                            // Safe to retry only when the cause itself is
+                            // retryable (never Auth or Rejected) AND nothing
+                            // has streamed yet this attempt: a delivered
+                            // request that already produced output or ran
+                            // tools cannot be replayed without risking a
+                            // duplicate.
+                            let nothing_produced =
+                                text.is_empty() && calls.is_empty() && reasoning_items.is_empty();
+                            if err.cause.is_retryable()
+                                && nothing_produced
+                                && attempt < retry::MAX_ATTEMPTS
                             {
                                 attempt += 1;
-                                let backoff =
-                                    std::time::Duration::from_millis(500 * attempt as u64);
+                                let delay = retry::delay_for(attempt, err.retry_after);
                                 let _ = events
                                     .send(SessionEvent::Retry {
                                         attempt,
-                                        message: message.clone(),
+                                        limit: retry::MAX_ATTEMPTS,
+                                        delay_secs: delay.as_secs(),
+                                        cause: err.cause,
+                                        reason: err.short.clone(),
                                     })
                                     .await;
-                                tokio::time::sleep(backoff).await;
+                                if !sleep_cancellable(delay, &cancel).await {
+                                    handle.abort();
+                                    break 'turn true;
+                                }
                                 let (nrx, nhandle) = provider::stream(clone_request(&request));
                                 rx = nrx;
                                 handle = nhandle;
                                 continue 'stream;
                             }
+                            // Distinguish genuine exhaustion (the cause was
+                            // retryable and nothing had streamed, but the
+                            // budget ran out) from a failure that simply
+                            // can't be retried at all — partial content
+                            // already produced this attempt, or a rejected
+                            // cause. Only the former earns "gave up after
+                            // N/M"; the latter would misreport why the
+                            // attempt stopped.
+                            let message = if err.cause.is_retryable() && nothing_produced {
+                                format!(
+                                    "{} — gave up after {attempt}/{} attempts: {}",
+                                    err.cause.label(),
+                                    retry::MAX_ATTEMPTS,
+                                    err.message
+                                )
+                            } else {
+                                err.message
+                            };
                             let _ = events.send(SessionEvent::Error(message)).await;
                             errored = true;
                         }

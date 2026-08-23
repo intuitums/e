@@ -60,8 +60,19 @@ fn publishes_output_before_the_process_exits() {
         },
     );
     assert_eq!(out.outcome, ToolOutcome::Completed);
-    assert!(first_seen.lock().unwrap().unwrap() < Duration::from_millis(300));
-    assert!(started.elapsed() >= Duration::from_millis(350));
+    // Pin streaming, not absolute spawn latency: first must arrive while the
+    // command is still sleeping, not only when it exits. Absolute <300ms
+    // flakes on busy CI runners where process start alone can exceed that.
+    let first = first_seen
+        .lock()
+        .unwrap()
+        .expect("first chunk should stream");
+    let total = started.elapsed();
+    assert!(
+        first + Duration::from_millis(200) < total,
+        "streamed too late: first={first:?} total={total:?}"
+    );
+    assert!(total >= Duration::from_millis(350));
 }
 
 #[test]

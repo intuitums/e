@@ -2,48 +2,22 @@
 //! SSE deltas at `choices[0].delta`, streamed tool-call argument fragments
 //! accumulated by index, a final usage frame, `[DONE]` sentinel.
 
-use futures::StreamExt;
 use serde_json::json;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
-use crate::core::auth::{self, Credential};
-use crate::core::provider::{http, Event, Request, SseSplitter, ToolCall};
+use crate::core::auth::login;
+use crate::core::provider::{
+    http, next_sse_chunk, retry_after_seconds, send_request, Event, ProviderError, Request,
+    SseSplitter, ToolCall,
+};
 
-type RunError = (String, crate::core::provider::ErrorKind);
+type RunError = ProviderError;
 
 pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
-    let auth = auth::load();
-    let key = match auth.get(request.model.provider.as_str()) {
-        Some(Credential::ApiKey { key }) => key.clone(),
-        Some(Credential::OAuth {
-            access,
-            refresh,
-            expires,
-            ..
-        }) => {
-            // The only OAuth provider on this dialect is xAI; refresh lazily
-            // when the access token is within a minute of expiry.
-            if auth::now_ms() + 60_000 < *expires {
-                access.clone()
-            } else {
-                let fresh = crate::core::auth::login::xai_refresh(refresh)
-                    .await
-                    .map_err(|e| (e, crate::core::provider::ErrorKind::Auth))?;
-                let _ = auth::set(&request.model.provider, fresh.clone());
-                match fresh {
-                    Credential::OAuth { access, .. } => access,
-                    Credential::ApiKey { key } => key,
-                }
-            }
-        }
-        None => {
-            return Err((
-                format!("no credentials for {} — run /login", request.model.provider),
-                crate::core::provider::ErrorKind::Auth,
-            ))
-        }
-    };
+    let key = login::access_token(request.model.provider.as_str())
+        .await
+        .map_err(ProviderError::auth)?;
 
     let mut messages = vec![json!({"role": "system", "content": request.system})];
     for m in &request.messages {
@@ -84,27 +58,20 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         body["tools"] = json!(request.tools);
     }
 
-    let response = http()
-        .post(format!("{}/chat/completions", request.model.base_url))
-        .bearer_auth(&key)
-        .header("accept", "text/event-stream")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            (
-                format!("request failed: {e}"),
-                crate::core::provider::ErrorKind::Transient,
-            )
-        })?;
+    let response = send_request(
+        http()
+            .post(format!("{}/chat/completions", request.model.base_url))
+            .bearer_auth(&key)
+            .header("accept", "text/event-stream")
+            .json(&body),
+    )
+    .await?;
 
     if !response.status().is_success() {
         let status = response.status();
+        let retry_after = retry_after_seconds(&response);
         let text = response.text().await.unwrap_or_default();
-        return Err((
-            format!("{status}: {}", text.chars().take(300).collect::<String>()),
-            crate::core::provider::ErrorKind::Delivered,
-        ));
+        return Err(ProviderError::from_status(status, &text).with_retry_after(retry_after));
     }
 
     // Tool-call fragments accumulate per stream index until [DONE].
@@ -123,13 +90,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
 
     let mut splitter = SseSplitter::new();
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            (
-                format!("stream error: {e}"),
-                crate::core::provider::ErrorKind::Delivered,
-            )
-        })?;
+    while let Some(chunk) = next_sse_chunk(&mut stream).await? {
         for payload in splitter.feed(&String::from_utf8_lossy(&chunk)) {
             if payload == "[DONE]" {
                 flush(&mut pending, tx).await;
@@ -190,6 +151,6 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
             }
         }
     }
-    flush(&mut pending, tx).await;
-    Ok(())
+    // EOF without [DONE] is a broken stream, not a successful empty reply.
+    Err(ProviderError::stalled("stream ended unexpectedly"))
 }

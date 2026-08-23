@@ -363,6 +363,15 @@ fn live_tool_group_replaces_running_state_and_streams_output() {
 }
 
 #[test]
+fn failed_turns_end_in_error_color() {
+    use e::tui::transcript::{Block, Kind};
+    let theme = e::tui::theme::resolve("dark", false);
+    let block = Block::new(Kind::Error, "error: boom");
+    let rows = block.lines_for_test(&theme, 80);
+    assert_eq!(rows[0], theme.fg("error", "  error: boom"));
+}
+
+#[test]
 fn interrupted_tools_wear_the_cancelled_glyph() {
     use e::tui::transcript::{Block, Kind, Transcript};
     let theme = e::tui::theme::resolve("dark", false);
