@@ -132,7 +132,7 @@ relaunch ends the chain.
 ## Examples
 
 ```
-examples/extensions/
+docs/extensions/
   scaffold.mjs   the wire-protocol helper (copy next to your extension)
   hello.mjs      every surface at once, on the scaffold
   gate.mjs       the tool_call hook as a fail-open guard

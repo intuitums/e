@@ -28,7 +28,7 @@ release notes are that section verbatim), open a fresh empty
 +  as `--name`/`--name <value>`. The scaffold gains a `flag()` getter and
 +  the worktree example moves onto typed flags.
 
-+- `examples/extensions/scaffold.mjs`: the extension protocol's shared
++- `docs/extensions/scaffold.mjs`: the extension protocol's shared
 +  plumbing — framing, id routing, a `connect({manifest, handlers})`
 +  that reads like an SDK with nothing to import but Node. The examples
 +  move onto it: `hello.mjs` (every surface in ~50 lines of handlers),
@@ -42,7 +42,7 @@ release notes are that section verbatim), open a fresh empty
 +  /resume), a `flags` manifest entry surfaced in `e --help`, and a
 +  namespaced config key (`settings.json` `extensions.<name>`) delivered
 +  with every initialize. `e --help` now lists extension flags and
-+  commands; `/help` lists extension commands; `examples/extensions/`
++  commands; `/help` lists extension commands; `docs/extensions/`
 +  ships `hello.mjs` (every surface in ~90 lines) and `worktree.mjs` (a
 +  minimal -w launcher); docs/extensions.md documents the new results.
 
