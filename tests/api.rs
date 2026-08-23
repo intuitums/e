@@ -409,3 +409,55 @@ rl.on("line", (line) => {
     assert_eq!(flags["plan"], true);
     host.shutdown().await;
 }
+
+/// Every extension with typed flags gets a `flags` notification at start —
+/// even one with no startup hook. A tool-only extension reads its flags in
+/// any handler (pi's getFlag semantics: passed value, else default).
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn flags_notification_reaches_tool_only_extensions() {
+    const TOOLONLY_FAKE: &str = r#"#!/usr/bin/env node
+const rl = require("node:readline").createInterface({ input: process.stdin });
+let flags = {};
+rl.on("line", (line) => {
+  let req; try { req = JSON.parse(line); } catch { return; }
+  if (req.method === "initialize") {
+    process.stdout.write(JSON.stringify({ id: req.id, result: {
+      name: "toolonly", version: "1",
+      tools: [{ name: "peek", description: "report flags", parameters: { type: "object", properties: {} } }],
+      flags: [
+        { name: "dry", type: "boolean", default: false, description: "dry run" },
+        { name: "tag", type: "string", default: "default-tag", description: "a tag" },
+      ],
+    }}) + "\n");
+  } else if (req.method === "flags") {
+    // Notification — no reply. Store for the tool to read.
+    flags = (req.params && req.params.flags) || {};
+  } else if (req.method === "tool_call") {
+    if (req.params && req.params.name === "peek") {
+      // A handler reads the flags it was given — the getFlag path.
+      process.stdout.write(JSON.stringify({ id: req.id, result: {
+        content: JSON.stringify({ dry: flags.dry, tag: flags.tag, hasDry: Object.hasOwn(flags, "dry") }),
+      }}) + "\n");
+    } else {
+      process.stdout.write(JSON.stringify({ id: req.id, result: { content: "bad", is_error: true } }) + "\n");
+    }
+  } else if (req.method === "shutdown") process.exit(0);
+});
+"#;
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _home = tempdir::TempHome::with_extension("toolonly.sh", TOOLONLY_FAKE);
+    let (notices, _rx) = tokio::sync::mpsc::channel(16);
+    // No startup hook — the flags notification must arrive on its own.
+    let host = ExtensionHost::start(notices).await;
+    assert!(!host.is_empty());
+
+    // The extension reads what it was given. With `--dry` absent (the test
+    // binary's argv declares no typed flags), the notification is empty and
+    // raw flags stay absent — defaults are the extension's own concern, the
+    // scaffold applies the manifest's `default` (see flag()).
+    let r = host.call_tool("peek", "{}").await;
+    let seen: serde_json::Value = serde_json::from_str(&r.content).unwrap();
+    assert_eq!(seen["hasDry"], false, "absent flag stays absent: {seen}");
+    host.shutdown().await;
+}

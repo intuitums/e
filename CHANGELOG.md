@@ -8,6 +8,16 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
++- Flags are delivered to every extension that declares them, not just
++  startup-hook ones: e sends a `flags` notification right after launch
++  (`{"method":"flags","params":{"flags":{…}}}`), so a tool-only
++  extension reads its flags in any handler — pi's getFlag, brought over.
++  The scaffold adds `flag(name)` (the passed value, else the manifest's
++  `default`, else undefined) and `flagPassed(name)` (true only when it
++  was on the command line); typed flags may carry a `default` now. The
++  worktree example becomes a pi-style boolean flag with the branch
++  hand-read from argv.
+
 +- Flags become typed: an extension declares `"type":"boolean"` (default)
 +  or `"string"` on a flag, and e parses it from startup argv — booleans
 +  match `--name`, `--name=true|false`, `--no-name`; strings match

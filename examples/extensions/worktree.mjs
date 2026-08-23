@@ -54,17 +54,27 @@ function prepareWorktree(cwd, requestedBranch) {
 const ext = connect({
   manifest: {
     name: "worktree",
-    version: "1.1",
+    version: "1.2",
     description: "e -w: managed Git worktree launch (example)",
-    flags: [{ name: "worktree", type: "string", description: "launch e in a fresh worktree" }],
+    // pi-style: a boolean flag declares presence; the optional branch value
+    // is hand-read from argv (still delivered to the hook).
+    flags: [
+      { name: "worktree", type: "boolean", default: false, description: "launch e in a fresh worktree" },
+    ],
     hooks: ["startup"],
   },
   startup({ cwd, argv }) {
-    // The typed flag was parsed by e: a string (branch name), null for a
-    // bare --worktree (pick a random name), undefined when not given.
-    const branch = ext.flag("worktree");
-    if (branch === undefined) return { argv }; // no --worktree: pass through
-    const next = argv.filter((a) => a !== "--worktree" && !a.startsWith("--worktree="));
+    // flag() is pi's getFlag — a typed boolean with a default.
+    if (!ext.flag("worktree")) return { argv }; // no --worktree: pass through
+    // The optional branch: --worktree=<name>. Hand-read, since a boolean
+    // flag only answers "was it passed".
+    let branch;
+    const next = [];
+    for (const a of argv) {
+      if (a === "--worktree") continue;
+      if (a.startsWith("--worktree=")) { branch = a.slice("--worktree=".length); continue; }
+      next.push(a);
+    }
     return { argv: next, relaunch: { cwd: prepareWorktree(cwd, branch || undefined) } };
   },
 });

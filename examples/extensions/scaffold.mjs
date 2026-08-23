@@ -27,6 +27,12 @@
  *   hookToolCall({name, arguments}) — {"block": true, "reason": …} | {"block": false}
  *   hookInput({text})      — {"consume": true} | {"replace": …} | {"notice": …} | {}
  *
+ * `flag(name)` (pi's getFlag) reads a parsed flag from any handler, any
+ * time: a passed value, else the flag's `default` in the manifest, else
+ * undefined. `flagPassed(name)` is true only when it was on the command
+ * line. Flags arrive as a `flags` notification at startup — no startup
+ * hook needed to read them.
+ *
  * A thrown error is answered as a protocol error (startup errors are fatal
  * to launch, as e documents; runtime errors just fail that call). If this
  * file is dropped into ~/.e/extensions/ by accident it answers initialize
@@ -63,8 +69,16 @@ export function connect({ manifest = {}, ...handlers } = {}) {
     }
   }
 
-  // Last startup's parsed flags; flag() reads them after startup runs.
+  // Flags e parsed from the command line ("flags" notification; also rides
+  // hook.startup params). flag()/flagPassed() read them — the pi getFlag
+  // analogs, available in any handler, not just at startup.
   let lastFlags = {};
+
+  // The manifest's declared defaults, per flag name.
+  const defaults = {};
+  for (const flag of manifest.flags || []) {
+    if (Object.hasOwn(flag, "default")) defaults[flag.name] = flag.default;
+  }
 
   function route(request) {
     const { id, method, params } = request;
@@ -77,6 +91,10 @@ export function connect({ manifest = {}, ...handlers } = {}) {
           return;
         }
         reply(id, { name: "scaffold", version: "1.0", ...manifest });
+        return;
+      case "flags":
+        // Notification: parsed flags, no reply expected.
+        if (params && typeof params.flags === "object") lastFlags = params.flags;
         return;
       case "shutdown":
         process.exit(0);
@@ -105,11 +123,16 @@ export function connect({ manifest = {}, ...handlers } = {}) {
   }
 
   return {
-    /** The parsed value of a typed flag (string, boolean, or null when a
-     *  string flag was bare). Undefined for flags never given. Works after
-     *  startup ran — the pi getFlag analog for e's wire protocol. */
+    /** pi's getFlag: the parsed value of a typed flag in any handler —
+     *  the passed value, else the manifest default, else undefined. Works
+     *  from any handler, no startup hook needed. */
     flag(name) {
-      return lastFlags[name];
+      return Object.hasOwn(lastFlags, name) ? lastFlags[name] : defaults[name];
+    },
+    /** True only when the flag was actually on the command line (passed),
+     *  regardless of its default. */
+    flagPassed(name) {
+      return Object.hasOwn(lastFlags, name);
     },
     run() {
       rl.on("line", (line) => {

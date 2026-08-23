@@ -64,12 +64,20 @@ squatting on a top-level key:
 them. A flag with `"type":"boolean"` (the default) or `"type":"string"`
 is recognized in startup argv — booleans match `--name`, `--name=true|false`,
 `--no-name`; strings match `--name=value` or `--name value` (a following
-`-` token is never consumed as a value). Parsed values ride the startup
-hook's `flags` params: `{"worktree":"feature"}`. A bare string flag at
-end-of-argv parses as `null` (flag present, no value). Last occurrence
-wins; `--` stops parsing. A name that isn't a clean `--name` token (e.g.
-`"-w, --worktree"`) appears in `e --help` but is never parsed — those
-flags still need the startup hook's raw argv.
+`-` token is never consumed as a value). A bare string flag at end-of-argv
+parses as `null` (flag present, no value). Last occurrence wins; `--` stops
+parsing. A name that isn't a clean `--name` token (e.g. `"-w, --worktree"`)
+appears in `e --help` but is never parsed — those flags still need the
+startup hook's raw argv. An optional `"default"` gives the value to use
+when the flag is absent.
+
+Parsed flags are sent to **every** extension that declares typed flags as a
+`flags` notification right after launch (no reply needed) — so a tool-only
+extension reads them from any handler, not just during startup. Extensions
+that use the scaffold get `flag(name)` (the passed value, else the declared
+default, else undefined — pi's `getFlag`) and `flagPassed(name)` in any
+handler; the raw protocol gets `{"method":"flags",
+"params":{"flags":{…}}}`.
 
 **tool_call** → `{"content":"text the model sees","is_error":false,
 "session_name":"optional new session name"}`

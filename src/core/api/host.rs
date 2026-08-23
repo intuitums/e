@@ -71,10 +71,28 @@ impl ExtensionHost {
                 }
             }
         }
-        Arc::new(ExtensionHost {
+        let host = Arc::new(ExtensionHost {
             extensions,
             ids: AtomicU64::new(1),
-        })
+        });
+        // Every extension that declares typed flags gets them now, before any
+        // startup hook — a tool-only extension can read its flags anytime, not
+        // just during startup. `flags` is a notification (no reply expected).
+        let argv: Vec<String> = std::env::args().skip(1).collect();
+        let parsed = host.parse_flags(&argv);
+        if !parsed.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+            for ext in &host.extensions {
+                if ext.manifest.flags.iter().any(|f| f.long_form().is_some()) {
+                    let line = json!({
+                        "method": "flags",
+                        "params": { "flags": parsed },
+                    })
+                    .to_string();
+                    let _ = ext.writer.send(line).await;
+                }
+            }
+        }
+        host
     }
 
     /// An empty host, for sessions with no extensions (and for tests).
