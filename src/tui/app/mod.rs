@@ -1870,9 +1870,11 @@ pub async fn run(
                                 && k.modifiers.contains(KeyModifiers::SHIFT))
                         {
                             // Shift+tab cycles the reasoning effort through
-                            // whatever levels this model declares.
+                            // whatever levels this model declares. The
+                            // statusline already shows the new level; only a
+                            // model without a reasoning knob gets a notice.
                             match app.agent.cycle_effort() {
-                                Some(next) => app.notice(format!("reasoning effort: {next}")),
+                                Some(_) => {}
                                 None => app.notice("this model has no reasoning effort control".into()),
                             }
                         } else if let Some(key) = key_of(&k) {
