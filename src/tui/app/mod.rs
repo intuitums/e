@@ -1908,7 +1908,10 @@ pub async fn run(
                             // the original, so no second hook pass.
                             app.submit_direct(replace);
                         } else {
-                            app.submit(text);
+                            // Allowed through — the hook already saw the
+                            // text, so submit directly. Re-running submit()
+                            // here would loop back into the hook forever.
+                            app.submit_direct(text);
                         }
                     }
                     Some(AppJob::Rename(name)) => {
