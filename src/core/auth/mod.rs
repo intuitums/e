@@ -38,7 +38,9 @@ pub type AuthFile = BTreeMap<String, Credential>;
 /// provider registry) — the reference behavior, and what CI wants.
 pub fn load() -> AuthFile {
     let mut out = AuthFile::new();
-    for (provider, value) in crate::core::config::store::read_object(&home::auth_path()) {
+    for (provider, value) in
+        crate::core::config::store::read_object(&home::auth_path()).unwrap_or_default()
+    {
         if let Ok(cred) = serde_json::from_value::<Credential>(value) {
             out.insert(provider, cred);
         }
