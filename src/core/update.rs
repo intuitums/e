@@ -60,6 +60,9 @@ pub async fn latest_tag() -> Result<String, String> {
         .await
         .map_err(|e| format!("update check failed: {e}"))?;
     if !response.status().is_success() {
+        if response.status() == 404 {
+            return Err("no releases published yet".into());
+        }
         return Err(format!("update check failed: {}", response.status()));
     }
     let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
