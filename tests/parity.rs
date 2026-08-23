@@ -133,6 +133,17 @@ fn code_panel_geometry_matches_the_reference() {
 }
 
 #[test]
+fn code_panel_survives_a_degenerate_terminal_width() {
+    let t = dark();
+    // 0–3 columns used to underflow panel_width arithmetic and panic; any
+    // width must render without unwinding (the screen clips if needed).
+    for cols in 0..=6 {
+        let _ = code_panel(&t, "hello", "rust", cols);
+        let _ = code_panel(&t, "hello", "", cols);
+    }
+}
+
+#[test]
 fn lists_match_the_reference_glyphs_and_indent() {
     let t = dark();
     let out = render_markdown(&t, "- one\n  - nested\n\n1. numbered\n", 40).join("\n");
