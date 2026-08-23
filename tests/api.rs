@@ -461,3 +461,37 @@ rl.on("line", (line) => {
     assert_eq!(seen["hasDry"], false, "absent flag stays absent: {seen}");
     host.shutdown().await;
 }
+
+/// An extension whose process dies before answering initialize must fail
+/// fast — its death is detected on stdout EOF and reported, never left to
+/// hold the launch for the full 5 s timeout (the startup-stall bug).
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn dead_extension_fails_fast_instead_of_stalling() {
+    // A valid script with no stdin reader: node drains its event loop and
+    // exits immediately, before e's initialize can be answered.
+    const DIES_INSTANTLY: &str = r#"#!/usr/bin/env node
+// no readline, no handlers — the process exits at once
+"#;
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _home = tempdir::TempHome::with_extension("dies.sh", DIES_INSTANTLY);
+    let (notices, _rx) = tokio::sync::mpsc::channel(16);
+
+    let t0 = std::time::Instant::now();
+    let host = ExtensionHost::start(notices).await;
+    let elapsed = t0.elapsed();
+    // The extension is discovered but skipped: initialize failed fast.
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "a dead extension stalled launch for {elapsed:?} — it should be skipped in well under the 5 s timeout"
+    );
+    assert!(host.is_empty(), "dead extension must not be kept");
+
+    // And a startup pass over the (now empty) host stays instant.
+    let t1 = std::time::Instant::now();
+    match host.startup(vec![]).await.unwrap() {
+        StartupAction::Continue(_) => {}
+        StartupAction::Relaunch { .. } => panic!("no relaunch"),
+    }
+    assert!(t1.elapsed() < std::time::Duration::from_millis(500));
+}

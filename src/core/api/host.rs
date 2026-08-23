@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -38,6 +38,10 @@ struct Extension {
     writer: mpsc::Sender<String>,
     pending: PendingMap,
     child: Mutex<Option<tokio::process::Child>>,
+    /// Set when the process's stdout closed (it exited). Pending requests
+    /// fail immediately instead of waiting out their timeout, and new ones
+    /// are refused — a dead extension must never stall launch.
+    dead: Arc<AtomicBool>,
 }
 
 pub struct ExtensionHost {
@@ -469,6 +473,11 @@ impl ExtensionHost {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, String> {
+        // A dead process can't answer — refuse immediately instead of
+        // holding the caller for the full timeout.
+        if ext.dead.load(Ordering::SeqCst) {
+            return Err("extension exited".into());
+        }
         let id = self.ids.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         ext.pending.lock().unwrap().insert(id, tx);
@@ -561,6 +570,10 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
     // Reader task: route responses to pending waiters, notifies to the app.
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
     let pending_reader = pending.clone();
+    // Set when stdout closes (the process exited): pending requests fail
+    // immediately instead of waiting out their timeouts.
+    let dead = Arc::new(AtomicBool::new(false));
+    let dead_reader = dead.clone();
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
@@ -576,6 +589,12 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
                 None => {}
             }
         }
+        // Stdout closed: the process is gone. Fail everything pending now —
+        // a crashed extension must not hold a request for its full timeout.
+        dead_reader.store(true, Ordering::SeqCst);
+        for (_, tx) in pending_reader.lock().unwrap().drain() {
+            let _ = tx.send(Err("extension exited".into()));
+        }
     });
 
     // Handshake.
@@ -584,6 +603,7 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
         writer,
         pending,
         child: Mutex::new(Some(child)),
+        dead,
     };
     let host_shim = ExtensionHost {
         extensions: Vec::new(),
