@@ -125,7 +125,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     let mut output_tokens = 0u64;
 
     while let Some(chunk) = next_sse_chunk(&mut stream).await? {
-        for payload in splitter.feed(&String::from_utf8_lossy(&chunk)) {
+        for payload in splitter.feed_bytes(&chunk) {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
                 continue;
             };

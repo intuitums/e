@@ -17,6 +17,19 @@ fn sse_splitter_handles_fragmentation_and_crlf() {
     assert_eq!(s.feed("data: a\ndata: b\n\n"), vec!["a\nb"]);
 }
 
+#[test]
+fn sse_splitter_preserves_utf8_across_byte_chunks() {
+    let event = "data: {\"text\":\"é\"}\n\n";
+    let bytes = event.as_bytes();
+    let split = bytes.iter().position(|byte| *byte == 0xc3).unwrap() + 1;
+    let mut splitter = SseSplitter::new();
+    assert!(splitter.feed_bytes(&bytes[..split]).is_empty());
+    assert_eq!(
+        splitter.feed_bytes(&bytes[split..]),
+        vec![r#"{"text":"é"}"#]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn completions_stream_parses_deltas_and_usage() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

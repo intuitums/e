@@ -120,6 +120,9 @@ struct App {
     held_prompts: Vec<String>,
     /// First visit to this directory: the trust question, until answered.
     trust: Option<TrustStage>,
+    /// A command-line prompt held until the first-visit trust choice is
+    /// persisted, so its system prompt reflects that choice.
+    pending_initial: Option<String>,
     /// Transcript index of the running `!` block, updated on completion.
     shell_block: Option<usize>,
     /// A /reload is restarting the extension host; prompts are held.
@@ -1481,6 +1484,25 @@ fn command_arg<'a>(input: &'a str, command: &str) -> Option<&'a str> {
         .filter(|rest| rest.is_empty() || rest.starts_with(' '))
 }
 
+/// Decide whether a command-line prompt may start now or must wait for the
+/// first-visit trust panel. Kept separate so launch ordering stays testable
+/// without constructing a terminal frame.
+fn stage_initial_prompt(
+    initial: String,
+    awaiting_trust: bool,
+    pending: &mut Option<String>,
+) -> Option<String> {
+    if initial.trim().is_empty() {
+        return None;
+    }
+    if awaiting_trust {
+        *pending = Some(initial);
+        None
+    } else {
+        Some(initial)
+    }
+}
+
 /// Replace this process with the current e binary, optionally in a new cwd.
 /// Extensions may choose arguments and environment, but never an arbitrary
 /// executable.
@@ -1610,6 +1632,7 @@ pub async fn run(
         compact_requested: false,
         held_prompts: Vec::new(),
         trust: None,
+        pending_initial: None,
         shell_block: None,
         reloading: false,
         reload_block: None,
@@ -1679,7 +1702,9 @@ pub async fn run(
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
 
-    if !initial.trim().is_empty() {
+    if let Some(initial) =
+        stage_initial_prompt(initial, app.trust.is_some(), &mut app.pending_initial)
+    {
         app.submit(initial);
     }
     screen.paint(&app.frame(screen.cols as usize))?;
@@ -1749,11 +1774,17 @@ pub async fn run(
                                 KeyCode::Up | KeyCode::Down => stage.selected = 1 - stage.selected,
                                 KeyCode::Enter => {
                                     let trusted = stage.selected == 0;
-                                    app.trust = None;
-                                    if let Err(e) = crate::core::config::trust::set(&app.agent.cwd(), trusted) {
-                                        app.notice(format!("trust: {e}"));
-                                    } else if !trusted {
-                                        app.notice("working untrusted — project AGENTS.md and .e skills/prompts ignored (/trust to allow)".into());
+                                    match crate::core::config::trust::set(&app.agent.cwd(), trusted) {
+                                        Err(e) => app.notice(format!("trust: {e}")),
+                                        Ok(()) => {
+                                            app.trust = None;
+                                            if !trusted {
+                                                app.notice("working untrusted — project AGENTS.md and .e skills/prompts ignored (/trust to allow)".into());
+                                            }
+                                            if let Some(initial) = app.pending_initial.take() {
+                                                app.submit(initial);
+                                            }
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -2122,5 +2153,18 @@ mod tests {
             "reloaded extensions, themes, and config — skills, prompts, and AGENTS.md are always read fresh"
         );
         assert_eq!(transcript.blocks[1].text, "an unrelated notice");
+    }
+
+    #[test]
+    fn initial_prompt_waits_for_first_visit_trust() {
+        let mut pending = None;
+        let now = stage_initial_prompt("inspect this repo".into(), true, &mut pending);
+        assert!(now.is_none());
+        assert_eq!(pending.as_deref(), Some("inspect this repo"));
+
+        let mut pending = None;
+        let now = stage_initial_prompt("inspect this repo".into(), false, &mut pending);
+        assert_eq!(now.as_deref(), Some("inspect this repo"));
+        assert!(pending.is_none());
     }
 }

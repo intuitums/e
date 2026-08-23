@@ -131,7 +131,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     // function_call items accumulate argument deltas keyed by item id.
     let mut pending: std::collections::BTreeMap<String, ToolCall> = Default::default();
     while let Some(chunk) = next_sse_chunk(&mut stream).await? {
-        for payload in splitter.feed(&String::from_utf8_lossy(&chunk)) {
+        for payload in splitter.feed_bytes(&chunk) {
             if payload == "[DONE]" {
                 return Ok(());
             }

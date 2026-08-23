@@ -308,7 +308,7 @@ pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHand
 /// Handles CRLF, multi-line data fields, and the `[DONE]` sentinel (returned
 /// as a payload; dialects decide what it means).
 pub struct SseSplitter {
-    buffer: String,
+    buffer: Vec<u8>,
 }
 
 impl Default for SseSplitter {
@@ -319,20 +319,24 @@ impl Default for SseSplitter {
 
 impl SseSplitter {
     pub fn new() -> Self {
-        SseSplitter {
-            buffer: String::new(),
-        }
+        SseSplitter { buffer: Vec::new() }
     }
 
+    /// Convenience entry point for tests and already-decoded sources.
     pub fn feed(&mut self, chunk: &str) -> Vec<String> {
-        self.buffer.push_str(chunk);
+        self.feed_bytes(chunk.as_bytes())
+    }
+
+    /// Preserve arbitrary HTTP body chunk boundaries as bytes. Decoding each
+    /// chunk separately would replace a UTF-8 code point split across two
+    /// chunks before the complete SSE event could be reassembled.
+    pub fn feed_bytes(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
         // Events are separated by a blank line.
         while let Some(pos) = find_event_end(&self.buffer) {
-            let (raw, rest_at) = (
-                self.buffer[..pos].to_string(),
-                skip_separator(&self.buffer, pos),
-            );
+            let rest_at = skip_separator(&self.buffer, pos);
+            let raw = String::from_utf8_lossy(&self.buffer[..pos]).into_owned();
             self.buffer.drain(..rest_at);
             let mut data = String::new();
             for line in raw.lines() {
@@ -352,17 +356,21 @@ impl SseSplitter {
     }
 }
 
-fn find_event_end(buf: &str) -> Option<usize> {
-    let lf = buf.find("\n\n");
-    let crlf = buf.find("\r\n\r\n");
+fn find_event_end(buf: &[u8]) -> Option<usize> {
+    let find = |needle: &[u8]| {
+        buf.windows(needle.len())
+            .position(|window| window == needle)
+    };
+    let lf = find(b"\n\n");
+    let crlf = find(b"\r\n\r\n");
     match (lf, crlf) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     }
 }
 
-fn skip_separator(buf: &str, pos: usize) -> usize {
-    if buf[pos..].starts_with("\r\n\r\n") {
+fn skip_separator(buf: &[u8], pos: usize) -> usize {
+    if buf[pos..].starts_with(b"\r\n\r\n") {
         pos + 4
     } else {
         pos + 2

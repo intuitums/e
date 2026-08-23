@@ -40,9 +40,29 @@ pub struct Session {
     file: File,
 }
 
-/// `/Users/x/proj` → `--Users-x-proj--`, matching the established scheme.
+fn normalized_cwd(cwd: &Path) -> PathBuf {
+    cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf())
+}
+
+/// A collision-resistant workspace key. The previous slash-to-hyphen scheme
+/// mapped distinct paths such as `a/b-c` and `a-b/c` to the same directory.
 fn cwd_slug(cwd: &Path) -> String {
-    let joined = cwd.to_string_lossy().replace('/', "-");
+    use sha2::Digest;
+    use std::os::unix::ffi::OsStrExt;
+    let cwd = normalized_cwd(cwd);
+    let digest = sha2::Sha256::digest(cwd.as_os_str().as_bytes());
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256-{hex}")
+}
+
+/// The pre-0.4 directory name, read-only so existing sessions remain
+/// resumable. Files found there are checked against their header cwd because
+/// the legacy encoding can contain sessions from more than one workspace.
+fn legacy_cwd_slug(cwd: &Path) -> String {
+    let joined = normalized_cwd(cwd).to_string_lossy().replace('/', "-");
     format!("-{joined}-")
 }
 
@@ -56,7 +76,8 @@ fn now_ms() -> u64 {
 impl Session {
     /// Create a fresh session log for this workspace.
     pub fn create(cwd: &Path, model: &str) -> std::io::Result<Session> {
-        let dir = home::sessions_dir().join(cwd_slug(cwd));
+        let cwd = normalized_cwd(cwd);
+        let dir = home::sessions_dir().join(cwd_slug(&cwd));
         std::fs::create_dir_all(&dir)?;
         let id = uuid::Uuid::now_v7().to_string();
         let stamp = now_ms();
@@ -133,15 +154,24 @@ pub struct SessionInfo {
 
 /// List this workspace's sessions, newest first.
 pub fn list(cwd: &Path) -> Vec<SessionInfo> {
-    let dir = home::sessions_dir().join(cwd_slug(cwd));
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut sessions: Vec<SessionInfo> = entries
-        .flatten()
-        .filter(|e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false))
-        .filter_map(|e| info(&e.path()))
-        .collect();
+    let cwd = normalized_cwd(cwd);
+    let mut dirs = vec![(home::sessions_dir().join(cwd_slug(&cwd)), false)];
+    let legacy = home::sessions_dir().join(legacy_cwd_slug(&cwd));
+    if legacy != dirs[0].0 {
+        dirs.push((legacy, true));
+    }
+    let mut sessions = Vec::new();
+    for (dir, verify_header) in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        sessions.extend(
+            entries
+                .flatten()
+                .filter(|e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false))
+                .filter_map(|e| info(&e.path(), if verify_header { Some(&cwd) } else { None })),
+        );
+    }
     sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
     sessions
 }
@@ -151,17 +181,24 @@ pub fn most_recent(cwd: &Path) -> Option<PathBuf> {
     list(cwd).into_iter().next().map(|s| s.path)
 }
 
-fn info(path: &Path) -> Option<SessionInfo> {
+fn info(path: &Path, expected_cwd: Option<&Path>) -> Option<SessionInfo> {
     // Read messages and any extension-set name in one pass.
     let reader = BufReader::new(File::open(path).ok()?);
     let mut messages = Vec::new();
     let mut name = None;
+    let mut session_cwd = None;
     for line in reader.lines() {
         let line = line.ok()?;
-        if let Ok(Entry::Message { message }) = serde_json::from_str(&line) {
-            messages.push(message);
-        } else if let Ok(Entry::Name { name: n }) = serde_json::from_str(&line) {
-            name = Some(n);
+        match serde_json::from_str(&line) {
+            Ok(Entry::Header { cwd, .. }) => session_cwd = Some(PathBuf::from(cwd)),
+            Ok(Entry::Message { message }) => messages.push(message),
+            Ok(Entry::Name { name: n }) => name = Some(n),
+            Err(_) => {}
+        }
+    }
+    if let Some(expected_cwd) = expected_cwd {
+        if normalized_cwd(&session_cwd?) != expected_cwd {
+            return None;
         }
     }
     let modified = std::fs::metadata(path)

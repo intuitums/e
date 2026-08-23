@@ -208,6 +208,32 @@ async fn empty_host_serves_builtins() {
     assert!(result.is_error);
 }
 
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn extension_exit_wakes_pending_requests() {
+    const EXITING: &str = r#"#!/bin/sh
+IFS= read -r line
+id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"id":%s,"result":{"name":"exiting","tools":[{"name":"boom","parameters":{"type":"object"}}]}}\n' "$id"
+exit 0
+"#;
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _home = tempdir::TempHome::with_extension("exiting.sh", EXITING);
+    let (notices, _rx) = tokio::sync::mpsc::channel(4);
+    let host = ExtensionHost::start(notices).await;
+    assert!(host.owns_tool("boom"));
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        host.call_tool("boom", "{}"),
+    )
+    .await
+    .expect("extension exit should resolve the request immediately");
+    assert!(result.is_error);
+    assert!(result.content.contains("extension exited"));
+    host.shutdown().await;
+}
+
 /// The initialize handshake carries namespaced extension config from
 /// settings.json (`extensions.<name>`), so extensions never squat on a
 /// top-level settings key. The fake answers with its manifest only when it

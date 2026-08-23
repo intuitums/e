@@ -8,6 +8,14 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- Audit fixes: session directories now use collision-resistant workspace keys
+  while safely discovering legacy logs; provider SSE parsing preserves UTF-8
+  across arbitrary byte chunks; live-discovered models inherit their
+  provider's wire dialect; crashed extensions wake pending calls immediately;
+  command-line prompts wait for the first-visit trust choice; and OAuth opens
+  with `open` on macOS or `xdg-open` on Linux while always showing a copyable
+  fallback URL.
+
 +- Flags are delivered to every extension that declares them, not just
 +  startup-hook ones: e sends a `flags` notification right after launch
 +  (`{"method":"flags","params":{"flags":{…}}}`), so a tool-only

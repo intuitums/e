@@ -27,6 +27,33 @@ fn b64url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
+#[cfg(target_os = "macos")]
+fn browser_opener() -> &'static str {
+    "open"
+}
+
+#[cfg(target_os = "linux")]
+fn browser_opener() -> &'static str {
+    "xdg-open"
+}
+
+/// Launch a browser when the platform opener is available, but always show a
+/// copyable URL so headless Linux, SSH, and opener failures cannot strand an
+/// OAuth flow waiting for a callback the user has no way to initiate.
+async fn launch_browser(url: &str, notify: &tokio::sync::mpsc::Sender<String>) {
+    let message = match std::process::Command::new(browser_opener())
+        .arg(url)
+        .spawn()
+    {
+        Ok(_) => format!("opening the browser to sign in…\nIf it does not open, visit: {url}"),
+        Err(error) => format!(
+            "could not open the browser with {} ({error})\nVisit: {url}",
+            browser_opener()
+        ),
+    };
+    let _ = notify.send(message).await;
+}
+
 pub fn auth_status() {
     let file = auth::load();
     if file.is_empty() {
@@ -113,8 +140,7 @@ async fn codex_login_inner(
         format!("cannot listen on localhost:1455 ({e}) — is another login running?")
     })?;
 
-    let _ = notify.send("opening the browser to sign in…".into()).await;
-    let _ = std::process::Command::new("open").arg(&authorize).spawn();
+    launch_browser(&authorize, notify).await;
 
     let expected = state.clone();
     let code = tokio::task::spawn_blocking(move || wait_for_code(&listener, &expected))
@@ -368,7 +394,7 @@ async fn xai_login_inner(notify: &tokio::sync::mpsc::Sender<String>) -> Result<(
     let _ = notify
         .send(format!("xAI: confirm code {user_code} in the browser"))
         .await;
-    let _ = std::process::Command::new("open").arg(&verify_url).spawn();
+    launch_browser(&verify_url, notify).await;
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
@@ -604,5 +630,13 @@ mod tests {
             .and_then(|l| l.split(':').nth(1)?.trim().parse().ok())
             .unwrap();
         assert_eq!(declared, body.len());
+    }
+
+    #[test]
+    fn browser_opener_matches_the_platform() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(super::browser_opener(), "xdg-open");
+        #[cfg(target_os = "macos")]
+        assert_eq!(super::browser_opener(), "open");
     }
 }

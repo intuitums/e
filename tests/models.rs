@@ -319,7 +319,7 @@ async fn provider_reported_models_appear_without_a_release() {
     std::fs::write(dir.join("auth.json"), r#"{"mock":{"key":"sk-live"}}"#).unwrap();
     std::fs::write(
         dir.join("models.json"),
-        format!(r#"{{"providers":{{"mock":{{"base_url":"http://127.0.0.1:{port}","models":["small"]}}}}}}"#),
+        format!(r#"{{"providers":{{"mock":{{"base_url":"http://127.0.0.1:{port}","api":"anthropic","models":["small"]}}}}}}"#),
     )
     .unwrap();
 
@@ -336,6 +336,9 @@ async fn provider_reported_models_appear_without_a_release() {
         .expect("gateway model appears");
     // The gateway reported the window; the overlay keeps it.
     assert_eq!(fresh.context_window, 64_000);
+    // A discovered id speaks the provider's declared wire dialect instead of
+    // silently falling back to chat completions.
+    assert_eq!(fresh.api, e::core::provider::catalog::Api::Anthropic);
     // And the report wins over what e already lists: "small" was declared
     // without a window (the 200K default) — the gateway's 123456 replaces it.
     let known = catalog

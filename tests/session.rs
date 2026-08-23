@@ -110,3 +110,109 @@ fn old_tool_messages_without_metadata_still_load() {
     assert_eq!(message.role, "tool");
     assert!(message.tool_meta.is_none());
 }
+
+#[test]
+fn path_separator_and_hyphen_do_not_collide() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!(
+        "e-session-collision-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    let root = home.join("workspaces");
+    let first = root.join("alpha").join("beta-gamma");
+    let second = root.join("alpha-beta").join("gamma");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+
+    let mut saved = Session::create(&first, "test/model").unwrap();
+    saved.append(&ChatMessage::user("first workspace only"));
+    drop(saved);
+
+    assert_eq!(session::list(&first).len(), 1);
+    assert!(session::list(&second).is_empty());
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn legacy_session_directories_are_filtered_by_header_cwd() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!(
+        "e-session-legacy-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    let root = home.join("workspaces");
+    let first = root.join("alpha").join("beta-gamma");
+    let second = root.join("alpha-beta").join("gamma");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let first = first.canonicalize().unwrap();
+    let second = second.canonicalize().unwrap();
+    let legacy = format!("-{}-", first.to_string_lossy().replace('/', "-"));
+    assert_eq!(
+        legacy,
+        format!("-{}-", second.to_string_lossy().replace('/', "-"))
+    );
+    let dir = home.join("sessions").join(legacy);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for (name, cwd, message) in [
+        ("first", &first, "belongs to first"),
+        ("second", &second, "belongs to second"),
+    ] {
+        let contents = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "session", "id": name, "cwd": cwd,
+                "created": 1, "model": "test/model"
+            }),
+            serde_json::json!({
+                "type": "message", "message": ChatMessage::user(message)
+            })
+        );
+        std::fs::write(dir.join(format!("{name}.jsonl")), contents).unwrap();
+    }
+
+    let first_list = session::list(&first);
+    assert_eq!(first_list.len(), 1);
+    assert_eq!(first_list[0].title, "belongs to first");
+    let second_list = session::list(&second);
+    assert_eq!(second_list.len(), 1);
+    assert_eq!(second_list[0].title, "belongs to second");
+    let _ = std::fs::remove_dir_all(home);
+}
+
+// Linux filesystems accept arbitrary non-NUL filename bytes. macOS rejects
+// this deliberately invalid UTF-8 test fixture with EILSEQ.
+#[cfg(target_os = "linux")]
+#[test]
+fn session_keys_preserve_non_utf8_path_bytes() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!(
+        "e-session-non-utf8-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    let cwd = home
+        .join("workspaces")
+        .join(std::ffi::OsString::from_vec(b"project-\xff".to_vec()));
+    std::fs::create_dir_all(&cwd).unwrap();
+    let mut saved = Session::create(&cwd, "test/model").unwrap();
+    saved.append(&ChatMessage::user("non utf8 workspace"));
+    drop(saved);
+
+    assert_eq!(session::list(&cwd).len(), 1);
+    let _ = std::fs::remove_dir_all(home);
+}

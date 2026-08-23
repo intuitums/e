@@ -5,7 +5,7 @@
 //! wins over any seed value. Silent on failure: an offline launch must not
 //! care.
 
-use super::{catalog, Api, Model};
+use super::{catalog, Model};
 
 /// How long a provider's fetched model list stays fresh (the reference's
 /// refresh interval).
@@ -20,10 +20,10 @@ fn store_path() -> std::path::PathBuf {
 pub(super) fn remote_overlay(models: &mut Vec<Model>) {
     let object = crate::core::config::store::read_object(&store_path());
     for (provider, entry) in object {
-        let Some(base) = models
+        let Some((base, api)) = models
             .iter()
             .find(|m| m.provider == provider)
-            .map(|m| m.base_url.clone())
+            .map(|m| (m.base_url.clone(), m.api))
         else {
             continue; // only providers e knows how to speak to
         };
@@ -54,7 +54,7 @@ pub(super) fn remote_overlay(models: &mut Vec<Model>) {
                     provider: provider.clone(),
                     id: id.to_string(),
                     base_url: base.clone(),
-                    api: Api::Completions,
+                    api,
                     efforts: Vec::new(),
                     context_window: item["context_window"].as_u64().unwrap_or(200_000),
                 }),
