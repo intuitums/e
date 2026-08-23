@@ -83,6 +83,8 @@ struct ProviderEntry {
     base_url: Option<String>,
     #[serde(default)]
     api: Option<String>,
+    #[serde(default)]
+    efforts: Option<Vec<String>>,
     /// Default window for this provider's models; each model may override.
     #[serde(default)]
     context_window: Option<u64>,
@@ -113,15 +115,26 @@ pub fn catalog() -> Vec<Model> {
     if let Ok(json) = std::fs::read_to_string(home::home().join("models.json")) {
         if let Ok(file) = serde_json::from_str::<ModelsFile>(&json) {
             for (provider, entry) in file.providers {
-                let api = entry
-                    .api
-                    .as_deref()
-                    .and_then(Api::parse)
-                    .unwrap_or(Api::Completions);
-                let base = entry.base_url.clone().unwrap_or_else(|| {
-                    crate::core::provider::registry::find("opencode-go")
-                        .map(|p| p.base_url.clone())
-                        .unwrap_or_default()
+                // A partial entry — "correct this one field" — must inherit
+                // the built-in provider's transport and defaults rather than
+                // silently swapping dialect and endpoint. Otherwise tweaking
+                // a context window on an Anthropic model would send that
+                // model's requests (and its credential) to an unrelated
+                // gateway's Chat Completions endpoint.
+                let builtin = crate::core::provider::registry::find(&provider);
+                let api = match entry.api.as_deref() {
+                    Some(name) => Api::parse(name).unwrap_or_else(|| {
+                        panic!(
+                            "models.json: provider {provider}: unknown api dialect `{name}`"
+                        )
+                    }),
+                    None => builtin.map(|p| p.api()).unwrap_or(Api::Completions),
+                };
+                let base = entry.base_url.clone().or_else(|| {
+                    builtin.map(|p| p.base_url.clone()).or_else(|| {
+                        crate::core::provider::registry::find("opencode-go")
+                            .map(|p| p.base_url.clone())
+                    })
                 });
                 for model in entry.models {
                     let (id, window, efforts) = match model {
@@ -132,13 +145,24 @@ pub fn catalog() -> Vec<Model> {
                             efforts,
                         } => (id, context_window, efforts),
                     };
+                    let declared = builtin.and_then(|p| p.models.iter().find(|decl| decl.id == id));
                     let resolved = Model {
                         provider: provider.clone(),
                         id,
-                        base_url: base.clone(),
+                        base_url: base.clone().unwrap_or_default(),
                         api,
-                        efforts,
-                        context_window: window.or(entry.context_window).unwrap_or(200_000),
+                        efforts: match (&entry.efforts, &efforts) {
+                            // Per-model declaration wins…
+                            (None, e) if !e.is_empty() => e.clone(),
+                            // …then the per-provider default from the file…
+                            (Some(e), _) if !e.is_empty() => e.clone(),
+                            // …then the built-in's own efforts.
+                            _ => declared.map(|d| d.efforts.clone()).unwrap_or_default(),
+                        },
+                        context_window: window
+                            .or(entry.context_window)
+                            .or_else(|| declared.map(|d| d.context_window))
+                            .unwrap_or(200_000),
                     };
                     models.retain(|m| !(m.provider == resolved.provider && m.id == resolved.id));
                     models.push(resolved);

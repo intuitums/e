@@ -87,10 +87,7 @@ fn write_atomic(path: &Path, contents: &str, mode: u32) -> io::Result<()> {
     // keeps repeated attempts in one process distinct.
     static ATTEMPT: AtomicU64 = AtomicU64::new(0);
     let n = ATTEMPT.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!(
-        "tmp-{}-{n}",
-        std::process::id()
-    ));
+    let tmp = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
     loop {
         match std::fs::write(&tmp, contents) {
             Ok(()) => break,

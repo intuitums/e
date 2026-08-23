@@ -87,25 +87,19 @@ fn an_unreadable_file_aborts_the_write_instead_of_being_wiped() {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let h = home("unreadable");
         std::fs::write(h.join("auth.json"), r#"{"existing":{"key":"k"}}"#).unwrap();
-        std::fs::set_permissions(
-            h.join("auth.json"),
-            std::fs::Permissions::from_mode(0o000),
-        )
-        .unwrap();
+        std::fs::set_permissions(h.join("auth.json"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
 
         // We may not be root (then the read fails as intended) or we may be
         // (then the read succeeds and the update must still preserve).
-        let result = e::core::auth::set("new", e::core::auth::Credential::ApiKey { key: "z".into() });
+        let result =
+            e::core::auth::set("new", e::core::auth::Credential::ApiKey { key: "z".into() });
 
-        match result {
-            Err(ref err) => assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied),
-            Ok(()) => {}
+        if let Err(err) = &result {
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
         }
-        std::fs::set_permissions(
-            h.join("auth.json"),
-            std::fs::Permissions::from_mode(0o644),
-        )
-        .unwrap();
+        std::fs::set_permissions(h.join("auth.json"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(h.join("auth.json")).unwrap()).unwrap();
         assert_eq!(after["existing"]["key"], "k");
@@ -129,8 +123,7 @@ fn quarantine_failure_preserves_the_corrupt_source() {
     // aside cannot succeed, so the write must abort rather than proceed.
     std::fs::create_dir_all(h.join("settings.json")).unwrap();
 
-    let result = e::core::config::settings::set_string("theme", "light");
-    let _ = result;
+    e::core::config::settings::set_string("theme", "light");
 
     // The corrupt "file" (our directory) was never replaced by a real file,
     // and no fresh settings.json appeared beside it.
@@ -163,7 +156,11 @@ fn concurrent_updates_preserve_every_key_and_keep_the_temp_unique() {
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(h.join("settings.json")).unwrap()).unwrap();
     for i in 0..8 {
-        assert_eq!(after[format!("key{i}")], serde_json::json!(true), "key{i} lost");
+        assert_eq!(
+            after[format!("key{i}")],
+            serde_json::json!(true),
+            "key{i} lost"
+        );
     }
     let strays = std::fs::read_dir(&h)
         .unwrap()

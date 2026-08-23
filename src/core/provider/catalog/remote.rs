@@ -80,8 +80,7 @@ pub async fn refresh_remote_within(max_age_ms: u64) {
     let _guard = REFRESH_LOCK.lock().await;
     let auth = crate::core::auth::load();
     let now = crate::core::auth::now_ms();
-    let stored =
-        crate::core::config::store::read_object(&store_path()).unwrap_or_default();
+    let stored = crate::core::config::store::read_object(&store_path()).unwrap_or_default();
     // One representative model per signed-in provider gives base + auth kind.
     let mut providers: Vec<(String, String)> = Vec::new();
     for m in catalog() {
