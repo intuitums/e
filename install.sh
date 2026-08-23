@@ -29,7 +29,11 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 base="https://github.com/$repo/releases/latest/download"
 
-curl -fsSL -o "$tmp/e.tar.gz" "$base/e-$target.tar.gz"
+curl -fsSL -o "$tmp/e.tar.gz" "$base/e-$target.tar.gz" || {
+  echo "no release published yet — install.sh works once the first release exists" >&2
+  echo "build from source: cargo install --git https://github.com/fschrhunt/e" >&2
+  exit 1
+}
 curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt"
 
 cd "$tmp"

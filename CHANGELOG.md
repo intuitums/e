@@ -1,5 +1,11 @@
 # Changelog
 
+All notable changes. Nothing has been cut as a release yet — every entry
+lives under `## Unreleased` until e's first deliberate release. To cut one:
+rename `## Unreleased` to `## X.Y.Z — <date>` (the release workflow's
+release notes are that section verbatim), open a fresh empty
+`## Unreleased` above it, tag `vX.Y.Z`, and the pipeline publishes.
+
 ## Unreleased
 
 - Retries now show their work instead of a scrollback notice: a retryable
@@ -278,9 +284,6 @@
   SECURITY.md, CODEOWNERS, issue/PR templates, dependabot, weekly
   `cargo audit`, and branch protection on `main`.
 - The codebase is now rustfmt-formatted and clippy-clean; both are CI gates.
-
-## 0.3.0 — 2026-08-21
-
 - **Extension API** (`src/core/api/`): executables in `~/.e/extensions/`
   run as long-lived subprocesses speaking a JSONL line protocol — custom
   tools (overriding built-ins by name), slash commands in the `/` picker,
@@ -294,9 +297,6 @@
   quarantined (`.corrupt-<ms>`), never overwritten.
 - Steering fix: a message typed mid-turn is held and folded into the
   running turn (it was being rejected with a notice).
-
-## 0.2.0 — 2026-08
-
 - The harness, rewritten in Rust from scratch: own agent loop (request →
   stream → tools → repeat), steering, delivery-aware retry, one ordered
   session event stream.
@@ -308,8 +308,5 @@
   project `AGENTS.md`, skills catalog.
 - The full reference-shape TUI in Rust: line-differ renderer, markdown, code
   panels, pickers, settings, auth panel — pinned by the parity suite.
-
-## 0.1.0 — 2026-08
-
-- First release: a TypeScript TUI frontend with the reference visual design and
-  the byte-for-byte parity test suite that still governs the look.
+- The TypeScript TUI that defined the look: the byte-for-byte parity suite
+  that still governs it shipped here.
