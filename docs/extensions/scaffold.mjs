@@ -34,9 +34,11 @@
  * hook needed to read them.
  *
  * A thrown error is answered as a protocol error (startup errors are fatal
- * to launch, as e documents; runtime errors just fail that call). If this
- * file is dropped into ~/.e/extensions/ by accident it answers initialize
- * with a minimal manifest and idles — a harmless no-op extension.
+ * to launch, as e documents; runtime errors just fail that call).
+ *
+ * Run directly (dropped into ~/.e/extensions/, which users do by accident
+ * since examples import it from there), this file answers initialize with
+ * a minimal manifest and idles — a silent, harmless no-op extension.
  */
 
 import { createInterface } from "node:readline";
@@ -146,4 +148,45 @@ export function connect({ manifest = {}, ...handlers } = {}) {
       });
     },
   };
+}
+// ---- direct-run no-op -----------------------------------------------------
+// When executed (rather than imported), serve a minimal manifest so e sees
+// a quiet, well-behaved extension instead of a startup failure.
+
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+function invokedDirectly() {
+  try {
+    if (!process.argv[1]) return false;
+    return (
+      realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
+  const write = (id, result) =>
+    process.stdout.write(JSON.stringify({ id, result }) + "\n");
+  createInterface({ input: process.stdin }).on("line", (line) => {
+    let request;
+    try {
+      request = JSON.parse(line);
+    } catch {
+      return;
+    }
+    switch (request.method) {
+      case "initialize":
+        write(request.id, {
+          name: "scaffold",
+          version: "1.0",
+          description: "library — import connect(), don't run me",
+        });
+        break;
+      case "shutdown":
+        process.exit(0);
+    }
+  });
 }

@@ -143,8 +143,9 @@ docs/extensions/
 stdin/stdout framing, id routing, and a `connect({ manifest, handlers })`
 that turns handlers into a running extension — the protocol's ergonomics
 without importing anything but Node. Copy it next to your own extension
-and `import { connect } from "./scaffold.mjs"`; if it ends up in
-`~/.e/extensions/` by accident it is a harmless no-op extension.
+and `import { connect } from "./scaffold.mjs"`. If it ends up in
+`~/.e/extensions/` (easy to do, since the examples import it from their
+own directory) it runs as a named no-op extension and stays silent.
 
 - **`hello.mjs`** — every surface at once, on the scaffold: command,
   tool, config, input hook, session naming — ~50 lines of handlers.
