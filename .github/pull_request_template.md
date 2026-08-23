@@ -1,6 +1,3 @@
-## What
-
-<!-- One or two sentences. What changes, and why. -->
 
 ## Checklist
 
