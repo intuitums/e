@@ -112,14 +112,31 @@ relaunch ends the chain.
 
 ## Examples
 
-Two runnable examples ship in `examples/extensions/`:
+```
+examples/extensions/
+  scaffold.mjs   the wire-protocol helper (copy next to your extension)
+  hello.mjs      every surface at once, on the scaffold
+  gate.mjs       the tool_call hook as a fail-open guard
+  worktree.mjs   a minimal startup-hook launcher (e -w)
+```
 
-- **`hello.mjs`** — every surface at once (command, tool, config, input
-  hook, session naming) in ~90 lines of JavaScript.
-- **`worktree.mjs`** — a minimal startup-hook launcher: `e -w` creates a
-  Git worktree and relaunches e there.
+**`scaffold.mjs`** is the shared plumbing every extension needs: the
+stdin/stdout framing, id routing, and a `connect({ manifest, handlers })`
+that turns handlers into a running extension — the protocol's ergonomics
+without importing anything but Node. Copy it next to your own extension
+and `import { connect } from "./scaffold.mjs"`; if it ends up in
+`~/.e/extensions/` by accident it is a harmless no-op extension.
 
-Copy either to `~/.e/extensions/`, `chmod +x`, and restart e.
+- **`hello.mjs`** — every surface at once, on the scaffold: command,
+  tool, config, input hook, session naming — ~50 lines of handlers.
+- **`gate.mjs`** — the `tool_call` hook as a guard, in e's fail-open
+  shape: only an explicit block stops a call; a slow or crashed
+  extension never blocks the agent.
+- **`worktree.mjs`** — the startup-hook launcher on the scaffold:
+  `e -w [branch]` creates a Git worktree and relaunches e there.
+
+Copy any of them to `~/.e/extensions/` (with `scaffold.mjs` beside
+them), `chmod +x`, and restart e.
 
 ## A complete extension, in shell
 

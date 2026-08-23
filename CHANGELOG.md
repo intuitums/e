@@ -8,6 +8,14 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
++- `examples/extensions/scaffold.mjs`: the extension protocol's shared
++  plumbing — framing, id routing, a `connect({manifest, handlers})`
++  that reads like an SDK with nothing to import but Node. The examples
++  move onto it: `hello.mjs` (every surface in ~50 lines of handlers),
++  new `gate.mjs` (the tool_call hook as a fail-open guard), and
++  `worktree.mjs` (the -w launcher) all now go through it. A scaffold
++  dropped into ~/.e/extensions/ by accident is a harmless no-op.
+
 +- The extension surface grows the pieces real extensions reach for:
 +  `input` hook (consume/rewrite a submitted line, fail-open, API keys
 +  never reach it), `session_name` from commands and tools (shown in
