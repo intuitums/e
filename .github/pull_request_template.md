@@ -1,4 +1,3 @@
-
 ## Checklist
 
 - [ ] `cargo test` passes — the parity suite is the visual spec; if a rendering change fails it, fix the code, don't loosen the test

@@ -16,43 +16,43 @@ release notes are that section verbatim), open a fresh empty
   with `open` on macOS or `xdg-open` on Linux while always showing a copyable
   fallback URL.
 
-+- Flags are delivered to every extension that declares them, not just
-+  startup-hook ones: e sends a `flags` notification right after launch
-+  (`{"method":"flags","params":{"flags":{…}}}`), so a tool-only
-+  extension reads its flags in any handler — pi's getFlag, brought over.
-+  The scaffold adds `flag(name)` (the passed value, else the manifest's
-+  `default`, else undefined) and `flagPassed(name)` (true only when it
-+  was on the command line); typed flags may carry a `default` now. The
-+  worktree example becomes a pi-style boolean flag with the branch
-+  hand-read from argv.
+- Flags are delivered to every extension that declares them, not just
+  startup-hook ones: e sends a `flags` notification right after launch
+  (`{"method":"flags","params":{"flags":{…}}}`), so a tool-only
+  extension reads its flags in any handler.
+  The scaffold adds `flag(name)` (the passed value, else the manifest's
+  `default`, else undefined) and `flagPassed(name)` (true only when it
+  was on the command line); typed flags may carry a `default` now. The
+  worktree example uses a boolean flag with the branch
+  read from argv.
 
-+- Flags become typed: an extension declares `"type":"boolean"` (default)
-+  or `"string"` on a flag, and e parses it from startup argv — booleans
-+  match `--name`, `--name=true|false`, `--no-name`; strings match
-+  `--name=value` or `--name value` (a following `-` token is never taken
-+  as a value). Parsed values ride `hook.startup`'s new `flags` params, so
-+  extensions read them without hand-scanning argv; display-only flag names
-+  (like `"-w, --worktree"`) are unchanged. `e --help` renders typed flags
-+  as `--name`/`--name <value>`. The scaffold gains a `flag()` getter and
-+  the worktree example moves onto typed flags.
+- Flags become typed: an extension declares `"type":"boolean"` (default)
+  or `"string"` on a flag, and e parses it from startup argv — booleans
+  match `--name`, `--name=true|false`, `--no-name`; strings match
+  `--name=value` or `--name value` (a following `-` token is never taken
+  as a value). Parsed values ride `hook.startup`'s new `flags` params, so
+  extensions read them without hand-scanning argv; display-only flag names
+  (like `"-w, --worktree"`) are unchanged. `e --help` renders typed flags
+  as `--name`/`--name <value>`. The scaffold gains a `flag()` getter and
+  the worktree example moves onto typed flags.
 
-+- `docs/extensions/scaffold.mjs`: the extension protocol's shared
-+  plumbing — framing, id routing, a `connect({manifest, handlers})`
-+  that reads like an SDK with nothing to import but Node. The examples
-+  move onto it: `hello.mjs` (every surface in ~50 lines of handlers),
-+  new `gate.mjs` (the tool_call hook as a fail-open guard), and
-+  `worktree.mjs` (the -w launcher) all now go through it. A scaffold
-+  dropped into ~/.e/extensions/ by accident is a harmless no-op.
+- `docs/extensions/scaffold.mjs`: the extension protocol's shared
+  plumbing — framing, id routing, a `connect({manifest, handlers})`
+  that reads like an SDK with nothing to import but Node. The examples
+  move onto it: `hello.mjs` (every surface in ~50 lines of handlers),
+  new `gate.mjs` (the tool_call hook as a fail-open guard), and
+  `worktree.mjs` (the -w launcher) all now go through it. A scaffold
+  dropped into ~/.e/extensions/ by accident is a harmless no-op.
 
-+- The extension surface grows the pieces real extensions reach for:
-+  `input` hook (consume/rewrite a submitted line, fail-open, API keys
-+  never reach it), `session_name` from commands and tools (shown in
-+  /resume), a `flags` manifest entry surfaced in `e --help`, and a
-+  namespaced config key (`settings.json` `extensions.<name>`) delivered
-+  with every initialize. `e --help` now lists extension flags and
-+  commands; `/help` lists extension commands; `docs/extensions/`
-+  ships `hello.mjs` (every surface in ~90 lines) and `worktree.mjs` (a
-+  minimal -w launcher); docs/extensions.md documents the new results.
+- The extension surface grows the pieces real extensions reach for:
+  `input` hook (consume/rewrite a submitted line, fail-open, API keys
+  never reach it), `session_name` from commands and tools (shown in
+  /resume), a `flags` manifest entry surfaced in `e --help`, and a
+  namespaced config key (`settings.json` `extensions.<name>`) delivered
+  with every initialize. `e --help` now lists extension flags and
+  commands; `/help` lists extension commands; `docs/extensions/`
+  ships `hello.mjs` (every surface in ~90 lines) and `worktree.mjs` (a
+  minimal -w launcher); docs/extensions.md documents the new results.
 
 - Retries now show their work instead of a scrollback notice: a retryable
   failure (429/408/5xx, a network drop, a stalled request, or a provider
@@ -102,8 +102,8 @@ release notes are that section verbatim), open a fresh empty
 - Extensions may advertise a fatal `startup` hook that rewrites raw argv,
   adjusts environment variables, and requests a same-binary relaunch in a new
   cwd — enough to build managed Git worktree launches (`-w`) as plain
-  extensions. Broader capability parity with the leading harnesses over e's
-  language-neutral line protocol is on the roadmap.
+  extensions. Additional capabilities will be added to e's
+  language-neutral line protocol when concrete extension needs arise.
 - `/reload` replaces its `reloading…` notice with the completion text instead
   of appending a second transcript line.
 - Turn endings hold: a stalled or broken provider stream no longer leaves the
@@ -206,7 +206,7 @@ release notes are that section verbatim), open a fresh empty
   a typed Outcome alongside their display notices instead of the frame
   parsing "signed in" strings. /copy uses OSC 52 — the terminal-native
   clipboard, no pbcopy, works over ssh. The HTTP client is pooled across
-  requests instead of rebuilt per turn. DESIGN.md §3 now says what the
+  requests instead of rebuilt per turn. Documentation now matches what the
   code does: tool execution is ungated (yolo); trust gates instructions,
   not tools.
 - Slash commands match on a word boundary: /loginfoo no longer starts an
