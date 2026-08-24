@@ -34,9 +34,9 @@ pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
     if let Err(output) = super::require_regular_file(&full, "edit", path) {
         return output;
     }
-    // Hold the write lock across read-modify-write so a concurrent batch
-    // member can't overwrite this edit (or vice versa) unseen.
-    let _guard = super::fs_write_lock();
+    // Hold this path's write lock across read-modify-write so a concurrent
+    // batch member can't overwrite this edit (or vice versa) unseen.
+    let _guard = super::fs_write_lock(&full);
     let text = match std::fs::read_to_string(&full) {
         Ok(t) => t,
         Err(e) => return err(format!("edit {path}: {e}")),

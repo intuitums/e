@@ -493,9 +493,11 @@ fn vercel_env_key_signs_the_gateway_in() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Keyless local backends (Ollama, LM Studio) are signed in with no file and
-/// no env var — their models come solely from the live /models refresh, so
-/// with no server running they contribute nothing to the catalog.
+/// Keyless local backends (Ollama, LM Studio) count as signed in with no
+/// stored credential and no env var — but never as phantom `auth::load()`
+/// entries, so first-run onboarding still sees an empty credential file.
+/// Their models come solely from the live /models refresh, so with no
+/// server running they contribute nothing to the catalog.
 #[test]
 fn keyless_local_providers_are_signed_in_without_credentials() {
     let _lock = ENV_LOCK.lock().unwrap();
@@ -506,8 +508,10 @@ fn keyless_local_providers_are_signed_in_without_credentials() {
     clear_env_keys();
 
     let auth = e::core::auth::load();
-    assert!(auth.contains_key("ollama"));
-    assert!(auth.contains_key("lmstudio"));
+    assert!(auth.is_empty(), "no phantom credentials for keyless locals");
+    assert!(e::core::auth::signed_in(&auth, "ollama"));
+    assert!(e::core::auth::signed_in(&auth, "lmstudio"));
+    assert!(!e::core::auth::signed_in(&auth, "anthropic"));
     assert!(e::core::providers::catalog::available().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }

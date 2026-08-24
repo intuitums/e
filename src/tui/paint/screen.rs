@@ -126,64 +126,79 @@ impl Screen {
     }
 }
 
-/// Messages to the paint thread.
-pub enum PaintMsg {
-    Frame(Vec<String>),
-    Resize(u16, u16),
+/// The paint thread's single-slot mailbox: a newer frame replaces the
+/// undelivered one, so a terminal blocked mid-write bounds the backlog to
+/// exactly one pending frame — an unbounded queue would grow by a full
+/// transcript copy per tick for as long as the write stalls.
+#[derive(Default)]
+struct PaintMailbox {
+    frame: Option<Vec<String>>,
+    /// Latest wins here too; the resize clears the screen, so painting the
+    /// pre-resize frame once at the new size is a one-frame blip at most.
+    resize: Option<(u16, u16)>,
+    shutdown: bool,
 }
 
 /// The paint thread: owns the `Screen` and its blocking stdout writes so a
-/// slow terminal can never stall the event loop. Frames are latest-wins —
-/// each wake drains the queue and paints only the newest frame; resizes are
-/// applied in order.
+/// slow terminal can never stall the event loop.
 pub struct Painter {
-    tx: Option<std::sync::mpsc::Sender<PaintMsg>>,
+    mailbox: std::sync::Arc<(std::sync::Mutex<PaintMailbox>, std::sync::Condvar)>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Painter {
     pub fn spawn(cols: u16, rows: u16) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let mailbox = std::sync::Arc::new((
+            std::sync::Mutex::new(PaintMailbox::default()),
+            std::sync::Condvar::new(),
+        ));
+        let shared = mailbox.clone();
         let thread = std::thread::spawn(move || {
             let mut screen = Screen::new(cols, rows);
-            fn apply(screen: &mut Screen, latest: &mut Option<Vec<String>>, msg: PaintMsg) {
-                match msg {
-                    PaintMsg::Frame(frame) => *latest = Some(frame),
-                    PaintMsg::Resize(cols, rows) => screen.resize(cols, rows),
+            let (lock, wake) = &*shared;
+            loop {
+                let (frame, resize, shutdown) = {
+                    let mut box_ = lock.lock().unwrap();
+                    while box_.frame.is_none() && box_.resize.is_none() && !box_.shutdown {
+                        box_ = wake.wait(box_).unwrap();
+                    }
+                    (box_.frame.take(), box_.resize.take(), box_.shutdown)
+                };
+                if let Some((cols, rows)) = resize {
+                    screen.resize(cols, rows);
                 }
-            }
-            while let Ok(first) = rx.recv() {
-                let mut latest = None;
-                apply(&mut screen, &mut latest, first);
-                while let Ok(next) = rx.try_recv() {
-                    apply(&mut screen, &mut latest, next);
-                }
-                if let Some(frame) = latest {
+                if let Some(frame) = frame {
                     let _ = screen.paint(&frame);
+                }
+                if shutdown {
+                    // The final frame (taken above) has landed; done.
+                    break;
                 }
             }
         });
         Painter {
-            tx: Some(tx),
+            mailbox,
             thread: Some(thread),
         }
     }
 
+    fn post(&self, update: impl FnOnce(&mut PaintMailbox)) {
+        let (lock, wake) = &*self.mailbox;
+        update(&mut lock.lock().unwrap());
+        wake.notify_one();
+    }
+
     pub fn frame(&self, lines: Vec<String>) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(PaintMsg::Frame(lines));
-        }
+        self.post(|mailbox| mailbox.frame = Some(lines));
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(PaintMsg::Resize(cols, rows));
-        }
+        self.post(|mailbox| mailbox.resize = Some((cols, rows)));
     }
 
-    /// Flush and stop: queued frames land before terminal teardown.
+    /// Flush and stop: the pending frame lands before terminal teardown.
     pub fn shutdown(&mut self) {
-        self.tx.take();
+        self.post(|mailbox| mailbox.shutdown = true);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }

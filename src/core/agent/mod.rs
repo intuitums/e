@@ -11,7 +11,7 @@ pub mod context;
 pub mod retry;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -53,6 +53,8 @@ fn commit(
 
 /// Turn a commit result into at most one warning per failure episode: the
 /// first failure warns, later ones stay quiet until a commit succeeds again.
+/// The latch sets only when the warning was actually delivered — a full
+/// channel at the first failure must not silently swallow the episode.
 fn note_persist(
     warned: &AtomicBool,
     result: std::io::Result<()>,
@@ -61,10 +63,14 @@ fn note_persist(
     match result {
         Ok(()) => warned.store(false, Ordering::SeqCst),
         Err(e) => {
-            if !warned.swap(true, Ordering::SeqCst) {
-                let _ = events.try_send(SessionEvent::Warning(format!(
-                    "session not saved: {e} — the conversation continues in memory only"
-                )));
+            if !warned.load(Ordering::SeqCst)
+                && events
+                    .try_send(SessionEvent::Warning(format!(
+                        "session not saved: {e} — the conversation continues in memory only"
+                    )))
+                    .is_ok()
+            {
+                warned.store(true, Ordering::SeqCst);
             }
         }
     }
@@ -211,6 +217,11 @@ pub struct Agent {
     session_name: Arc<Mutex<Option<String>>>,
     /// Latch for the persistence-failure warning (see `note_persist`).
     persist_warned: Arc<AtomicBool>,
+    /// Display ids for tool lifecycle events, unique across the whole
+    /// session: an Esc-detached task from an earlier turn keeps a live
+    /// events sender, and a per-turn counter would let its stale ToolEnd
+    /// collide with (and corrupt) a later turn's row.
+    tool_seq: Arc<AtomicU64>,
 }
 
 impl Agent {
@@ -228,6 +239,7 @@ impl Agent {
             session: Arc::new(Mutex::new(None)),
             session_name: Arc::new(Mutex::new(None)),
             persist_warned: Arc::new(AtomicBool::new(false)),
+            tool_seq: Arc::new(AtomicU64::new(0)),
         };
         (agent, rx)
     }
@@ -402,10 +414,10 @@ impl Agent {
         let host = self.host.clone();
         let session_name = self.session_name.clone();
         let persist_warned = self.persist_warned.clone();
+        let tool_seq = self.tool_seq.clone();
 
         tokio::spawn(async move {
             let _ = events.send(SessionEvent::TurnStart).await;
-            let mut tool_seq = 0u64;
             let aborted = 'turn: loop {
                 if cancel.load(Ordering::SeqCst) {
                     break true;
@@ -470,8 +482,9 @@ impl Agent {
                     // produced its first non-error event — the retry
                     // worked. An immediate second failure is not a recovery,
                     // so this excludes Error and lets that arm decide
-                    // whether to retry again instead.
-                    if attempt > 0
+                    // whether to retry again instead. `attempt` is 1-based:
+                    // 1 is the first try, so only attempt 2+ ever recovered.
+                    if attempt > 1
                         && !recovered_notified
                         && !matches!(event, ProviderEvent::Error(_))
                     {
@@ -665,12 +678,12 @@ impl Agent {
                     let args: serde_json::Value =
                         serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
                     let presentation = tools::present(&call.name, &args);
-                    tool_seq += 1;
+                    let id = tool_seq.fetch_add(1, Ordering::SeqCst) + 1;
                     batch.push((
-                        tool_seq,
+                        id,
                         call.clone(),
                         ToolCallPresentation {
-                            id: tool_seq,
+                            id,
                             category: presentation.category,
                             running: presentation.running,
                             completed: presentation.completed,
@@ -736,7 +749,11 @@ impl Agent {
                             },
                         },
                         _ = wait_cancelled(&cancel) => tools::ToolOutput {
-                            content: "tool cancelled".into(),
+                            // Honest record: the blocked operation is only
+                            // detached, so it may still complete after this.
+                            content: "tool cancelled — the underlying operation \
+                                      may still complete in the background"
+                                .into(),
                             outcome: tools::ToolOutcome::Cancelled,
                             summary: "cancelled".into(),
                         },

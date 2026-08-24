@@ -63,18 +63,18 @@ pub fn load() -> AuthFile {
                 }
             }
         }
-        // A keyless local backend is always signed in; the placeholder rides
-        // the Authorization header, which such servers ignore.
-        if provider.auth.none {
-            out.insert(
-                provider.name.clone(),
-                Credential::ApiKey {
-                    key: "unauthenticated".into(),
-                },
-            );
-        }
     }
     out
+}
+
+/// Whether a provider counts as signed in: a stored or environment
+/// credential, or a keyless local backend (auth `none`), which needs none.
+/// Deliberately not a phantom `load()` entry — the credential file staying
+/// truthful keeps first-run onboarding ("nothing signed in") and `e auth`
+/// honest.
+pub fn signed_in(auth: &AuthFile, provider: &str) -> bool {
+    auth.contains_key(provider)
+        || crate::core::providers::registry::find(provider).is_some_and(|p| p.auth.none)
 }
 
 /// Store one provider's credential, merging into the file so every other

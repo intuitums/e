@@ -15,11 +15,14 @@ use crate::core::providers::{
     StreamEnd, ToolCall,
 };
 
-/// Gemini function calls carry no ids; e synthesizes `{index}:{name}` so the
-/// tool loop can address them, and this recovers the name a
-/// `functionResponse` must be filed under.
-fn call_name(id: &str) -> &str {
-    id.split_once(':').map_or(id, |(_, name)| name)
+/// Gemini function calls carry no wire ids; e synthesizes session-unique
+/// ones (`{name}-{n}` off a process-wide counter) so a multi-step tool loop
+/// never writes duplicate ids into shared history — another dialect taking
+/// over the session replays them verbatim and rejects duplicates.
+fn synthesize_call_id(name: &str) -> String {
+    static CALL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{name}-{n}")
 }
 
 pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEnd, ProviderError> {
@@ -30,7 +33,11 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
     // History → contents. Assistant turns replay their function calls with
     // thought signatures; tool results ride user turns as functionResponse
     // parts, consecutive results joining one turn to mirror the batch.
+    // functionResponse.name comes from the assistant call the id refers to —
+    // ids may be another dialect's (a mid-session model switch), so the name
+    // is never derived from the id's spelling.
     let mut contents: Vec<serde_json::Value> = Vec::new();
+    let mut call_names: std::collections::HashMap<String, String> = Default::default();
     for m in &request.messages {
         match m.role.as_str() {
             "assistant" => {
@@ -39,6 +46,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                     parts.push(json!({"text": m.content}));
                 }
                 for call in &m.tool_calls {
+                    call_names.insert(call.id.clone(), call.name.clone());
                     let args: serde_json::Value =
                         serde_json::from_str(&call.arguments).unwrap_or(json!({}));
                     let mut part = json!({"functionCall": {"name": call.name, "args": args}});
@@ -52,7 +60,12 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                 }
             }
             "tool" => {
-                let name = m.tool_call_id.as_deref().map(call_name).unwrap_or_default();
+                let name = m
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|id| call_names.get(id))
+                    .cloned()
+                    .unwrap_or_default();
                 let part = json!({"functionResponse": {
                     "name": name,
                     "response": {"output": m.content},
@@ -115,7 +128,6 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
 
     let mut sse = SseStream::new(response.bytes_stream());
     let mut usage: Option<(u64, u64, u64)> = None;
-    let mut call_index = 0usize;
     loop {
         let payload = sse.next().await?;
         let value: serde_json::Value = match serde_json::from_str(&payload) {
@@ -153,12 +165,11 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                         .unwrap_or("")
                         .to_string();
                     let call = ToolCall {
-                        id: format!("{call_index}:{name}"),
+                        id: synthesize_call_id(&name),
                         name,
                         arguments: part["functionCall"]["args"].to_string(),
                         signature: part["thoughtSignature"].as_str().map(String::from),
                     };
-                    call_index += 1;
                     if !call.name.is_empty() {
                         let _ = tx.send(Event::ToolCall(call)).await;
                     }

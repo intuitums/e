@@ -78,9 +78,9 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
     if let Err(output) = super::require_regular_file(&full, "write", path) {
         return output;
     }
-    // Same lock as edit: a concurrent edit's read-modify-write must not
-    // interleave with this overwrite.
-    let _guard = super::fs_write_lock();
+    // Same per-path lock as edit: a concurrent edit's read-modify-write
+    // must not interleave with this overwrite.
+    let _guard = super::fs_write_lock(&full);
     let before = std::fs::read_to_string(&full).unwrap_or_default();
     if let Some(parent) = full.parent() {
         let _ = std::fs::create_dir_all(parent);

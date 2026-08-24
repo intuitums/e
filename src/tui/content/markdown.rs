@@ -181,6 +181,26 @@ fn hard_wrap(line: &str, width: usize) -> Vec<String> {
             row.push_str(&seq);
             continue;
         }
+        if c == '\x1b' && chars.peek() == Some(&']') {
+            // OSC (hyperlinks): zero width and copied whole — a split
+            // mid-sequence would count the payload as visible columns and
+            // leave the terminal parsing rows as OSC data.
+            let mut seq = String::from("\x1b");
+            while let Some(n) = chars.next() {
+                seq.push(n);
+                if n == '\x07' {
+                    break;
+                }
+                if n == '\x1b' {
+                    if let Some(t) = chars.next() {
+                        seq.push(t);
+                    }
+                    break;
+                }
+            }
+            row.push_str(&seq);
+            continue;
+        }
         let w = c.width().unwrap_or(0);
         if row_width + w > width {
             if open.is_some() {

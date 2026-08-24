@@ -62,16 +62,19 @@ async fn google_stream_round_trip() {
         system: "be helpful".into(),
         messages: vec![
             ChatMessage::user("read a.txt"),
+            // A foreign-dialect id (an OpenAI-style call id from a
+            // mid-session model switch): the functionResponse name must come
+            // from the call it refers to, never from the id's spelling.
             ChatMessage::assistant(
                 "",
                 vec![providers::ToolCall {
-                    id: "0:read".into(),
+                    id: "call_abc123".into(),
                     name: "read".into(),
                     arguments: "{\"path\":\"old.txt\"}".into(),
                     signature: Some("sig-0".into()),
                 }],
             ),
-            ChatMessage::tool_result("0:read", "old contents"),
+            ChatMessage::tool_result("call_abc123", "old contents"),
         ],
         effort: Some("high".into()),
         tools: vec![serde_json::json!({
@@ -110,7 +113,9 @@ async fn google_stream_round_trip() {
     assert_eq!(reasoning, "planning");
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].name, "read");
-    assert_eq!(calls[0].id, "0:read");
+    // Synthesized ids are session-unique (a process-wide counter), so a
+    // multi-step tool loop never replays duplicate ids into history.
+    assert!(calls[0].id.starts_with("read-"), "id: {}", calls[0].id);
     assert_eq!(calls[0].signature.as_deref(), Some("sig-1"));
     let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
     assert_eq!(args["path"], "a.txt");

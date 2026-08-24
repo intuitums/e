@@ -74,6 +74,27 @@ fn wrap_styled_hard_wraps_overlong_tokens() {
     assert_eq!(wrap_styled("two words", 10), vec!["two words"]);
 }
 
+/// Hard-wrapping an overlong link token never splits its OSC sequences —
+/// a mid-sequence cut counts the URL as visible columns and leaves the
+/// terminal parsing rows as OSC data.
+#[test]
+fn wrap_styled_never_splits_a_hyperlink_sequence() {
+    let open = "\x1b]8;;https://example.com/very/long/path\x1b\\";
+    let word = format!("{open}linktext\x1b]8;;\x1b\\");
+    let rows = wrap_styled(&word, 4);
+    let intact = rows.iter().filter(|r| r.contains(open)).count();
+    assert_eq!(
+        intact, 1,
+        "the opening sequence must survive whole: {rows:?}"
+    );
+    let total: usize = rows.iter().map(|r| visible_width(r)).sum();
+    assert_eq!(
+        total,
+        "linktext".len(),
+        "only the text is visible: {rows:?}"
+    );
+}
+
 /// The composer lays out by display width, and a wrap-boundary cursor
 /// renders in exactly one row.
 #[test]

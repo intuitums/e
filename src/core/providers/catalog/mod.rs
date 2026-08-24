@@ -262,7 +262,7 @@ pub fn available() -> Vec<Model> {
     let auth = crate::core::auth::load();
     catalog()
         .into_iter()
-        .filter(|m| auth.contains_key(&m.provider))
+        .filter(|m| crate::core::auth::signed_in(&auth, &m.provider))
         .collect()
 }
 

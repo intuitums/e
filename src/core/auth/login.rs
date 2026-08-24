@@ -655,6 +655,12 @@ pub async fn access_token(provider: &str) -> Result<String, String> {
                 )),
             }
         }
+        // A keyless local backend needs no credential; the placeholder rides
+        // the Authorization header, which such servers ignore. A stored key
+        // (matched above) still wins for locals configured to require one.
+        None if crate::core::providers::registry::find(provider).is_some_and(|p| p.auth.none) => {
+            Ok("unauthenticated".into())
+        }
         None => Err(format!("no credentials for {provider} — run /login")),
     }
 }

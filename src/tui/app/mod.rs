@@ -561,6 +561,7 @@ impl App {
             Ok(m) => m,
             Err(e) => {
                 self.notice(format!("could not open session: {e}"));
+                self.release_initial_prompt();
                 return;
             }
         };
@@ -570,6 +571,7 @@ impl App {
             Ok(s) => s,
             Err(e) => {
                 self.notice(format!("could not resume session: {e}"));
+                self.release_initial_prompt();
                 return;
             }
         };
@@ -577,9 +579,13 @@ impl App {
         self.transcript
             .push(Block::new(Kind::Banner, crate::VERSION));
         // The old transcript's shell block index and held prompts die with
-        // it; a still-running `!` command's result is epoch-discarded.
+        // it; a still-running `!` command's result is epoch-discarded, and a
+        // /compact still summarizing the old session must not land its swap
+        // on the resumed one.
         self.shell_block = None;
         self.held_prompts.clear();
+        self.compacting = false;
+        self.compact_requested = false;
         let mut restored_calls = std::collections::HashMap::<String, (usize, u64)>::new();
         let mut restored_id = 0u64;
         for m in &messages {
@@ -1198,6 +1204,18 @@ impl App {
         }
     }
 
+    /// Deliver a held -r launch prompt into the current session — the pick
+    /// it was waiting for fell through (declined, or the resume failed), and
+    /// stranding it would silently drop typed text. The trust question, if
+    /// still open, keeps holding it.
+    fn release_initial_prompt(&mut self) {
+        if self.trust.is_none() {
+            if let Some(initial) = self.pending_initial.take() {
+                self.submit(initial);
+            }
+        }
+    }
+
     fn prompt(&mut self, text: String) {
         // While compacting, reloading, or a `!` shell command is running,
         // hold the message; it submits (and displays) when the block lifts —
@@ -1667,7 +1685,8 @@ impl App {
     /// anything that can change them: sign-in, model switch, effort cycle,
     /// settings changes, /reload.
     fn refresh_status_cache(&mut self) {
-        self.signed_in = crate::core::auth::load().contains_key(&self.agent.model.provider);
+        self.signed_in =
+            crate::core::auth::signed_in(&crate::core::auth::load(), &self.agent.model.provider);
         self.status_effort = self.agent.effort();
     }
 
@@ -2120,8 +2139,14 @@ pub async fn run(
                                             if !trusted {
                                                 app.notice("working untrusted — project AGENTS.md and .e skills/prompts ignored (/trust to allow)".into());
                                             }
-                                            if let Some(initial) = app.pending_initial.take() {
-                                                app.submit(initial);
+                                            // An open -r picker still owns
+                                            // the launch prompt; submitting
+                                            // it now would start a turn the
+                                            // session pick then refuses.
+                                            if app.menu.is_none() {
+                                                if let Some(initial) = app.pending_initial.take() {
+                                                    app.submit(initial);
+                                                }
                                             }
                                         }
                                     }
@@ -2215,15 +2240,10 @@ pub async fn run(
                                 KeyCode::Enter => { app.select_menu(); }
                                 KeyCode::Esc => {
                                     app.menu = None;
-                                    // Declining the -r picker releases a held
-                                    // launch prompt into the current session
-                                    // (the trust question, if open, still
-                                    // holds it).
-                                    if app.trust.is_none() {
-                                        if let Some(initial) = app.pending_initial.take() {
-                                            app.submit(initial);
-                                        }
-                                    }
+                                    // Declining the -r picker releases a
+                                    // held launch prompt into the current
+                                    // session.
+                                    app.release_initial_prompt();
                                 }
                                 _ => {}
                             }
@@ -2447,7 +2467,7 @@ pub async fn run(
                             // A fresh credential may make new models available:
                             // if the current model's provider is still signed out,
                             // fall back to the first available model.
-                            if !crate::core::auth::load().contains_key(&app.agent.model.provider) {
+                            if !crate::core::auth::signed_in(&crate::core::auth::load(), &app.agent.model.provider) {
                                 if let Some(m) = crate::core::providers::catalog::available().into_iter().next() {
                                     app.notice(format!("model set to {}", crate::core::providers::catalog::slug(&m)));
                                     app.agent.model = m;

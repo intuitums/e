@@ -20,10 +20,17 @@ fn store_path() -> std::path::PathBuf {
 pub(super) fn remote_overlay(models: &mut Vec<Model>) {
     let object = crate::core::config::store::read_object(&store_path()).unwrap_or_default();
     for (provider, entry) in object {
+        // Transport from an existing model of the provider (models.json
+        // overrides included), else from the registry — a keyless local's
+        // whole catalog is this overlay, so it has no model to copy from.
         let Some((base, api)) = models
             .iter()
             .find(|m| m.provider == provider)
             .map(|m| (m.base_url.clone(), m.api))
+            .or_else(|| {
+                crate::core::providers::registry::find(&provider)
+                    .map(|p| (p.base_url.clone(), p.api()))
+            })
         else {
             continue; // only providers e knows how to speak to
         };
@@ -82,11 +89,23 @@ pub async fn refresh_remote_within(max_age_ms: u64) {
     let auth = crate::core::auth::load();
     let now = crate::core::auth::now_ms();
     let stored = crate::core::config::store::read_object(&store_path()).unwrap_or_default();
-    // One representative model per signed-in provider gives base + auth kind.
+    // One representative model per signed-in provider gives base + auth
+    // kind; catalog entries first so models.json base_url overrides win.
+    // Registry providers follow so a keyless local with an empty seed list
+    // (its models come only from this refresh) still gets polled.
     let mut providers: Vec<(String, String)> = Vec::new();
     for m in catalog() {
-        if auth.contains_key(&m.provider) && !providers.iter().any(|(p, _)| *p == m.provider) {
+        if crate::core::auth::signed_in(&auth, &m.provider)
+            && !providers.iter().any(|(p, _)| *p == m.provider)
+        {
             providers.push((m.provider.clone(), m.base_url.clone()));
+        }
+    }
+    for p in crate::core::providers::registry::all() {
+        if crate::core::auth::signed_in(&auth, &p.name)
+            && !providers.iter().any(|(name, _)| *name == p.name)
+        {
+            providers.push((p.name.clone(), p.base_url.clone()));
         }
     }
     for (provider, base) in providers {
@@ -158,20 +177,24 @@ fn dated_alias_of(id: &str) -> Option<&str> {
 /// listed model; None on any failure.
 async fn fetch_models(provider: &str, base: &str) -> Option<Vec<(String, Option<u64>)>> {
     let auth = crate::core::auth::load();
-    let credential = auth.get(provider)?;
-    let key = match credential {
-        crate::core::auth::Credential::ApiKey { key } => key.clone(),
-        crate::core::auth::Credential::OAuth { access, .. } => access.clone(),
+    let key = match auth.get(provider) {
+        Some(crate::core::auth::Credential::ApiKey { key }) => Some(key.clone()),
+        Some(crate::core::auth::Credential::OAuth { access, .. }) => Some(access.clone()),
+        // Keyless local backends list their models with no header at all.
+        None if crate::core::providers::registry::find(provider).is_some_and(|p| p.auth.none) => {
+            None
+        }
+        None => return None,
     };
     let mut request = crate::core::providers::http()
         .get(format!("{base}/models"))
         .timeout(std::time::Duration::from_secs(15));
-    request = if provider == "anthropic" {
-        request
-            .header("x-api-key", &key)
-            .header("anthropic-version", "2023-06-01")
-    } else {
-        request.bearer_auth(&key)
+    request = match &key {
+        Some(key) if provider == "anthropic" => request
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01"),
+        Some(key) => request.bearer_auth(key),
+        None => request,
     };
     let body: serde_json::Value = request.send().await.ok()?.json().await.ok()?;
     let entries = body["data"].as_array()?;
