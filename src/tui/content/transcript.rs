@@ -150,6 +150,11 @@ impl Block {
 
     pub fn finish_tool(&mut self, id: u64, outcome: ToolOutcome, summary: String, content: &str) {
         if let Some(child) = self.tool_children.iter_mut().find(|child| child.id == id) {
+            // A detached task's late result must not resurrect a row Esc
+            // already settled.
+            if child.state == ToolState::Cancelled {
+                return;
+            }
             child.state = match outcome {
                 ToolOutcome::Completed => ToolState::Completed,
                 ToolOutcome::Failed => ToolState::Failed,

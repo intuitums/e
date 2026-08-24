@@ -721,12 +721,24 @@ impl Agent {
                 }
 
                 for (call, handle) in handles {
-                    let output = match handle.await {
-                        Ok(output) => output,
-                        Err(_) => tools::ToolOutput {
-                            content: "tool panicked".into(),
-                            outcome: tools::ToolOutcome::Failed,
-                            summary: "error".into(),
+                    // A blocked filesystem operation cannot be interrupted in
+                    // place; on Esc, stop waiting, record the call as
+                    // cancelled, and detach the task — the turn must end
+                    // promptly even over a stalled FIFO or NFS mount.
+                    let output = tokio::select! {
+                        biased;
+                        joined = handle => match joined {
+                            Ok(output) => output,
+                            Err(_) => tools::ToolOutput {
+                                content: "tool panicked".into(),
+                                outcome: tools::ToolOutcome::Failed,
+                                summary: "error".into(),
+                            },
+                        },
+                        _ = wait_cancelled(&cancel) => tools::ToolOutput {
+                            content: "tool cancelled".into(),
+                            outcome: tools::ToolOutcome::Cancelled,
+                            summary: "cancelled".into(),
                         },
                     };
                     let result = commit(

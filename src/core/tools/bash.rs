@@ -97,12 +97,16 @@ where
     let mut status = None;
     let mut retained = Vec::<u8>::new();
     let mut total_bytes = 0usize;
+    // Per-stream carry for a UTF-8 code point split across pipe reads —
+    // decoding each chunk alone turned split points into U+FFFD live.
+    let mut carries = [Vec::<u8>::new(), Vec::<u8>::new()];
 
     while status.is_none() {
         while let Ok((stream, bytes)) = rx.try_recv() {
             retain_and_publish(
                 &mut retained,
                 &mut total_bytes,
+                &mut carries[carry_index(stream)],
                 stream,
                 &bytes,
                 &mut on_output,
@@ -131,10 +135,21 @@ where
         retain_and_publish(
             &mut retained,
             &mut total_bytes,
+            &mut carries[carry_index(stream)],
             stream,
             &bytes,
             &mut on_output,
         );
+    }
+    // The pipes are closed: whatever the carries still hold is genuinely
+    // incomplete output, published lossily rather than dropped.
+    for (index, stream) in [OutputStream::Stdout, OutputStream::Stderr]
+        .into_iter()
+        .enumerate()
+    {
+        if !carries[index].is_empty() {
+            on_output(stream, &String::from_utf8_lossy(&carries[index]));
+        }
     }
 
     let status = status.expect("loop stops only after child exit");
@@ -203,11 +218,21 @@ where
     })
 }
 
+fn carry_index(stream: OutputStream) -> usize {
+    match stream {
+        OutputStream::Stdout => 0,
+        OutputStream::Stderr => 1,
+    }
+}
+
 /// Retain a bounded prefix and publish every chunk so pipe draining never
-/// depends on the model-output cap.
+/// depends on the model-output cap. Publishing goes through the stream's
+/// carry so only complete UTF-8 leaves; a split code point waits for its
+/// remaining bytes instead of becoming a replacement character.
 fn retain_and_publish<F>(
     retained: &mut Vec<u8>,
     total_bytes: &mut usize,
+    carry: &mut Vec<u8>,
     stream: OutputStream,
     bytes: &[u8],
     on_output: &mut F,
@@ -220,8 +245,43 @@ fn retain_and_publish<F>(
         let keep = (RETAIN_LIMIT - retained.len()).min(bytes.len());
         retained.extend_from_slice(&bytes[..keep]);
     }
-    let text = String::from_utf8_lossy(bytes);
-    on_output(stream, &text);
+    carry.extend_from_slice(bytes);
+    let text = drain_complete_utf8(carry);
+    if !text.is_empty() {
+        on_output(stream, &text);
+    }
+}
+
+/// Decode everything decodable, leaving at most an incomplete trailing
+/// sequence in the buffer. Interior invalid bytes become U+FFFD — they are
+/// genuinely bad, not split.
+fn drain_complete_utf8(carry: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(carry) {
+            Ok(text) => {
+                out.push_str(text);
+                carry.clear();
+                return out;
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                out.push_str(std::str::from_utf8(&carry[..valid]).expect("validated prefix"));
+                match e.error_len() {
+                    Some(bad) => {
+                        out.push('\u{FFFD}');
+                        carry.drain(..valid + bad);
+                    }
+                    None => {
+                        // An incomplete sequence at the tail: keep it for
+                        // the next chunk.
+                        carry.drain(..valid);
+                        return out;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn failure(message: &str) -> ToolOutput {

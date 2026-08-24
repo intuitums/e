@@ -252,6 +252,33 @@ fn sanitize_inline(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Serializes the mutating filesystem tools' read-modify-write windows.
+/// Batch members run concurrently; without this, two edits to one file both
+/// read the original and the last whole-file write silently erases the
+/// other's change while both report success.
+static FS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn fs_write_lock() -> std::sync::MutexGuard<'static, ()> {
+    FS_WRITE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Text-file tools only operate on regular files: a FIFO or device would
+/// block `read_to_string` forever with Esc inert (issue: a `read` on a
+/// writerless named pipe hangs the turn). Missing files pass — the caller's
+/// own open reports the real error.
+fn require_regular_file(path: &Path, tool: &str, shown: &str) -> Result<(), ToolOutput> {
+    match std::fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => Err(ToolOutput {
+            content: format!("{tool} {shown}: not a regular file"),
+            outcome: ToolOutcome::Failed,
+            summary: "error".into(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// Resolve a possibly-relative path against the workspace root.
 fn resolve(cwd: &Path, p: &str) -> PathBuf {
     let path = Path::new(p);
