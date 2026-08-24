@@ -462,3 +462,45 @@ fn partial_override_keeps_declared_windows_and_efforts() {
         "a bare-id re-declaration keeps the built-in efforts"
     );
 }
+
+#[test]
+fn current_anthropic_builtins_are_adaptive_haiku_is_manual() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    clear_env_keys();
+    let catalog = e::core::provider::catalog::catalog();
+    let thinking = |id: &str| {
+        catalog
+            .iter()
+            .find(|m| m.provider == "anthropic" && m.id == id)
+            .unwrap_or_else(|| panic!("{id} missing from the built-in catalog"))
+            .thinking
+    };
+    use e::core::provider::catalog::Thinking::*;
+    for id in [
+        "claude-fable-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-opus-4-8",
+    ] {
+        assert_eq!(thinking(id), Adaptive, "{id} must be adaptive-thinking");
+    }
+    assert_eq!(thinking("claude-haiku-4-5"), Manual);
+}
+
+#[test]
+fn a_partial_override_inherits_the_builtins_thinking_mode() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let catalog = with_models_json(
+        r#"{"providers":{"anthropic":{"models":[{"id":"claude-sonnet-5","context_window":12345}]}}}"#,
+    );
+    let sonnet = catalog
+        .iter()
+        .find(|m| m.provider == "anthropic" && m.id == "claude-sonnet-5")
+        .unwrap();
+    assert_eq!(sonnet.context_window, 12345);
+    assert_eq!(
+        sonnet.thinking,
+        e::core::provider::catalog::Thinking::Adaptive,
+        "correcting one field must not swap the thinking wire shape"
+    );
+}

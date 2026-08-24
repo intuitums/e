@@ -63,6 +63,7 @@ async fn anthropic_stream_round_trip() {
             base_url: format!("http://127.0.0.1:{port}"),
             api: Api::Anthropic,
             efforts: vec!["low".into(), "medium".into(), "high".into()],
+            thinking: e::core::provider::catalog::Thinking::Manual,
             context_window: 200_000,
         },
         system: "be helpful".into(),
@@ -131,6 +132,81 @@ async fn anthropic_stream_round_trip() {
         "high effort budget missing"
     );
     assert!(sent.contains("\"max_tokens\""));
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adaptive_models_take_effort_through_output_config_not_budget_tokens() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let home = std::env::temp_dir().join(format!("e-anthropic-adaptive-{port}"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("auth.json"),
+        r#"{"anthropic":{"key":"sk-ant-test"}}"#,
+    )
+    .unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    let server = std::thread::spawn(move || {
+        let (mut a, _) = listener.accept().unwrap();
+        let mut buf = vec![0u8; 65536];
+        let n = a.read(&mut buf).unwrap();
+        let sent = String::from_utf8_lossy(&buf[..n]).to_string();
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        a.write_all(response.as_bytes()).unwrap();
+        sent
+    });
+
+    let request = Request {
+        model: Model {
+            provider: "anthropic".into(),
+            id: "claude-test".into(),
+            base_url: format!("http://127.0.0.1:{port}"),
+            api: Api::Anthropic,
+            efforts: vec!["low".into(), "medium".into(), "high".into()],
+            thinking: e::core::provider::catalog::Thinking::Adaptive,
+            context_window: 200_000,
+        },
+        system: "be helpful".into(),
+        messages: vec![ChatMessage::user("hi")],
+        effort: Some("high".into()),
+        tools: Vec::new(),
+    };
+
+    let (mut rx, _handle) = provider::stream(request);
+    while let Some(event) = rx.recv().await {
+        match event {
+            Event::Error(err) => panic!("stream errored: {}", err.message),
+            Event::Done => break,
+            _ => {}
+        }
+    }
+
+    let sent = server.join().unwrap();
+    assert!(
+        sent.contains("\"thinking\":{\"type\":\"adaptive\"}"),
+        "adaptive shape missing"
+    );
+    assert!(
+        sent.contains("\"output_config\":{\"effort\":\"high\"}"),
+        "effort not carried through output_config"
+    );
+    assert!(
+        !sent.contains("budget_tokens"),
+        "legacy budget_tokens must not reach an adaptive model"
+    );
 
     let _ = std::fs::remove_dir_all(&home);
 }

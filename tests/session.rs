@@ -70,6 +70,7 @@ fn opening_e_does_not_count_as_a_session() {
         base_url: "http://127.0.0.1:1".into(),
         api: Api::Completions,
         efforts: Vec::new(),
+        thinking: e::core::provider::catalog::Thinking::Manual,
         context_window: 1_000,
     };
     let (_agent, _events) = Agent::new(model);

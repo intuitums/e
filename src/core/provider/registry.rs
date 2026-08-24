@@ -46,6 +46,9 @@ pub struct ModelDecl {
     pub context_window: u64,
     #[serde(default)]
     pub efforts: Vec<String>,
+    /// Which thinking wire shape this model speaks (Anthropic dialect).
+    #[serde(default)]
+    pub thinking: Option<String>,
 }
 
 fn default_window() -> u64 {
@@ -85,6 +88,18 @@ pub fn all() -> &'static [Provider] {
                     matches!(flow.as_str(), "codex" | "xai-device"),
                     "provider {}: unknown oauth flow `{flow}`",
                     provider.name
+                );
+            }
+            for decl in &provider.models {
+                assert!(
+                    matches!(
+                        decl.thinking.as_deref(),
+                        None | Some("adaptive") | Some("manual")
+                    ),
+                    "provider {}: model {}: unknown thinking mode `{:?}`",
+                    provider.name,
+                    decl.id,
+                    decl.thinking
                 );
             }
             provider

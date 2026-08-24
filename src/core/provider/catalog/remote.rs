@@ -5,7 +5,7 @@
 //! wins over any seed value. Silent on failure: an offline launch must not
 //! care.
 
-use super::{catalog, Model};
+use super::{catalog, Model, Thinking};
 
 /// How long a provider's fetched model list stays fresh (the reference's
 /// refresh interval).
@@ -56,6 +56,7 @@ pub(super) fn remote_overlay(models: &mut Vec<Model>) {
                     base_url: base.clone(),
                     api,
                     efforts: Vec::new(),
+                    thinking: Thinking::Manual,
                     context_window: item["context_window"].as_u64().unwrap_or(200_000),
                 }),
             }
