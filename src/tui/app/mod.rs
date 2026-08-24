@@ -1338,17 +1338,20 @@ impl App {
             SessionEvent::Usage {
                 input,
                 output,
-                cache_read,
+                cache_read: _,
             } => {
-                self.context_tokens = input + cache_read + output;
+                // `input` is the inclusive prompt total per the Usage
+                // contract — adding the cached subset again would double
+                // count and trigger compaction early.
+                self.context_tokens = input + output;
                 if let Some(s) = &mut self.active {
                     // The seed estimate holds the counters until the first
                     // real usage lands; from then on, accumulate per step.
                     if s.usage_seen {
-                        s.turn.input += input + cache_read;
+                        s.turn.input += input;
                         s.turn.output += output;
                     } else {
-                        s.turn.input = input + cache_read;
+                        s.turn.input = input;
                         s.turn.output = output;
                         s.usage_seen = true;
                     }

@@ -760,3 +760,74 @@ async fn agent_warns_on_truncated_turn() {
         "unexpected warning: {warning}"
     );
 }
+
+/// A body transport failure after successful headers but before any output
+/// is retryable — a 503 and an idle timeout already were, and this was the
+/// inconsistent gap. The agent's nothing-produced guard still blocks replays
+/// once content has streamed.
+#[tokio::test(flavor = "multi_thread")]
+async fn body_transport_error_before_output_retries() {
+    use e::core::agent::{Agent, SessionEvent};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let home = std::env::temp_dir().join(format!("e-test-body-err-{port}"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    std::thread::spawn(move || {
+        // Attempt one: good headers, then the body dies mid-stream (declared
+        // length never delivered) before any SSE event completes.
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 8192];
+        let _ = sock.read(&mut buffer);
+        let partial =
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 500\r\nconnection: close\r\n\r\ndata: {\"cho";
+        sock.write_all(partial.as_bytes()).unwrap();
+        drop(sock);
+
+        // Attempt two: a clean completion.
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 8192];
+        let _ = sock.read(&mut buffer);
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        sock.write_all(response.as_bytes()).unwrap();
+    });
+
+    let model = Model {
+        provider: "mock".into(),
+        id: "m".into(),
+        base_url: format!("http://127.0.0.1:{port}"),
+        api: Api::Completions,
+        efforts: Vec::new(),
+        thinking: e::core::providers::catalog::Thinking::Manual,
+        context_window: 200_000,
+    };
+    let (mut agent, mut rx) = Agent::new(model);
+    agent.submit("hi".into(), "sys".into());
+
+    let mut saw_retry = false;
+    let mut saw_error = false;
+    let mut text = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            SessionEvent::Retry { .. } => saw_retry = true,
+            SessionEvent::Error(_) => saw_error = true,
+            SessionEvent::TextDelta(d) => text.push_str(&d),
+            SessionEvent::TurnEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(saw_retry, "a pre-output body failure must retry");
+    assert!(!saw_error, "the retry should recover the turn");
+    assert_eq!(text, "ok");
+}

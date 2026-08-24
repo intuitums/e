@@ -51,8 +51,12 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                 }
             }
             "reasoning" => {
+                // Only this dialect's own items; Anthropic thinking blocks
+                // stored under the same role would 400 here.
                 if let Ok(item) = serde_json::from_str::<serde_json::Value>(&m.content) {
-                    input.push(item);
+                    if item["type"].as_str() == Some("reasoning") {
+                        input.push(item);
+                    }
                 }
             }
             "tool" => input.push(json!({

@@ -107,10 +107,10 @@ pub enum FailureCause {
     /// Connection/DNS/TLS/setup failure — the request never left. Safe to
     /// retry.
     Network,
-    /// Written but never confirmed received (a header-wait or idle-body
-    /// timeout), with nothing produced yet. May have been billed, but
-    /// nothing else can have been double-run — a retry is a calculated risk,
-    /// not a certainty.
+    /// Written but never confirmed complete: a header-wait or idle-body
+    /// timeout, or the body transport broke mid-stream. May have been
+    /// billed; the agent only retries when nothing has streamed yet, so a
+    /// retry is a calculated risk, not a certainty.
     Stalled,
     /// HTTP 429, or a provider error frame naming a rate limit. Retry,
     /// honoring `Retry-After` when the provider sent one.
@@ -297,7 +297,10 @@ pub enum Event {
     ReasoningDelta(String),
     /// A completed tool request (dialects accumulate the argument deltas).
     ToolCall(ToolCall),
-    /// input, output, cache_read tokens from the terminal usage frame.
+    /// Token usage from the terminal usage frame. `input` is the TOTAL
+    /// prompt-side count — cached tokens included — so it alone measures
+    /// context size; `cache_read` is the informational cached subset.
+    /// Dialects whose wire fields are disjoint sum them into `input`.
     Usage {
         input: u64,
         output: u64,
@@ -551,7 +554,9 @@ where
     {
         Ok(None) => Ok(None),
         Ok(Some(Ok(chunk))) => Ok(Some(chunk)),
-        Ok(Some(Err(e))) => Err(ProviderError::rejected(format!("stream error: {e}"))),
+        // A broken body transport (reset, truncated chunking) is retryable
+        // by cause; the agent still refuses to retry once content streamed.
+        Ok(Some(Err(e))) => Err(ProviderError::stalled(format!("stream error: {e}"))),
         Err(_) => Err(ProviderError::stalled(format!(
             "stream stalled — no data for {STREAM_IDLE_SECS}s"
         ))),

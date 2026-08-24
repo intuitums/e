@@ -34,12 +34,16 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
         .await
         .map_err(ProviderError::auth)?;
 
-    // History → content blocks. Tool results ride user turns.
+    // History → content blocks. Tool results ride user turns. Signed
+    // thinking blocks committed as "reasoning" messages replay verbatim at
+    // the head of the assistant turn they preceded — the API requires them
+    // back, complete with signatures, when continuing a tool loop.
     let mut messages: Vec<serde_json::Value> = Vec::new();
+    let mut pending_thinking: Vec<serde_json::Value> = Vec::new();
     for m in &request.messages {
         match m.role.as_str() {
             "assistant" => {
-                let mut content = Vec::new();
+                let mut content = std::mem::take(&mut pending_thinking);
                 if !m.content.is_empty() {
                     content.push(json!({"type": "text", "text": m.content}));
                 }
@@ -60,12 +64,28 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                              "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
                              "content": m.content}],
             })),
-            // Responses-dialect reasoning items mean nothing here.
-            "reasoning" => {}
-            _ => messages.push(json!({
-                "role": "user",
-                "content": [{"type": "text", "text": m.content}],
-            })),
+            "reasoning" => {
+                // Only this dialect's own blocks; items from other dialects
+                // (Responses reasoning JSON) mean nothing here.
+                if let Ok(block) = serde_json::from_str::<serde_json::Value>(&m.content) {
+                    if matches!(
+                        block["type"].as_str(),
+                        Some("thinking") | Some("redacted_thinking")
+                    ) {
+                        pending_thinking.push(block);
+                    }
+                }
+            }
+            _ => {
+                // A turn boundary without an assistant message orphans any
+                // buffered thinking; replaying it elsewhere would fail the
+                // signature check.
+                pending_thinking.clear();
+                messages.push(json!({
+                    "role": "user",
+                    "content": [{"type": "text", "text": m.content}],
+                }));
+            }
         }
     }
 
@@ -126,6 +146,9 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
     let mut sse = SseStream::new(response.bytes_stream());
     // Tool input JSON streams in fragments per content block index.
     let mut open_tool: Option<(ToolCall, usize)> = None;
+    // A thinking block accumulates text and its opaque signature; on stop it
+    // becomes a replayable reasoning item.
+    let mut open_thinking: Option<(String, String)> = None;
     let mut input_tokens = 0u64;
     let mut cache_read = 0u64;
     let mut output_tokens = 0u64;
@@ -140,23 +163,35 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
             };
             match value["type"].as_str().unwrap_or("") {
                 "message_start" => {
+                    // Anthropic's prompt-side fields are disjoint; the Usage
+                    // contract wants the inclusive total in `input`.
                     let usage = &value["message"]["usage"];
-                    input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
                     cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                    input_tokens = usage["input_tokens"].as_u64().unwrap_or(0)
+                        + usage["cache_creation_input_tokens"].as_u64().unwrap_or(0)
+                        + cache_read;
                 }
                 "content_block_start" => {
                     let index = value["index"].as_u64().unwrap_or(0) as usize;
                     let block = &value["content_block"];
-                    if block["type"] == "tool_use" {
-                        open_tool = Some((
-                            ToolCall {
-                                id: block["id"].as_str().unwrap_or("").to_string(),
-                                name: block["name"].as_str().unwrap_or("").to_string(),
-                                arguments: String::new(),
-                                signature: None,
-                            },
-                            index,
-                        ));
+                    match block["type"].as_str().unwrap_or("") {
+                        "tool_use" => {
+                            open_tool = Some((
+                                ToolCall {
+                                    id: block["id"].as_str().unwrap_or("").to_string(),
+                                    name: block["name"].as_str().unwrap_or("").to_string(),
+                                    arguments: String::new(),
+                                    signature: None,
+                                },
+                                index,
+                            ));
+                        }
+                        "thinking" => open_thinking = Some((String::new(), String::new())),
+                        // Arrives complete, no deltas; preserved verbatim.
+                        "redacted_thinking" => {
+                            let _ = tx.send(Event::ReasoningItem(block.to_string())).await;
+                        }
+                        _ => {}
                     }
                 }
                 "content_block_delta" => match value["delta"]["type"].as_str().unwrap_or("") {
@@ -167,7 +202,15 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                     }
                     "thinking_delta" => {
                         if let Some(text) = value["delta"]["thinking"].as_str() {
+                            if let Some((thinking, _)) = &mut open_thinking {
+                                thinking.push_str(text);
+                            }
                             let _ = tx.send(Event::ReasoningDelta(text.to_string())).await;
+                        }
+                    }
+                    "signature_delta" => {
+                        if let Some((_, signature)) = &mut open_thinking {
+                            signature.push_str(value["delta"]["signature"].as_str().unwrap_or(""));
                         }
                     }
                     "input_json_delta" => {
@@ -184,6 +227,18 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                             call.arguments = "{}".into();
                         }
                         let _ = tx.send(Event::ToolCall(call)).await;
+                    }
+                    if let Some((thinking, signature)) = open_thinking.take() {
+                        // Only a signed block is replayable; an unsigned one
+                        // has nothing the API demands back.
+                        if !signature.is_empty() {
+                            let block = json!({
+                                "type": "thinking",
+                                "thinking": thinking,
+                                "signature": signature,
+                            });
+                            let _ = tx.send(Event::ReasoningItem(block.to_string())).await;
+                        }
                     }
                 }
                 "message_delta" => {
