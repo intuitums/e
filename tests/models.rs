@@ -533,7 +533,7 @@ fn a_custom_provider_without_base_url_is_rejected_with_a_warning() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn trust_keys_distinguish_non_utf8_paths_with_the_same_lossy_form() {
     use std::os::unix::ffi::OsStringExt;
