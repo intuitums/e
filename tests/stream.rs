@@ -1,150 +1,42 @@
-//! Wire-level test: a canned SSE server proves the completions client parses
-//! deltas, reasoning, usage, and [DONE] correctly — no network, no keys.
+//! The agent session stream: provider events fold into one `SessionEvent`
+//! channel, failures still end the turn exactly once, Esc aborts a stall,
+//! and a retryable campaign either recovers or gives up. Dialect parsing
+//! lives in `providers.rs`.
+
+mod common;
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::time::Duration;
 
-use e::core::providers::catalog::{Api, Model};
-use e::core::providers::{stream, ChatMessage, Event, Request, SseSplitter};
+use common::{env_lock, serve_raw, serve_sse, sse_response, test_model, Home};
 
-#[test]
-fn sse_splitter_handles_fragmentation_and_crlf() {
-    let mut s = SseSplitter::new();
-    assert!(s.feed("data: {\"a\":").is_empty());
-    assert_eq!(s.feed("1}\n\n"), vec!["{\"a\":1}"]);
-    assert_eq!(s.feed("data: x\r\n\r\ndata: y\n\n"), vec!["x", "y"]);
-    // multi-line data field joins with newline
-    assert_eq!(s.feed("data: a\ndata: b\n\n"), vec!["a\nb"]);
+use e::core::agent::{Agent, SessionEvent};
+use e::core::providers::catalog::Api;
+use e::core::providers::FailureCause;
+
+fn mock_home() -> Home {
+    let home = Home::new("stream");
+    home.auth(r#"{"mock":{"key":"k"}}"#);
+    home
 }
 
-#[test]
-fn sse_splitter_preserves_utf8_across_byte_chunks() {
-    let event = "data: {\"text\":\"é\"}\n\n";
-    let bytes = event.as_bytes();
-    let split = bytes.iter().position(|byte| *byte == 0xc3).unwrap() + 1;
-    let mut splitter = SseSplitter::new();
-    assert!(splitter.feed_bytes(&bytes[..split]).is_empty());
-    assert_eq!(
-        splitter.feed_bytes(&bytes[split..]),
-        vec![r#"{"text":"é"}"#]
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn completions_stream_parses_deltas_and_usage() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    let home = std::env::temp_dir().join(format!("e-test-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
-
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 8192];
-        let _ = sock.read(&mut buffer);
-        let body = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"}}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\
-             \"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n",
-            "data: [DONE]\n\n",
-        );
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        sock.write_all(response.as_bytes()).unwrap();
-    });
-
-    let request = Request {
-        model: Model {
-            provider: "mock".into(),
-            id: "m".into(),
-            base_url: format!("http://127.0.0.1:{port}"),
-            api: Api::Completions,
-            efforts: Vec::new(),
-            thinking: e::core::providers::catalog::Thinking::Manual,
-            context_window: 200_000,
-        },
-        system: "sys".into(),
-        messages: vec![ChatMessage::user("hi")],
-        effort: None,
-        tools: Vec::new(),
-    };
-    let (mut rx, _handle) = stream(request);
-
-    let mut text = String::new();
-    let mut reasoning = String::new();
-    let mut usage = None;
-    let mut done = false;
-    while let Some(event) = rx.recv().await {
-        match event {
-            Event::TextDelta(d) => text.push_str(&d),
-            Event::ReasoningDelta(d) => reasoning.push_str(&d),
-            Event::Usage {
-                input,
-                output,
-                cache_read,
-            } => usage = Some((input, output, cache_read)),
-            Event::Done(_) => {
-                done = true;
-                break;
-            }
-            Event::Error(err) => panic!("stream error: {}", err.message),
-            Event::ToolCall(_) | Event::ReasoningItem(_) => {}
-        }
-    }
-    assert!(done);
-    assert_eq!(text, "Hello");
-    assert_eq!(reasoning, "hmm");
-    assert_eq!(usage, Some((12, 3, 4)));
-}
-
+// The env lock is held across awaits: E_HOME must stay ours and each
+// #[tokio::test] runs on its own runtime.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_folds_provider_events_into_one_session_stream() {
-    use e::core::agent::{Agent, SessionEvent};
+    let _lock = env_lock();
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, _server) = serve_sse(&[body]);
+    let _home = mock_home();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-test-agent-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
-
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 8192];
-        let _ = sock.read(&mut buffer);
-        let body = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n",
-            "data: [DONE]\n\n",
-        );
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        sock.write_all(response.as_bytes()).unwrap();
-    });
-
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
-    let (mut agent, mut rx) = Agent::new(model);
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
     agent.submit("hi".into(), "sys".into());
 
-    // The contract: TurnStart first, TurnEnd last, exactly once each.
     let mut kinds = Vec::new();
     while let Some(event) = rx.recv().await {
         let done = matches!(event, SessionEvent::TurnEnd { .. });
@@ -167,42 +59,18 @@ async fn agent_folds_provider_events_into_one_session_stream() {
     assert!(!kinds.contains(&"error"));
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_reports_errors_and_still_ends_the_turn_exactly_once() {
-    use e::core::agent::{Agent, SessionEvent};
+    let _lock = env_lock();
+    let (port, _server) = serve_raw(vec![
+        "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
+    ]);
+    let _home = mock_home();
 
-    // A 401 is an auth-class failure: never retried, so one request, one
-    // deterministic ending.
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-test-agent-err-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
-
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 8192];
-        let _ = sock.read(&mut buffer);
-        let response =
-            "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
-        sock.write_all(response.as_bytes()).unwrap();
-    });
-
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
-    let (mut agent, mut rx) = Agent::new(model);
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
     agent.submit("hi".into(), "sys".into());
 
-    // The contract under failure: the error surfaces, the turn still ends —
-    // exactly once, not aborted — so the frontend can close it out visibly.
     let mut saw_error = false;
     let mut endings = Vec::new();
     while let Some(event) = rx.recv().await {
@@ -219,19 +87,13 @@ async fn agent_reports_errors_and_still_ends_the_turn_exactly_once() {
     assert_eq!(endings, vec![false]);
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_interrupt_ends_a_stalled_stream() {
-    use e::core::agent::{Agent, SessionEvent};
-    use std::time::Duration;
-
-    // Headers arrive, then the body never does — the pre-fix hang: Esc set
-    // the cancel flag but the turn only checked it after the next SSE event.
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let _lock = env_lock();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-test-agent-stall-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
+    let _home = mock_home();
 
     std::thread::spawn(move || {
         let (mut sock, _) = listener.accept().unwrap();
@@ -240,23 +102,12 @@ async fn agent_interrupt_ends_a_stalled_stream() {
         let _ = sock.write_all(
             b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
         );
-        // Keep the socket open so the client stays parked on the body.
         std::thread::sleep(Duration::from_secs(30));
     });
 
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
-    let (mut agent, mut rx) = Agent::new(model);
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
     agent.submit("hi".into(), "sys".into());
 
-    // Wait until the turn has started, then interrupt while the body is idle.
     while let Some(event) = rx.recv().await {
         if matches!(event, SessionEvent::TurnStart) {
             break;
@@ -278,114 +129,13 @@ async fn agent_interrupt_ends_a_stalled_stream() {
     assert!(aborted, "stalled interrupt should abort the turn");
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn unexpected_eof_is_an_error_not_a_silent_done() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-test-eof-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
-
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 8192];
-        let _ = sock.read(&mut buffer);
-        // A partial stream that closes without [DONE].
-        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        sock.write_all(response.as_bytes()).unwrap();
-    });
-
-    let request = Request {
-        model: Model {
-            provider: "mock".into(),
-            id: "m".into(),
-            base_url: format!("http://127.0.0.1:{port}"),
-            api: Api::Completions,
-            efforts: Vec::new(),
-            thinking: e::core::providers::catalog::Thinking::Manual,
-            context_window: 200_000,
-        },
-        system: "sys".into(),
-        messages: vec![ChatMessage::user("hi")],
-        effort: None,
-        tools: Vec::new(),
-    };
-    let (mut rx, _handle) = stream(request);
-
-    let mut saw_text = false;
-    let mut terminal = None;
-    while let Some(event) = rx.recv().await {
-        match event {
-            Event::TextDelta(_) => saw_text = true,
-            Event::Error(err) => {
-                terminal = Some(err.message);
-                break;
-            }
-            Event::Done(_) => panic!("unexpected EOF must not finish as Done"),
-            _ => {}
-        }
-    }
-    assert!(saw_text);
-    let message = terminal.expect("error terminal missing");
-    assert!(
-        message.contains("unexpected"),
-        "unexpected EOF wording missing: {message}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn unanswered_request_fails_instead_of_hanging() {
-    use e::core::providers::{http, send_request_within, FailureCause};
-    use std::time::Duration;
-
-    // The gap between connect (client-bounded) and body reads (chunk-bounded):
-    // the server accepts the request and never sends response headers.
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 8192];
-        let _ = sock.read(&mut buffer);
-        std::thread::sleep(Duration::from_secs(30));
-    });
-
-    let builder = http()
-        .post(format!("http://127.0.0.1:{port}/v1/messages"))
-        .body("{}");
-    let err = send_request_within(builder, Duration::from_millis(300))
-        .await
-        .expect_err("headers never arrive — the send must time out");
-    assert!(
-        err.message.contains("no response"),
-        "stall wording missing: {}",
-        err.message
-    );
-    // Written but unanswered: may have been delivered, so it's a calculated
-    // risk to retry, not a certainty — Stalled, same as an idle body.
-    assert_eq!(err.cause, FailureCause::Stalled);
-    assert!(err.cause.is_retryable());
-}
-
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_interrupt_ends_a_turn_stuck_before_headers() {
-    use e::core::agent::{Agent, SessionEvent};
-    use std::time::Duration;
-
-    // Same shape as the stalled-body pin, one await point earlier: the
-    // provider task is parked inside send(), not the body stream. Esc must
-    // end the turn just the same.
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let _lock = env_lock();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-test-agent-headers-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
+    let _home = mock_home();
 
     std::thread::spawn(move || {
         let (mut sock, _) = listener.accept().unwrap();
@@ -394,16 +144,7 @@ async fn agent_interrupt_ends_a_turn_stuck_before_headers() {
         std::thread::sleep(Duration::from_secs(30));
     });
 
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
-    let (mut agent, mut rx) = Agent::new(model);
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
     agent.submit("hi".into(), "sys".into());
 
     while let Some(event) = rx.recv().await {
@@ -427,55 +168,21 @@ async fn agent_interrupt_ends_a_turn_stuck_before_headers() {
     assert!(aborted, "pre-headers interrupt should abort the turn");
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn retry_recovers_after_a_transient_failure() {
-    use e::core::agent::{Agent, SessionEvent};
-    use e::core::providers::FailureCause;
+    let _lock = env_lock();
+    let ok = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, _server) = serve_raw(vec![
+        "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
+        sse_response(ok),
+    ]);
+    let _home = mock_home();
 
-    // First attempt hits a 503; the retry succeeds. Exercises the whole
-    // pipeline: status classification -> retry decision -> backoff -> a
-    // second request -> Recovered once real content arrives.
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-test-agent-retry-ok-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
-
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 8192];
-        let _ = sock.read(&mut buffer);
-        let response =
-            "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
-        sock.write_all(response.as_bytes()).unwrap();
-        drop(sock);
-
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 8192];
-        let _ = sock.read(&mut buffer);
-        let body = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
-            "data: [DONE]\n\n",
-        );
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        sock.write_all(response.as_bytes()).unwrap();
-    });
-
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
-    let (mut agent, mut rx) = Agent::new(model);
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
     agent.submit("hi".into(), "sys".into());
 
     let mut saw_retry = false;
@@ -517,47 +224,23 @@ async fn retry_recovers_after_a_transient_failure() {
     assert_eq!(aborted, Some(false));
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn retry_campaign_gives_up_after_max_attempts() {
     use e::core::agent::retry::MAX_ATTEMPTS;
-    use e::core::agent::{Agent, SessionEvent};
 
-    // Every attempt gets a 503 with Retry-After: 0 — near-instant, so the
-    // whole ten-request campaign runs in well under a second — proving it
-    // stops at the total request budget instead of retrying forever.
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-test-agent-retry-exhaust-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
+    let _lock = env_lock();
+    let fail =
+        "HTTP/1.1 503 Service Unavailable\r\nretry-after: 0\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+    let (port, _server) = serve_raw(vec![fail.to_string(); MAX_ATTEMPTS as usize]);
+    let _home = mock_home();
 
-    std::thread::spawn(move || {
-        // MAX_ATTEMPTS includes the initial request.
-        for _ in 0..MAX_ATTEMPTS {
-            let (mut sock, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 8192];
-            let _ = sock.read(&mut buffer);
-            let response = "HTTP/1.1 503 Service Unavailable\r\nretry-after: 0\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
-            sock.write_all(response.as_bytes()).unwrap();
-        }
-    });
-
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
-    let (mut agent, mut rx) = Agent::new(model);
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
     agent.submit("hi".into(), "sys".into());
 
     let mut retries = Vec::new();
     let mut error_message = None;
-    let aborted = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    let aborted = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let event = rx.recv().await.expect("stream ended without TurnEnd");
             match event {
@@ -584,45 +267,18 @@ async fn retry_campaign_gives_up_after_max_attempts() {
     assert!(!aborted);
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_blank_successful_stream_surfaces_an_error_not_silence() {
-    use e::core::agent::{Agent, SessionEvent};
+    let _lock = env_lock();
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":0}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, _server) = serve_sse(&[body]);
+    let _home = mock_home();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    let home = std::env::temp_dir().join(format!("e-test-blank-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
-
-    // A well-formed stream that carries nothing: usage only, then [DONE].
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 8192];
-        let _ = sock.read(&mut buffer);
-        let body = concat!(
-            "data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":0}}\n\n",
-            "data: [DONE]\n\n",
-        );
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        sock.write_all(response.as_bytes()).unwrap();
-    });
-
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
-    let (mut agent, mut rx) = Agent::new(model);
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
     agent.submit("hi".into(), "sys".into());
 
     let mut saw_error = false;
@@ -642,45 +298,23 @@ async fn a_blank_successful_stream_surfaces_an_error_not_silence() {
 /// A 200 stream the provider cut at its output limit must not read as a
 /// finished turn: the finish reason is mapped, and skipped malformed
 /// payloads are counted instead of vanishing.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn truncation_and_malformed_payloads_surface_in_stream_end() {
-    use e::core::providers::FinishReason;
+    use e::core::providers::{stream, ChatMessage, Event, FinishReason, Request};
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-test-finish-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
-
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 8192];
-        let _ = sock.read(&mut buffer);
-        let body = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
-            "data: {not json at all}\n\n",
-            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
-            "data: [DONE]\n\n",
-        );
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        sock.write_all(response.as_bytes()).unwrap();
-    });
+    let _lock = env_lock();
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        "data: {not json at all}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, _server) = serve_sse(&[body]);
+    let _home = mock_home();
 
     let request = Request {
-        model: Model {
-            provider: "mock".into(),
-            id: "m".into(),
-            base_url: format!("http://127.0.0.1:{port}"),
-            api: Api::Completions,
-            efforts: Vec::new(),
-            thinking: e::core::providers::catalog::Thinking::Manual,
-            context_window: 200_000,
-        },
+        model: test_model("mock", port, Api::Completions),
         system: "sys".into(),
         messages: vec![ChatMessage::user("hi")],
         effort: None,
@@ -706,44 +340,19 @@ async fn truncation_and_malformed_payloads_surface_in_stream_end() {
 
 /// End to end: an abnormal finish becomes a visible turn warning, not a
 /// silently accepted truncation.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_warns_on_truncated_turn() {
-    use e::core::agent::{Agent, SessionEvent};
+    let _lock = env_lock();
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"cut off mid\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, _server) = serve_sse(&[body]);
+    let _home = mock_home();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-test-warn-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
-
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 8192];
-        let _ = sock.read(&mut buffer);
-        let body = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"cut off mid\"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
-            "data: [DONE]\n\n",
-        );
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        sock.write_all(response.as_bytes()).unwrap();
-    });
-
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
-    let (mut agent, mut rx) = Agent::new(model);
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
     agent.submit("hi".into(), "sys".into());
 
     let mut warning = None;
@@ -765,54 +374,21 @@ async fn agent_warns_on_truncated_turn() {
 /// is retryable — a 503 and an idle timeout already were, and this was the
 /// inconsistent gap. The agent's nothing-produced guard still blocks replays
 /// once content has streamed.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn body_transport_error_before_output_retries() {
-    use e::core::agent::{Agent, SessionEvent};
+    let _lock = env_lock();
+    let ok = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, _server) = serve_raw(vec![
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 500\r\nconnection: close\r\n\r\ndata: {\"cho".into(),
+        sse_response(ok),
+    ]);
+    let _home = mock_home();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-test-body-err-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
-
-    std::thread::spawn(move || {
-        // Attempt one: good headers, then the body dies mid-stream (declared
-        // length never delivered) before any SSE event completes.
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 8192];
-        let _ = sock.read(&mut buffer);
-        let partial =
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 500\r\nconnection: close\r\n\r\ndata: {\"cho";
-        sock.write_all(partial.as_bytes()).unwrap();
-        drop(sock);
-
-        // Attempt two: a clean completion.
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 8192];
-        let _ = sock.read(&mut buffer);
-        let body = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
-            "data: [DONE]\n\n",
-        );
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        sock.write_all(response.as_bytes()).unwrap();
-    });
-
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
-    let (mut agent, mut rx) = Agent::new(model);
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
     agent.submit("hi".into(), "sys".into());
 
     let mut saw_retry = false;

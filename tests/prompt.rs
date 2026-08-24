@@ -68,3 +68,87 @@ fn agents_md_layers_as_project_instructions() {
         assert!(prompt.contains("<project_instructions path="));
     });
 }
+
+#[test]
+fn trust_gates_project_instructions() {
+    with_home("trust", || {
+        let home = std::env::var("E_HOME").unwrap();
+        let ws = std::path::PathBuf::from(&home).join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("AGENTS.md"), "SECRET-PROJECT-RULE").unwrap();
+        let ws = ws.canonicalize().unwrap();
+
+        assert_eq!(e::core::config::trust::status(&ws), None);
+        assert!(!system_prompt(&ws).contains("SECRET-PROJECT-RULE"));
+
+        e::core::config::trust::set(&ws, false).unwrap();
+        assert_eq!(e::core::config::trust::status(&ws), Some(false));
+        assert!(!system_prompt(&ws).contains("SECRET-PROJECT-RULE"));
+
+        e::core::config::trust::set(&ws, true).unwrap();
+        assert!(system_prompt(&ws).contains("SECRET-PROJECT-RULE"));
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn trust_keys_distinguish_non_utf8_paths_with_the_same_lossy_form() {
+    use std::os::unix::ffi::OsStringExt;
+
+    with_home("trust-bytes", || {
+        let home = std::path::PathBuf::from(std::env::var("E_HOME").unwrap());
+        let parent = home.join("workspaces");
+        std::fs::create_dir_all(&parent).unwrap();
+
+        let first = parent.join(std::ffi::OsString::from_vec(b"project-\xff".to_vec()));
+        let second = parent.join(std::ffi::OsString::from_vec(b"project-\xfe".to_vec()));
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+
+        e::core::config::trust::set(&first, true).unwrap();
+        assert_eq!(e::core::config::trust::status(&first), Some(true));
+        assert_eq!(
+            e::core::config::trust::status(&second),
+            None,
+            "a distinct raw path must receive its own trust decision"
+        );
+    });
+}
+
+#[test]
+fn legacy_utf8_trust_keys_remain_readable() {
+    with_home("trust-legacy", || {
+        let home = std::path::PathBuf::from(std::env::var("E_HOME").unwrap());
+        let workspace = home.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let legacy = workspace.to_str().unwrap();
+
+        std::fs::write(
+            home.join("trust.json"),
+            serde_json::to_vec(&serde_json::json!({
+                legacy: { "trusted": true }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            e::core::config::trust::status(&workspace),
+            Some(true),
+            "valid UTF-8 trust decisions migrate read-only"
+        );
+    });
+}
+
+#[test]
+fn every_docs_topic_has_a_body() {
+    for (name, _) in e::core::resources::docs::TOPICS {
+        let body = e::core::resources::docs::body(name).unwrap();
+        assert!(!body.trim().is_empty(), "empty doc: {name}");
+    }
+    assert!(e::core::resources::docs::body("extensions")
+        .unwrap()
+        .contains("initialize"));
+    assert!(e::core::resources::docs::body("nope").is_none());
+}
