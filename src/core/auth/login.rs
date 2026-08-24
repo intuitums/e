@@ -733,7 +733,6 @@ mod tests {
         use std::io::{Read, Write};
         let mut client = std::net::TcpStream::connect(addr).unwrap();
         write!(client, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
-        client.shutdown(std::net::Shutdown::Write).unwrap();
         let mut response = String::new();
         client.read_to_string(&mut response).unwrap();
         response
