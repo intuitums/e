@@ -141,7 +141,6 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
                 )),
                 entry,
                 dim("   Enter saves · Esc cancels"),
-                dim("   Saves to ~/.e/auth.json"),
             ]
         }
         AuthStage::Waiting => vec![
