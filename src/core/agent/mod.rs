@@ -752,6 +752,9 @@ async fn run_tool(
         tools::run_streaming(&name, &arguments, &cwd, &cancel, |stream, chunk| {
             let chunk = tools::sanitize_display(chunk);
             if !chunk.is_empty() {
+                // Blocks this pump thread when the channel is full, so the
+                // SessionEvent receiver must never block on I/O — a stalled
+                // consumer here stalls the tool it is reporting on.
                 let _ = events.blocking_send(SessionEvent::ToolOutput { id, stream, chunk });
             }
         })

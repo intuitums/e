@@ -19,7 +19,7 @@ use crate::core::providers::catalog::{self as model, Model};
 use crate::tui::authpanel::{self, AuthStage};
 use crate::tui::composer::{Editor, EditorResult, Key};
 use crate::tui::menu::{Menu, MenuItem, MenuKind, HINT_SCOPED, HINT_USE};
-use crate::tui::screen::Screen;
+use crate::tui::screen::Painter;
 use crate::tui::statusline::{
     statusline, RecoveredStatus, RetryStatus, StatusData, Turn, TurnPhase, RECOVERED_VISIBLE_MS,
 };
@@ -210,6 +210,16 @@ struct App {
     update_installed: Option<String>,
     /// Exit the loop and exec the (updated) binary with -c.
     relaunch: bool,
+    /// OSC-11 background detection, probed once at startup before the
+    /// event stream owns stdin. Re-probing mid-session would block the
+    /// loop and swallow keystrokes, so a changed terminal background
+    /// applies on restart.
+    light_background: bool,
+    /// Cached statusline inputs. Deriving them reads `~/.e/auth.json` and
+    /// `~/.e/settings.json`; doing that per frame stalls streaming, so
+    /// they refresh only via `refresh_status_cache`.
+    signed_in: bool,
+    status_effort: Option<String>,
 }
 
 impl App {
@@ -308,10 +318,10 @@ impl App {
         let percent = ((self.context_tokens.saturating_mul(100)) / window).min(100) as u8;
         // Nothing is signed in for the current model — it's a bootstrap
         // placeholder, not something the user chose, so don't show it.
-        let signed_in = crate::core::auth::load().contains_key(&self.agent.model.provider);
+        let signed_in = self.signed_in;
         let data = StatusData {
             model: signed_in.then(|| self.agent.model_slug()),
-            effort: signed_in.then(|| self.agent.effort()).flatten(),
+            effort: signed_in.then(|| self.status_effort.clone()).flatten(),
             session_name: None,
             context_percent: Some(percent),
             queued: 0,
@@ -482,6 +492,7 @@ impl App {
         };
         persist_model(&pool[next]);
         self.agent.model = pool[next].clone();
+        self.refresh_status_cache();
     }
 
     fn open_resume_menu(&mut self) {
@@ -885,6 +896,7 @@ impl App {
                     persist_model(&found);
                     self.notice(format!("model set to {}", model::slug(&found)));
                     self.agent.model = found;
+                    self.refresh_status_cache();
                 }
             }
         }
@@ -1021,6 +1033,7 @@ impl App {
                 persist_model(&found);
                 self.notice(format!("model set to {}", model::slug(&found)));
                 self.agent.model = found;
+                self.refresh_status_cache();
             } else {
                 self.notice(format!(
                     "no available model matches {query:?} — sign in to its provider with /login"
@@ -1565,11 +1578,21 @@ impl App {
         }
     }
 
-    /// Reload the theme from settings (auto detects the terminal).
+    /// Reload the theme from settings, using the startup background probe.
     fn apply_theme(&mut self) {
-        let detected = crate::tui::background::detect_light().unwrap_or(false);
-        self.theme = crate::tui::theme::resolve(&crate::core::config::settings::theme(), detected);
+        self.theme = crate::tui::theme::resolve(
+            &crate::core::config::settings::theme(),
+            self.light_background,
+        );
         self.transcript.invalidate();
+    }
+
+    /// Re-derive the cached sign-in and effort state from disk. Call after
+    /// anything that can change them: sign-in, model switch, effort cycle,
+    /// settings changes, /reload.
+    fn refresh_status_cache(&mut self) {
+        self.signed_in = crate::core::auth::load().contains_key(&self.agent.model.provider);
+        self.status_effort = self.agent.effort();
     }
 
     fn notice(&mut self, text: String) {
@@ -1761,8 +1784,8 @@ pub async fn run(
     let detected = crate::tui::background::detect_light().unwrap_or(false);
     let theme = crate::tui::theme::resolve(&crate::core::config::settings::theme(), detected);
 
-    let (cols, rows) = terminal::size()?;
-    let mut screen = Screen::new(cols, rows);
+    let (mut cols, mut rows) = terminal::size()?;
+    let mut painter = Painter::spawn(cols, rows);
     let (mut agent, mut session_events) = Agent::new(model::default_model());
     let (logins_tx, mut logins_rx) =
         tokio::sync::mpsc::channel::<crate::core::auth::login::Outcome>(4);
@@ -1801,7 +1824,11 @@ pub async fn run(
         viewer: None,
         update_installed: None,
         relaunch: false,
+        light_background: detected,
+        signed_in: false,
+        status_effort: None,
     };
+    app.refresh_status_cache();
     app.transcript
         .push(Block::new(Kind::Banner, crate::VERSION));
     for warning in model::config_warnings() {
@@ -1875,7 +1902,15 @@ pub async fn run(
     {
         app.submit(initial);
     }
-    screen.paint(&app.frame(screen.cols as usize))?;
+    painter.frame(app.frame(cols as usize));
+
+    // Frame pacing: every select arm may change what's on screen, but frames
+    // are built at most once per interval — a token burst becomes one paint,
+    // and a deferred paint fires when the interval lapses.
+    const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+    let mut next_paint = tokio::time::Instant::now();
+    let mut paint_deferred = false;
+    let mut event_buf: Vec<SessionEvent> = Vec::with_capacity(128);
 
     loop {
         tokio::select! {
@@ -1889,7 +1924,11 @@ pub async fn run(
                         app.editor.insert_paste(&text.replace('\r', "\n"));
                         app.sync_menu();
                     }
-                    TermEvent::Resize(c, r) => screen.resize(c, r),
+                    TermEvent::Resize(c, r) => {
+                        cols = c;
+                        rows = r;
+                        painter.resize(c, r);
+                    }
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
                         if app.viewer.is_some() {
@@ -1966,8 +2005,10 @@ pub async fn run(
                                 KeyCode::Esc | KeyCode::Enter => app.settings = None,
                                 _ => {}
                             }
-                            // A theme change applies immediately.
+                            // A theme change applies immediately; settings can
+                            // also change what the statusline derives from disk.
                             app.apply_theme();
+                            app.refresh_status_cache();
                         } else if let Some(stage) = &mut app.auth {
                             match (&mut *stage, k.code) {
                                 (AuthStage::Choose { selected }, KeyCode::Up | KeyCode::Down) => {
@@ -2078,7 +2119,7 @@ pub async fn run(
                             // statusline already shows the new level; only a
                             // model without a reasoning knob gets a notice.
                             match app.agent.cycle_effort() {
-                                Some(_) => {}
+                                Some(_) => app.refresh_status_cache(),
                                 None => app.notice("this model has no reasoning effort control".into()),
                             }
                         } else if let Some(key) = key_of(&k) {
@@ -2091,10 +2132,14 @@ pub async fn run(
                     _ => {}
                 }
             }
-            event = session_events.recv() => {
-                match event {
-                    Some(e) => app.on_session_event(e),
-                    None => break,
+            count = session_events.recv_many(&mut event_buf, 128) => {
+                if count == 0 {
+                    break;
+                }
+                // Apply the whole burst before building one frame — a fast
+                // stream must not cost one paint per delta.
+                for e in event_buf.drain(..) {
+                    app.on_session_event(e);
                 }
             }
             job = results_rx.recv() => {
@@ -2170,6 +2215,7 @@ pub async fn run(
                         app.host = host.clone();
                         app.agent.set_host(host);
                         app.apply_theme();
+                        app.refresh_status_cache();
                         finish_reload_notice(&mut app.transcript, app.reload_block.take());
                         for text in std::mem::take(&mut app.held_prompts) {
                             app.prompt(text);
@@ -2232,6 +2278,7 @@ pub async fn run(
                                     app.agent.model = m;
                                 }
                             }
+                            app.refresh_status_cache();
                         }
                     Some(crate::core::auth::login::Outcome::Failed { flow_id })
                         if app.login_outcome_is_current(Some(flow_id)) => {
@@ -2246,6 +2293,9 @@ pub async fn run(
             }
             _ = sigterm.recv() => break,
             _ = sighup.recv() => break,
+            // A paint was skipped inside the frame interval; fire it when
+            // the interval lapses.
+            _ = tokio::time::sleep_until(next_paint), if paint_deferred => {}
             _ = tick.tick() => {
                 if let Some(at) = app.armed_at {
                     if at.elapsed() > Duration::from_millis(1600) {
@@ -2262,17 +2312,26 @@ pub async fn run(
                 }
             }
         }
-        let frame = if app.viewer.is_some() {
-            app.viewer_frame(screen.cols as usize, screen.rows as usize)
+        let now = tokio::time::Instant::now();
+        if now >= next_paint || app.should_quit {
+            let frame = if app.viewer.is_some() {
+                app.viewer_frame(cols as usize, rows as usize)
+            } else {
+                app.frame(cols as usize)
+            };
+            painter.frame(frame);
+            next_paint = now + FRAME_INTERVAL;
+            paint_deferred = false;
         } else {
-            app.frame(screen.cols as usize)
-        };
-        screen.paint(&frame)?;
+            paint_deferred = true;
+        }
         if app.should_quit {
             break;
         }
     }
 
+    // Let the final frame land before the terminal is restored.
+    painter.shutdown();
     app.host.shutdown().await;
     let _ = execute!(
         std::io::stdout(),

@@ -17,6 +17,7 @@ pub struct Screen {
     prev: Vec<String>,
     pub cols: u16,
     pub rows: u16,
+    debug_frames: bool,
 }
 
 impl Screen {
@@ -25,6 +26,7 @@ impl Screen {
             prev: Vec::new(),
             cols,
             rows,
+            debug_frames: std::env::var("E_DEBUG_FRAMES").is_ok(),
         }
     }
 
@@ -41,7 +43,7 @@ impl Screen {
         if lines == self.prev.as_slice() {
             return Ok(());
         }
-        if std::env::var("E_DEBUG_FRAMES").is_ok() {
+        if self.debug_frames {
             use std::io::Write as _;
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
@@ -121,5 +123,69 @@ impl Screen {
         out.flush()?;
         self.prev = lines.to_vec();
         Ok(())
+    }
+}
+
+/// Messages to the paint thread.
+pub enum PaintMsg {
+    Frame(Vec<String>),
+    Resize(u16, u16),
+}
+
+/// The paint thread: owns the `Screen` and its blocking stdout writes so a
+/// slow terminal can never stall the event loop. Frames are latest-wins —
+/// each wake drains the queue and paints only the newest frame; resizes are
+/// applied in order.
+pub struct Painter {
+    tx: Option<std::sync::mpsc::Sender<PaintMsg>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Painter {
+    pub fn spawn(cols: u16, rows: u16) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut screen = Screen::new(cols, rows);
+            fn apply(screen: &mut Screen, latest: &mut Option<Vec<String>>, msg: PaintMsg) {
+                match msg {
+                    PaintMsg::Frame(frame) => *latest = Some(frame),
+                    PaintMsg::Resize(cols, rows) => screen.resize(cols, rows),
+                }
+            }
+            while let Ok(first) = rx.recv() {
+                let mut latest = None;
+                apply(&mut screen, &mut latest, first);
+                while let Ok(next) = rx.try_recv() {
+                    apply(&mut screen, &mut latest, next);
+                }
+                if let Some(frame) = latest {
+                    let _ = screen.paint(&frame);
+                }
+            }
+        });
+        Painter {
+            tx: Some(tx),
+            thread: Some(thread),
+        }
+    }
+
+    pub fn frame(&self, lines: Vec<String>) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(PaintMsg::Frame(lines));
+        }
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(PaintMsg::Resize(cols, rows));
+        }
+    }
+
+    /// Flush and stop: queued frames land before terminal teardown.
+    pub fn shutdown(&mut self) {
+        self.tx.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
