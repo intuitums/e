@@ -5,6 +5,8 @@
 //! ctrl+a/e/k/u/w, shift+enter (or alt+enter) newline. Anything else waits
 //! until asked for.
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::tui::theme::Theme;
 
 pub struct Editor {
@@ -35,9 +37,11 @@ impl Default for Editor {
     }
 }
 
-/// Wrap one buffer into visual rows of at most `inner` columns. Breaks at
-/// word boundaries whenever the row has one — a word that would cross the
-/// edge comes down whole; only space-less runs hard-break mid-word.
+/// Wrap one buffer into visual rows of at most `inner` display columns
+/// (CJK counts two, combining marks zero — a terminal row is columns, not
+/// chars). Breaks at word boundaries whenever the row has one — a word
+/// that would cross the edge comes down whole; only space-less runs
+/// hard-break mid-word.
 fn layout_rows(chars: &[char], inner: usize) -> Vec<VisualRow> {
     let mut rows = Vec::new();
     let mut i = 0usize;
@@ -55,16 +59,22 @@ fn layout_rows(chars: &[char], inner: usize) -> Vec<VisualRow> {
         let mut j = i;
         let mut col = 0usize;
         let mut brk: Option<usize> = None;
-        while j < chars.len() && chars[j] != '\n' && col < inner {
+        while j < chars.len() && chars[j] != '\n' {
+            let w = chars[j].width().unwrap_or(0);
+            if col + w > inner {
+                break;
+            }
             if chars[j].is_whitespace() {
                 brk = Some(j + 1);
             }
-            col += 1;
+            col += w;
             j += 1;
         }
         if j < chars.len() && chars[j] != '\n' {
             // Row full with more line remaining: prefer the word boundary.
-            let end = brk.filter(|&b| b > i).unwrap_or(j);
+            // A zero-progress corner (one char wider than the row) still
+            // advances by that char rather than looping forever.
+            let end = brk.filter(|&b| b > i).unwrap_or(j).max(i + 1);
             rows.push(VisualRow { start: i, end });
             i = end;
         } else {
@@ -76,6 +86,26 @@ fn layout_rows(chars: &[char], inner: usize) -> Vec<VisualRow> {
         }
     }
     rows
+}
+
+/// The row owning a cursor index. A wrap boundary index is shared by two
+/// adjacent rows; it belongs to the lower one (where the cell actually
+/// renders), so exactly one row ever claims the cursor.
+fn row_of(rows: &[VisualRow], cursor: usize) -> Option<usize> {
+    rows.iter().enumerate().position(|(index, row)| {
+        let wraps_on = rows
+            .get(index + 1)
+            .is_some_and(|next| next.start == row.end);
+        cursor >= row.start && (cursor < row.end || (cursor == row.end && !wraps_on))
+    })
+}
+
+/// Display width of a row's slice.
+fn row_width(chars: &[char], row: &VisualRow) -> usize {
+    chars[row.start..row.end]
+        .iter()
+        .map(|c| c.width().unwrap_or(0))
+        .sum()
 }
 
 impl Editor {
@@ -165,11 +195,13 @@ impl Editor {
         self.insert_str(&token);
     }
 
-    /// Replace every live placeholder with its pasted content.
-    pub fn expand_pastes(&self, text: &str) -> String {
+    /// Replace every live placeholder with its pasted content, retiring all
+    /// mappings: the draft that owned them is gone once submitted, and a
+    /// token typed later must not resurrect an old payload.
+    pub fn expand_pastes(&mut self, text: &str) -> String {
         let mut out = text.to_string();
-        for (token, content) in &self.pastes {
-            out = out.replace(token, content);
+        for (token, content) in self.pastes.drain(..) {
+            out = out.replace(&token, &content);
         }
         out
     }
@@ -189,7 +221,7 @@ impl Editor {
         };
         let chars: Vec<char> = self.text.clone();
         let rows = layout_rows(&chars, inner);
-        let Some(index) = rows.iter().position(|row| row.contains(self.cursor)) else {
+        let Some(index) = row_of(&rows, self.cursor) else {
             return;
         };
         let target = match direction {
@@ -344,14 +376,15 @@ impl Editor {
         };
         let chars: Vec<char> = text.chars().collect();
         let rows = layout_rows(&chars, inner);
+        let cursor_row = row_of(&rows, self.cursor);
         let last = rows.len() - 1;
         for (index, row) in rows.iter().enumerate() {
             let slice = &chars[row.start..row.end];
             let full_final_row = index == last
                 && self.cursor == self.text.len()
                 && self.cursor == row.end
-                && row.end - row.start == inner;
-            let cursor_here = self.cursor >= row.start && self.cursor <= row.end;
+                && row_width(&chars, row) >= inner;
+            let cursor_here = cursor_row == Some(index);
             let rendered = if cursor_here && !full_final_row {
                 let at = self.cursor - row.start;
                 let before: String = slice[..at].iter().collect();
@@ -371,7 +404,7 @@ impl Editor {
             self.cursor == self.text.len()
                 && !self.text.is_empty()
                 && self.cursor == row.end
-                && row.end - row.start == inner
+                && row_width(&chars, row) >= inner
         }) {
             out.push(format!("{rail}\x1b[7m \x1b[27m"));
         }
@@ -380,17 +413,12 @@ impl Editor {
 }
 
 /// One visual row: an absolute char range in the buffer. Newline characters
-/// belong to no row — they are zero-width row terminators.
+/// belong to no row — they are zero-width row terminators. Cursor ownership
+/// is resolved by `row_of`, never per-row: a wrap boundary index would
+/// otherwise belong to two rows and paint two cursors.
 struct VisualRow {
     start: usize,
     end: usize,
-}
-
-impl VisualRow {
-    /// A newline-positioned cursor belongs to the row it terminates.
-    fn contains(&self, cursor: usize) -> bool {
-        cursor >= self.start && cursor <= self.end
-    }
 }
 
 pub enum Key {

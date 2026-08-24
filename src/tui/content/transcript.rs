@@ -100,7 +100,10 @@ impl Block {
     pub fn new(kind: Kind, text: impl Into<String>) -> Self {
         Block {
             kind,
-            text: text.into(),
+            // Block text is source text, not markup: model output, extension
+            // notices, and pasted content must render inert, never smuggle
+            // terminal control sequences into the paint stream.
+            text: crate::core::tools::sanitize_display(&text.into()),
             done: false,
             is_error: false,
             detail: None,

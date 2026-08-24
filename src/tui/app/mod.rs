@@ -1254,7 +1254,11 @@ impl App {
                 if let Some(s) = &mut self.active {
                     s.turn.phase = TurnPhase::AssistantText;
                     s.turn.note_text(&delta);
-                    s.text.push_str(&delta);
+                    // Model output is untrusted: strip control sequences
+                    // before it can reach the paint stream. (The raw text
+                    // still goes to the model's own history in core.)
+                    s.text
+                        .push_str(&crate::core::tools::sanitize_display(&delta));
                     let idx = match s.block {
                         Some(idx) => idx,
                         None => {
@@ -1854,12 +1858,13 @@ pub async fn run(
     mut jobs_rx: tokio::sync::mpsc::Receiver<String>,
 ) -> std::io::Result<()> {
     // A panic mid-frame must not strand the shell in raw mode with a hidden
-    // cursor — restore the terminal first, then report as usual.
+    // cursor or kitty keyboard flags — restore the terminal first, then
+    // report as usual. (\x1b[<u pops the keyboard enhancement stack.)
     {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = terminal::disable_raw_mode();
-            print!("\x1b[?2004l\x1b[?25h\r\n");
+            print!("\x1b[<u\x1b[?2004l\x1b[?25h\r\n");
             use std::io::Write as _;
             let _ = std::io::stdout().flush();
             default_hook(info);
@@ -1867,8 +1872,10 @@ pub async fn run(
     }
 
     // Raw mode first: background detection needs the reply un-line-buffered.
+    // The guard exists before any further mode changes, so every exit path —
+    // including `?` returns below — restores all of them.
     terminal::enable_raw_mode()?;
-    let _guard = RawGuard;
+    let _guard = TerminalGuard;
     execute!(
         std::io::stdout(),
         EnableBracketedPaste,
@@ -1876,7 +1883,8 @@ pub async fn run(
         // for shift+enter and multi-line entry is unreachable.
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
-    let detected = crate::tui::background::detect_light().unwrap_or(false);
+    let (detected, typed_during_probe) = crate::tui::background::detect_light();
+    let detected = detected.unwrap_or(false);
     let theme = crate::tui::theme::resolve(&crate::core::config::settings::theme(), detected);
 
     let (mut cols, mut rows) = terminal::size()?;
@@ -1925,6 +1933,14 @@ pub async fn run(
         status_effort: None,
     };
     app.refresh_status_cache();
+    // Keystrokes that landed during the background probe belong in the
+    // composer, not the void.
+    for c in String::from_utf8_lossy(&typed_during_probe)
+        .chars()
+        .filter(|c| !c.is_control())
+    {
+        app.editor.insert(c);
+    }
     app.transcript
         .push(Block::new(Kind::Banner, crate::VERSION));
     for warning in model::config_warnings() {
@@ -2492,15 +2508,7 @@ pub async fn run(
     // Let the final frame land before the terminal is restored.
     painter.shutdown();
     app.host.shutdown().await;
-    let _ = execute!(
-        std::io::stdout(),
-        PopKeyboardEnhancementFlags,
-        DisableBracketedPaste
-    );
     drop(_guard);
-    let mut out = std::io::stdout();
-    write!(out, "\r\n\x1b[?25h")?;
-    out.flush()?;
     if app.relaunch {
         // The terminal is restored and the host is down: replace this
         // process with the updated binary, continuing the same session.
@@ -2521,10 +2529,23 @@ fn arm(app: &mut App) {
     app.overlay = Some("press ctrl+c again to exit".into());
 }
 
-struct RawGuard;
-impl Drop for RawGuard {
+/// Restores every terminal mode the TUI enables — keyboard enhancement
+/// flags, bracketed paste, raw mode, cursor visibility — on every exit
+/// path, `?` returns and unwinds included. Popping a mode that never got
+/// enabled is harmless; leaving one enabled corrupts the user's shell.
+struct TerminalGuard;
+impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = execute!(
+            std::io::stdout(),
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste
+        );
         let _ = terminal::disable_raw_mode();
+        use std::io::Write as _;
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\r\n\x1b[?25h");
+        let _ = out.flush();
     }
 }
 
