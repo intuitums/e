@@ -384,7 +384,8 @@ rl.on("line", (line) => {
 
 /// Two extensions declaring the same string flag must consume the
 /// separated value exactly once — a second declaration must not skip a
-/// following flag. argv is never modified by parsing; the value stays put.
+/// following flag. Typed flags are removed only after every startup hook has
+/// seen raw argv, before core CLI parsing.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn shared_string_flag_consumes_one_value() {
@@ -422,9 +423,9 @@ rl.on("line", (line) => {
         .unwrap()
     {
         StartupAction::Continue(argv) => {
-            // Parsing never modifies argv — the value and following flag
-            // stay untouched.
-            assert_eq!(argv, vec!["--dir", "target", "--plan"]);
+            // Both flags and the separated value are consumed before they can
+            // become core CLI arguments.
+            assert!(argv.is_empty());
         }
         StartupAction::Relaunch { .. } => panic!("no relaunch"),
     }
@@ -491,6 +492,24 @@ rl.on("line", (line) => {
     let r = host.call_tool("peek", "{}").await;
     let seen: serde_json::Value = serde_json::from_str(&r.content).unwrap();
     assert_eq!(seen["hasDry"], false, "absent flag stays absent: {seen}");
+
+    // A tool-only extension has no startup hook to rewrite argv. e must still
+    // remove both typed flags and a separated string value before dispatching
+    // the built-in subcommand or constructing an initial prompt.
+    match host
+        .startup(vec![
+            "ask".into(),
+            "fix this".into(),
+            "--tag".into(),
+            "release".into(),
+            "--dry".into(),
+        ])
+        .await
+        .unwrap()
+    {
+        StartupAction::Continue(argv) => assert_eq!(argv, vec!["ask", "fix this"]),
+        StartupAction::Relaunch { .. } => panic!("unexpected relaunch"),
+    }
     host.shutdown().await;
 }
 

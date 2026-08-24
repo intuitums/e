@@ -389,7 +389,10 @@ impl Agent {
                     },
                 };
 
-                let mut attempt = 0u32;
+                // Total provider requests made for this step, including the
+                // initial request. MAX_ATTEMPTS is a request budget, not a
+                // retry budget.
+                let mut attempt = 1u32;
                 let (mut rx, mut handle) = provider::stream(clone_request(&request));
 
                 let mut text = String::new();
@@ -468,8 +471,9 @@ impl Agent {
                                 && nothing_produced
                                 && attempt < retry::MAX_ATTEMPTS
                             {
+                                let retry_number = attempt;
                                 attempt += 1;
-                                let delay = retry::delay_for(attempt, err.retry_after);
+                                let delay = retry::delay_for(retry_number, err.retry_after);
                                 let _ = events
                                     .send(SessionEvent::Retry {
                                         attempt,

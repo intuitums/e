@@ -492,13 +492,13 @@ async fn retry_recovers_after_a_transient_failure() {
                 ..
             } => {
                 saw_retry = true;
-                assert_eq!(attempt, 1);
+                assert_eq!(attempt, 2);
                 assert_eq!(limit, e::core::agent::retry::MAX_ATTEMPTS);
                 assert_eq!(cause, FailureCause::ProviderUnavailable);
             }
             SessionEvent::Recovered { attempt, limit } => {
                 saw_recovered = true;
-                assert_eq!(attempt, 1);
+                assert_eq!(attempt, 2);
                 assert_eq!(limit, e::core::agent::retry::MAX_ATTEMPTS);
             }
             SessionEvent::TextDelta(d) => text.push_str(&d),
@@ -523,8 +523,8 @@ async fn retry_campaign_gives_up_after_max_attempts() {
     use e::core::agent::{Agent, SessionEvent};
 
     // Every attempt gets a 503 with Retry-After: 0 — near-instant, so the
-    // whole ten-attempt campaign runs in well under a second — proving it
-    // actually stops at the budget instead of retrying forever.
+    // whole ten-request campaign runs in well under a second — proving it
+    // stops at the total request budget instead of retrying forever.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let home = std::env::temp_dir().join(format!("e-test-agent-retry-exhaust-{port}"));
@@ -533,8 +533,8 @@ async fn retry_campaign_gives_up_after_max_attempts() {
     std::env::set_var("E_HOME", &home);
 
     std::thread::spawn(move || {
-        // One initial request plus MAX_ATTEMPTS retries, all 503.
-        for _ in 0..(MAX_ATTEMPTS + 1) {
+        // MAX_ATTEMPTS includes the initial request.
+        for _ in 0..MAX_ATTEMPTS {
             let (mut sock, _) = listener.accept().unwrap();
             let mut buffer = [0u8; 8192];
             let _ = sock.read(&mut buffer);
@@ -571,7 +571,7 @@ async fn retry_campaign_gives_up_after_max_attempts() {
     .await
     .expect("the campaign must give up, not hang");
 
-    assert_eq!(retries, (1..=MAX_ATTEMPTS).collect::<Vec<_>>());
+    assert_eq!(retries, (2..=MAX_ATTEMPTS).collect::<Vec<_>>());
     let message = error_message.expect("exhausted campaign must report an error");
     assert!(
         message.contains(&format!("{MAX_ATTEMPTS}/{MAX_ATTEMPTS}")),
