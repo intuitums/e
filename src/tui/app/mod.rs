@@ -2797,7 +2797,7 @@ mod tests {
         let (agent, _rx) = Agent::new(Model {
             provider: "mock".into(),
             id: "m".into(),
-            base_url: "http://127.0.0.1".into(),
+            base_url: "http://localhost".into(),
             api: crate::core::providers::catalog::Api::Completions,
             efforts: Vec::new(),
             thinking: crate::core::providers::catalog::Thinking::Manual,
