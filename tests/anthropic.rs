@@ -9,6 +9,9 @@ use std::net::TcpListener;
 use e::core::providers::catalog::{Api, Model};
 use e::core::providers::{self, ChatMessage, Event, Request};
 
+// E_HOME is process-global; concurrent tests would race each other's homes.
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn sse(body: &str) -> String {
     format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -19,6 +22,7 @@ fn sse(body: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn anthropic_stream_round_trip() {
+    let _lock = ENV_LOCK.lock().await;
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let home = std::env::temp_dir().join(format!("e-anthropic-{port}"));
@@ -141,6 +145,7 @@ async fn anthropic_stream_round_trip() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn adaptive_models_take_effort_through_output_config_not_budget_tokens() {
+    let _lock = ENV_LOCK.lock().await;
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let home = std::env::temp_dir().join(format!("e-anthropic-adaptive-{port}"));
@@ -219,6 +224,7 @@ async fn adaptive_models_take_effort_through_output_config_not_budget_tokens() {
 /// carries it verbatim at the head of the assistant turn, before tool_use.
 #[tokio::test(flavor = "multi_thread")]
 async fn signed_thinking_blocks_are_captured_and_replayed() {
+    let _lock = ENV_LOCK.lock().await;
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let home = std::env::temp_dir().join(format!("e-anthropic-think-{port}"));

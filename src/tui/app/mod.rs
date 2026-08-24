@@ -57,15 +57,16 @@ enum AppJob {
     /// A line for the transcript (login progress, extension notify…).
     Notice(String),
     /// A prompt an extension command asked to submit as the user.
-    Prompt(String),
+    Prompt { text: String, epoch: u64 },
     /// An input hook's verdict on a submitted line: consume/replace/notice.
     InputVerdict {
         sequence: u64,
         text: String,
         verdict: crate::core::api::InputVerdict,
     },
-    /// An extension named the session (tool or command result).
-    Rename(String),
+    /// An extension named the session (command result). Tagged with the
+    /// session epoch the command started in.
+    Rename { name: String, epoch: u64 },
     /// A finished /compact: the summary and the recent messages kept verbatim.
     Compacted {
         summary: String,
@@ -73,10 +74,12 @@ enum AppJob {
     },
     /// A /compact that didn't produce a summary.
     CompactFailed(String),
-    /// A finished `!` shell command: what ran and what it printed.
+    /// A finished `!` shell command: what ran and what it printed. Tagged
+    /// with the session epoch it started in.
     Shell {
         cmd: String,
         output: crate::core::tools::ToolOutput,
+        epoch: u64,
     },
     /// A /reload finished: the restarted extension host.
     Reloaded(std::sync::Arc<crate::core::api::ExtensionHost>),
@@ -206,6 +209,11 @@ struct App {
     outputs: Vec<(String, String)>,
     /// The ctrl+o full-detail viewer, when open.
     viewer: Option<Viewer>,
+    /// Bumped whenever session identity changes (/new, resume). Async work
+    /// launched in one epoch may not mutate a later one: a late extension
+    /// command or shell result carries the epoch it started in and is
+    /// dropped on mismatch.
+    session_epoch: u64,
     /// A new version is installed on disk; /reload switches to it.
     update_installed: Option<String>,
     /// Exit the loop and exec the (updated) binary with -c.
@@ -375,7 +383,13 @@ impl App {
             MenuItem::new("/version", "show the version", "/version"),
             MenuItem::new("/quit", "exit", "/quit"),
         ];
+        // Built-in dispatch wins name clashes, so a template or extension
+        // command shadowed by a built-in is unreachable — listing it would
+        // show a duplicate row that runs the built-in anyway.
         for template in crate::core::resources::prompts::list(&self.agent.cwd()) {
+            if is_builtin_command(&template.name) {
+                continue;
+            }
             let slash = format!("/{}", template.name);
             let description = if template.argument_hint.is_empty() {
                 template.description.clone()
@@ -385,6 +399,9 @@ impl App {
             items.push(MenuItem::new(&slash, &description, &slash));
         }
         for (name, description) in self.host.commands() {
+            if is_builtin_command(&name) {
+                continue;
+            }
             let slash = format!("/{name}");
             items.push(MenuItem::new(&slash, &description, &slash));
         }
@@ -559,6 +576,10 @@ impl App {
         self.transcript.clear();
         self.transcript
             .push(Block::new(Kind::Banner, crate::VERSION));
+        // The old transcript's shell block index and held prompts die with
+        // it; a still-running `!` command's result is epoch-discarded.
+        self.shell_block = None;
+        self.held_prompts.clear();
         let mut restored_calls = std::collections::HashMap::<String, (usize, u64)>::new();
         let mut restored_id = 0u64;
         for m in &messages {
@@ -621,6 +642,7 @@ impl App {
         // replaces whatever the previous session was called.
         self.agent
             .adopt_session_name(crate::core::session::name_of(&path));
+        self.session_epoch += 1;
         self.notice(format!(
             "resumed {}",
             path.file_name()
@@ -1093,6 +1115,7 @@ impl App {
                 // The name is part of session identity: a fresh session must
                 // not inherit the old one's.
                 self.agent.adopt_session_name(None);
+                self.session_epoch += 1;
                 self.transcript.clear();
                 self.transcript
                     .push(Block::new(Kind::Banner, crate::VERSION));
@@ -1120,16 +1143,17 @@ impl App {
                     let host = self.host.clone();
                     let results = self.results.clone();
                     let (name, args) = (name.to_string(), args.to_string());
+                    let epoch = self.session_epoch;
                     tokio::spawn(async move {
                         let out = host.run_command(&name, &args).await;
                         if let Some(notice) = out.notice {
                             let _ = results.send(AppJob::Notice(notice)).await;
                         }
-                        if let Some(prompt) = out.prompt {
-                            let _ = results.send(AppJob::Prompt(prompt)).await;
+                        if let Some(text) = out.prompt {
+                            let _ = results.send(AppJob::Prompt { text, epoch }).await;
                         }
-                        if let Some(rename) = out.session_name.filter(|n| !n.trim().is_empty()) {
-                            let _ = results.send(AppJob::Rename(rename)).await;
+                        if let Some(name) = out.session_name.filter(|n| !n.trim().is_empty()) {
+                            let _ = results.send(AppJob::Rename { name, epoch }).await;
                         }
                     });
                 } else {
@@ -1175,9 +1199,10 @@ impl App {
     }
 
     fn prompt(&mut self, text: String) {
-        // While compacting or reloading, hold the message; it submits after.
-        if self.compacting || self.reloading {
-            self.transcript.push(Block::new(Kind::User, text.clone()));
+        // While compacting, reloading, or a `!` shell command is running,
+        // hold the message; it submits (and displays) when the block lifts —
+        // a turn must not start without the shell output it was promised.
+        if self.compacting || self.reloading || self.shell_block.is_some() {
             self.held_prompts.push(text);
             return;
         }
@@ -1401,7 +1426,7 @@ impl App {
                 self.notice(format!("warning: {message}"));
             }
             SessionEvent::TurnEnd { aborted } => {
-                self.agent.on_turn_end();
+                let stranded = self.agent.on_turn_end();
                 if aborted {
                     // Every started or serially pending member reaches a
                     // terminal state; no ghost Running row survives Esc.
@@ -1455,6 +1480,17 @@ impl App {
                     let auto = !self.compact_requested;
                     self.compact_requested = false;
                     self.start_compaction(auto);
+                }
+                // A prompt submitted in the gap between the worker's final
+                // pending check and this handler had no worker left to drain
+                // it. Resubmit in order; after Esc, dropping it visibly
+                // beats silently starting a turn the user just stopped.
+                for text in stranded {
+                    if aborted {
+                        self.notice(format!("queued message discarded by Esc: {text}"));
+                    } else {
+                        self.prompt(text);
+                    }
                 }
             }
         }
@@ -1522,6 +1558,7 @@ impl App {
         self.shell_block = Some(self.transcript.blocks.len() - 1);
         let results = self.results.clone();
         let cwd = self.agent.cwd();
+        let epoch = self.session_epoch;
         tokio::spawn(async move {
             let shell_cmd = cmd.clone();
             let output = tokio::task::spawn_blocking(move || {
@@ -1533,7 +1570,7 @@ impl App {
                 outcome: crate::core::tools::ToolOutcome::Failed,
                 summary: "error".into(),
             });
-            let _ = results.send(AppJob::Shell { cmd, output }).await;
+            let _ = results.send(AppJob::Shell { cmd, output, epoch }).await;
         });
     }
 
@@ -1702,6 +1739,30 @@ fn command_arg<'a>(input: &'a str, command: &str) -> Option<&'a str> {
 /// Decide whether a command-line prompt may start now or must wait for the
 /// first-visit trust panel. Kept separate so launch ordering stays testable
 /// without constructing a terminal frame.
+/// Command names dispatch resolves before templates and extension commands.
+/// Keep in sync with `dispatch_command`'s match arms.
+fn is_builtin_command(name: &str) -> bool {
+    matches!(
+        name,
+        "login"
+            | "models"
+            | "model"
+            | "scoped-models"
+            | "reload"
+            | "resume"
+            | "new"
+            | "clear"
+            | "copy"
+            | "compact"
+            | "trust"
+            | "settings"
+            | "help"
+            | "version"
+            | "quit"
+            | "exit"
+    )
+}
+
 fn stage_initial_prompt(
     initial: String,
     awaiting_trust: bool,
@@ -1856,6 +1917,7 @@ pub async fn run(
         reload_block: None,
         outputs: Vec::new(),
         viewer: None,
+        session_epoch: 0,
         update_installed: None,
         relaunch: false,
         light_background: detected,
@@ -1902,15 +1964,34 @@ pub async fn run(
             ));
         }
     }
-    // -c continues this workspace's most recent session.
-    let continue_flag = args.iter().any(|a| a == "-c" || a == "--continue");
-    let resume_flag = args.iter().any(|a| a == "-r" || a == "--resume");
-    let message_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-    let initial: String = message_args
-        .iter()
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
+    // -c continues this workspace's most recent session. Only the flags e
+    // actually knows are removed from the prompt — a word like `-O2` is
+    // prompt content, and `--` ends flag parsing entirely.
+    let mut continue_flag = false;
+    let mut resume_flag = false;
+    let mut message_args: Vec<&str> = Vec::new();
+    let mut past_flags = false;
+    for arg in &args {
+        if !past_flags {
+            match arg.as_str() {
+                "--" => {
+                    past_flags = true;
+                    continue;
+                }
+                "-c" | "--continue" => {
+                    continue_flag = true;
+                    continue;
+                }
+                "-r" | "--resume" => {
+                    resume_flag = true;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        message_args.push(arg);
+    }
+    let initial: String = message_args.join(" ");
     if resume_flag {
         // The reference behavior: launch straight into the session picker.
         app.open_resume_menu();
@@ -2191,7 +2272,18 @@ pub async fn run(
             job = results_rx.recv() => {
                 match job {
                     Some(AppJob::Notice(notice)) => app.notice(notice),
-                    Some(AppJob::Prompt(prompt)) => app.prompt(prompt),
+                    Some(AppJob::Prompt { text, epoch }) => {
+                        // A prompt from a command that started in an earlier
+                        // session must not start a turn in its replacement.
+                        if epoch == app.session_epoch {
+                            app.prompt(text);
+                        } else {
+                            app.notice(
+                                "an extension command finished after the session changed — its prompt was discarded"
+                                    .into(),
+                            );
+                        }
+                    }
                     Some(AppJob::InputVerdict { sequence, text, verdict }) => {
                         // A later hook may finish first; hold it until every
                         // earlier submission has a verdict, then apply the
@@ -2202,9 +2294,13 @@ pub async fn run(
                             app.apply_input_verdict(text, verdict);
                         }
                     }
-                    Some(AppJob::Rename(name)) => {
-                        app.agent.set_session_name(name.clone());
-                        app.notice(format!("session: {name}"));
+                    Some(AppJob::Rename { name, epoch }) => {
+                        // A rename from a command that started in an earlier
+                        // session must not rename its replacement.
+                        if epoch == app.session_epoch {
+                            app.agent.set_session_name(name.clone());
+                            app.notice(format!("session: {name}"));
+                        }
                     }
                     Some(AppJob::Compacted { summary, kept }) => {
                         // Ignore a result that outlived its session (/new won).
@@ -2267,34 +2363,51 @@ pub async fn run(
                             app.prompt(text);
                         }
                     }
-                    Some(AppJob::Shell { cmd, output }) => {
-                        // Display a trimmed tail in the live block; history
-                        // gets the full (tool-truncated) output.
-                        let display_output = crate::core::tools::sanitize_display(&output.content);
-                        let shown: String = {
-                            let lines: Vec<&str> = display_output.lines().collect();
-                            let tail = &lines[lines.len().saturating_sub(20)..];
-                            let mut text = tail.join("\n");
-                            if lines.len() > 20 {
-                                text = format!("… ({} more lines above)\n{text}", lines.len() - 20);
+                    Some(AppJob::Shell { cmd, output, epoch }) => {
+                        // A result from a command started in an earlier
+                        // session must not be recorded into this one.
+                        if epoch != app.session_epoch {
+                            app.notice(format!(
+                                "`{cmd}` finished after the session changed — output discarded"
+                            ));
+                        } else {
+                            // Display a trimmed tail in the live block;
+                            // history gets the full (tool-truncated) output.
+                            let display_output =
+                                crate::core::tools::sanitize_display(&output.content);
+                            let shown: String = {
+                                let lines: Vec<&str> = display_output.lines().collect();
+                                let tail = &lines[lines.len().saturating_sub(20)..];
+                                let mut text = tail.join("\n");
+                                if lines.len() > 20 {
+                                    text = format!(
+                                        "… ({} more lines above)\n{text}",
+                                        lines.len() - 20
+                                    );
+                                }
+                                text
+                            };
+                            if let Some(idx) = app.shell_block.take() {
+                                if let Some(block) = app.transcript.blocks.get_mut(idx) {
+                                    block.done = true;
+                                    block.is_error = output.is_error();
+                                    block.detail = Some(shown);
+                                    block.touch();
+                                }
                             }
-                            text
-                        };
-                        if let Some(idx) = app.shell_block.take() {
-                            if let Some(block) = app.transcript.blocks.get_mut(idx) {
-                                block.done = true;
-                                block.is_error = output.is_error();
-                                block.detail = Some(shown);
-                                block.touch();
+                            if !output.content.trim().is_empty() {
+                                app.remember_output(format!("$ {cmd}"), display_output);
+                            }
+                            app.agent.record_user(format!(
+                                "I ran `{cmd}` in my shell. Output:\n```\n{}\n```",
+                                output.content
+                            ));
+                            // Prompts held for the shell result submit now,
+                            // ordered after it.
+                            for text in std::mem::take(&mut app.held_prompts) {
+                                app.prompt(text);
                             }
                         }
-                        if !output.content.trim().is_empty() {
-                            app.remember_output(format!("$ {cmd}"), display_output);
-                        }
-                        app.agent.record_user(format!(
-                            "I ran `{cmd}` in my shell. Output:\n```\n{}\n```",
-                            output.content
-                        ));
                     }
                     None => {}
                 }

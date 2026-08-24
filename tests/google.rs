@@ -10,6 +10,9 @@ use std::net::TcpListener;
 use e::core::providers::catalog::{Api, Model};
 use e::core::providers::{self, ChatMessage, Event, FinishReason, Request};
 
+// E_HOME is process-global; concurrent tests would race each other's homes.
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn sse(body: &str) -> String {
     format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -32,6 +35,7 @@ fn model(port: u16) -> Model {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn google_stream_round_trip() {
+    let _lock = ENV_LOCK.lock().await;
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let home = std::env::temp_dir().join(format!("e-google-{port}"));
@@ -141,6 +145,7 @@ async fn google_stream_round_trip() {
 /// the dialect must name it instead of finishing normally.
 #[tokio::test(flavor = "multi_thread")]
 async fn google_max_tokens_maps_to_length() {
+    let _lock = ENV_LOCK.lock().await;
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let home = std::env::temp_dir().join(format!("e-google-len-{port}"));

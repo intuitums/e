@@ -769,8 +769,12 @@ impl Agent {
     }
 
     /// Called by the frontend after each TurnEnd so a new turn may start.
-    pub fn on_turn_end(&mut self) {
+    /// Returns any prompts stranded by the shutdown race: submitted after
+    /// the worker's final empty-queue check but before this call, with no
+    /// worker left to drain them. The frontend must resubmit them in order.
+    pub fn on_turn_end(&mut self) -> Vec<String> {
         self.running = false;
+        self.pending.lock().unwrap().drain(..).collect()
     }
 
     pub fn interrupt(&mut self) {
@@ -795,7 +799,22 @@ async fn run_tool(
     events: mpsc::Sender<SessionEvent>,
 ) -> tools::ToolOutput {
     if let Some(h) = host {
-        if let Some(reason) = h.hook_tool_call(name, arguments).await {
+        // The hook chain is bounded per extension, but Esc must not wait out
+        // even one silent hook's timeout: race it against the cancel flag.
+        // Dropping the hook future also drops its pending-map entry.
+        let hook = h.hook_tool_call(name, arguments);
+        tokio::pin!(hook);
+        let blocked = tokio::select! {
+            verdict = &mut hook => verdict,
+            _ = wait_cancelled(&cancel) => {
+                return tools::ToolOutput {
+                    content: "tool cancelled".into(),
+                    outcome: tools::ToolOutcome::Cancelled,
+                    summary: "cancelled".into(),
+                };
+            }
+        };
+        if let Some(reason) = blocked {
             return tools::ToolOutput {
                 content: format!("Tool call blocked by extension: {reason}"),
                 outcome: tools::ToolOutcome::Blocked,

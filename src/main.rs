@@ -91,8 +91,10 @@ e -v, --version"
         return ask(args[1..].join(" "), host).await;
     }
     if args.first().map(String::as_str) == Some("update") {
+        // Every one-shot exit owes extensions their shutdown notification.
         if e::core::update::is_dev_build() {
             println!("this is a dev build (under target/) — update with cargo, not e update");
+            host.shutdown().await;
             return Ok(());
         }
         match e::core::update::self_update().await {
@@ -100,9 +102,11 @@ e -v, --version"
             Ok(None) => println!("e {} is already the latest", e::VERSION),
             Err(err) => {
                 eprintln!("{err}");
+                host.shutdown().await;
                 std::process::exit(1);
             }
         }
+        host.shutdown().await;
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("docs") {
@@ -112,6 +116,7 @@ e -v, --version"
                 Some(text) => println!("{text}"),
                 None => {
                     eprintln!("no such topic: {topic} — run `e docs` for the list");
+                    host.shutdown().await;
                     std::process::exit(2);
                 }
             },
@@ -122,6 +127,7 @@ e -v, --version"
                 }
             }
         }
+        host.shutdown().await;
         return Ok(());
     }
 
@@ -138,6 +144,7 @@ async fn ask(
 ) -> std::io::Result<()> {
     if prompt.trim().is_empty() {
         eprintln!("usage: e ask \"prompt\"");
+        host.shutdown().await;
         std::process::exit(2);
     }
     let tty = e::tui::background::stdout_is_tty();
