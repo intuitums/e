@@ -1,0 +1,10 @@
+{
+	"name": "lmstudio",
+	"display": "LM Studio",
+	"base_url": "http://localhost:1234/v1",
+	"api": "openai-completions",
+	"auth": {
+		"none": true
+	},
+	"models": []
+}

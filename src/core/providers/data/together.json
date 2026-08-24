@@ -1,0 +1,21 @@
+{
+	"name": "together",
+	"display": "Together",
+	"base_url": "https://api.together.xyz/v1",
+	"api": "openai-completions",
+	"auth": {
+		"key": true,
+		"key_env": "TOGETHER_API_KEY",
+		"key_hint": "api.together.xyz/settings/api-keys"
+	},
+	"models": [
+		{
+			"id": "deepseek-ai/DeepSeek-V4-Flash",
+			"context_window": 1000000
+		},
+		{
+			"id": "moonshotai/Kimi-K3-Instruct",
+			"context_window": 1048576
+		}
+	]
+}

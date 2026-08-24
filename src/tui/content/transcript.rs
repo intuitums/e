@@ -100,7 +100,10 @@ impl Block {
     pub fn new(kind: Kind, text: impl Into<String>) -> Self {
         Block {
             kind,
-            text: text.into(),
+            // Block text is source text, not markup: model output, extension
+            // notices, and pasted content must render inert, never smuggle
+            // terminal control sequences into the paint stream.
+            text: crate::core::tools::sanitize_display(&text.into()),
             done: false,
             is_error: false,
             detail: None,
@@ -150,6 +153,11 @@ impl Block {
 
     pub fn finish_tool(&mut self, id: u64, outcome: ToolOutcome, summary: String, content: &str) {
         if let Some(child) = self.tool_children.iter_mut().find(|child| child.id == id) {
+            // A detached task's late result must not resurrect a row Esc
+            // already settled.
+            if child.state == ToolState::Cancelled {
+                return;
+            }
             child.state = match outcome {
                 ToolOutcome::Completed => ToolState::Completed,
                 ToolOutcome::Failed => ToolState::Failed,
@@ -218,12 +226,23 @@ impl Block {
     }
 
     fn lines(&mut self, theme: &Theme, width: usize, blink_on: bool) -> &[String] {
-        let valid = matches!(&self.cache, Some((w, phase, _)) if *w == width && *phase == blink_on);
+        // Only a running tool row renders differently across blink phases.
+        // Pin every other block to one phase so the blink tick can't
+        // invalidate the whole transcript's caches during a turn.
+        let phase = blink_on && self.animates();
+        let valid = matches!(&self.cache, Some((w, p, _)) if *w == width && *p == phase);
         if !valid {
-            let lines = self.render(theme, width, blink_on);
-            self.cache = Some((width, blink_on, lines));
+            let lines = self.render(theme, width, phase);
+            self.cache = Some((width, phase, lines));
         }
         &self.cache.as_ref().unwrap().2
+    }
+
+    /// Whether this block's rendering depends on the blink phase.
+    fn animates(&self) -> bool {
+        self.tool_children
+            .iter()
+            .any(|child| child.state == ToolState::Running)
     }
 
     fn render(&self, theme: &Theme, width: usize, blink_on: bool) -> Vec<String> {
@@ -599,5 +618,54 @@ impl Transcript {
             prev = Some(kind);
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn theme() -> Theme {
+        crate::tui::theme::load_bundled(false).unwrap()
+    }
+
+    /// The blink phase must not invalidate finished blocks: during a turn the
+    /// tick flips the phase twice a second, and re-rendering the whole
+    /// transcript's markdown on each flip is what made streaming lag.
+    #[test]
+    fn blink_flip_keeps_static_block_cache() {
+        let theme = theme();
+        let mut block = Block::new(Kind::Assistant, "some **finished** reply");
+        block.lines(&theme, 80, true);
+        let cached = block.cache.as_ref().unwrap().2.as_ptr();
+        block.lines(&theme, 80, false);
+        assert_eq!(
+            block.cache.as_ref().unwrap().2.as_ptr(),
+            cached,
+            "a blink flip re-rendered a block with no running tool"
+        );
+    }
+
+    /// A running tool row genuinely blinks, so its block must re-render
+    /// across phases — and settle again once the tool finishes.
+    #[test]
+    fn running_tool_block_animates_until_done() {
+        let theme = theme();
+        let mut block = Block::tool_group(vec![ToolChild::pending(
+            1,
+            "command".into(),
+            "Running".into(),
+            "Ran".into(),
+            "true".into(),
+        )]);
+        block.start_tool(1);
+        let on = block.lines(&theme, 80, true).to_vec();
+        let off = block.lines(&theme, 80, false).to_vec();
+        assert_ne!(on, off, "a running tool row must blink");
+        block.finish_tool(1, ToolOutcome::Completed, "done".into(), "");
+        block.lines(&theme, 80, true);
+        let cached = block.cache.as_ref().unwrap().2.as_ptr();
+        block.lines(&theme, 80, false);
+        assert_eq!(block.cache.as_ref().unwrap().2.as_ptr(), cached);
     }
 }

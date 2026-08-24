@@ -6,9 +6,14 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
+use std::sync::Mutex;
+
 use e::core::agent::Agent;
-use e::core::provider::catalog::{Api, Model};
-use e::core::provider::{ChatMessage, ToolCall};
+use e::core::providers::catalog::{Api, Model};
+use e::core::providers::{ChatMessage, ToolCall};
+
+// E_HOME and the process cwd are global; serialize the tests that set them.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn sse(body: &str) -> String {
     format!(
@@ -18,8 +23,13 @@ fn sse(body: &str) -> String {
     )
 }
 
+// The env lock is deliberately held across the summarize await: E_HOME and
+// the cwd must stay ours for the whole test, and each tokio test gets its
+// own runtime.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn compact_summarizes_and_seeds_a_fresh_session() {
+    let _env = ENV_LOCK.lock().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let home = std::env::temp_dir().join(format!("e-compact-{port}"));
@@ -52,7 +62,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 200_000,
     };
 
@@ -65,6 +75,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
                 id: "c1".into(),
                 name: "read".into(),
                 arguments: "{\"path\":\"parser.rs\"}".into(),
+                signature: None,
             }],
         ),
         ChatMessage::tool_result("c1", &long_tool_output),
@@ -131,12 +142,13 @@ fn split_spares_small_histories() {
 
 #[test]
 fn split_never_cuts_at_a_tool_result() {
-    // Big old turn, then a recent turn whose tool result sits right where a
-    // naive cut would land: the cut must move past it to a non-tool message.
+    // The keep-budget overrun lands exactly on a recent tool result: the cut
+    // must move past it — a result always follows its call — to the next
+    // non-tool message, leaving the result summarized away with its turn.
     let big = "y".repeat(85_000); // ~21k estimated tokens
     let history = vec![
         ChatMessage::user("old work"),
-        ChatMessage::assistant(&big, Vec::new()),
+        ChatMessage::assistant("earlier reply", Vec::new()),
         ChatMessage::user("new task"),
         ChatMessage::assistant(
             "",
@@ -144,18 +156,154 @@ fn split_never_cuts_at_a_tool_result() {
                 id: "c1".into(),
                 name: "read".into(),
                 arguments: "{}".into(),
+                signature: None,
             }],
         ),
-        ChatMessage::tool_result("c1", "contents"),
+        ChatMessage::tool_result("c1", &big),
         ChatMessage::assistant("done", Vec::new()),
     ];
     let (to_summarize, kept) = e::core::agent::compact::split(&history);
-    assert!(!to_summarize.is_empty(), "the big turn must be summarized");
-    assert_ne!(kept[0].role, "tool", "cut landed on a tool result");
-    // The kept tail is intact and in order.
-    let roles: Vec<&str> = kept.iter().map(|m| m.role.as_str()).collect();
-    assert!(roles
-        .windows(2)
-        .all(|w| !(w[1] == "tool" && w[0] == "user")));
-    assert_eq!(kept.last().unwrap().content, "done");
+    assert_eq!(
+        kept.len(),
+        1,
+        "the cut skipped the tool result to the next non-tool message"
+    );
+    assert_eq!(kept[0].content, "done");
+    assert_eq!(to_summarize.len(), 5);
+}
+
+#[test]
+fn split_never_separates_signed_thinking_from_its_assistant_turn() {
+    // The keep-budget overrun lands exactly on the assistant turn that follows
+    // a signed thinking block. Cutting there replays the block's absence as an
+    // unsigned history — Anthropic rejects the request. The cut must move past
+    // the pair instead, leaving both sides together.
+    let big_args = "y".repeat(85_000); // ~21k estimated tokens
+    let history = vec![
+        ChatMessage::user("old work"),
+        ChatMessage::assistant("earlier reply", Vec::new()),
+        ChatMessage::user("new task"),
+        ChatMessage {
+            role: "reasoning".into(),
+            content: r#"{"type":"thinking","thinking":"hmm","signature":"sig"}"#.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_meta: None,
+        },
+        ChatMessage::assistant(
+            "",
+            vec![ToolCall {
+                id: "c1".into(),
+                name: "read".into(),
+                arguments: big_args,
+                signature: None,
+            }],
+        ),
+        ChatMessage::tool_result("c1", "ok"),
+        ChatMessage::assistant("done", Vec::new()),
+    ];
+    let (to_summarize, kept) = e::core::agent::compact::split(&history);
+    // A cut happened, and the signed block stayed with its turn: either both
+    // were summarized away or both remain in the kept tail, adjacent.
+    let reasoning_kept = kept.iter().any(|m| m.role == "reasoning");
+    let turn_kept = kept
+        .iter()
+        .any(|m| m.tool_calls.iter().any(|c| c.id == "c1"));
+    assert_eq!(
+        reasoning_kept, turn_kept,
+        "the cut separated the signed thinking block from its assistant turn"
+    );
+    if reasoning_kept {
+        let r = kept.iter().position(|m| m.role == "reasoning").unwrap();
+        let t = kept
+            .iter()
+            .position(|m| m.tool_calls.iter().any(|c| c.id == "c1"))
+            .unwrap();
+        assert_eq!(t, r + 1, "reasoning and its turn must stay adjacent");
+    }
+    assert!(to_summarize.len() >= 3, "the old turns were summarized");
+}
+
+#[test]
+fn failed_fresh_log_keeps_the_old_session_attached() {
+    // When the compaction seed's fresh log cannot be created (read-only
+    // sessions dir), the old log must stay attached: later turns append to
+    // the complete pre-compaction file instead of a new file holding only an
+    // unanchored tail, and memory still moves to the compacted state.
+    use std::os::unix::fs::PermissionsExt;
+    let _env = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("e-loadcompact-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+    let ws = std::env::temp_dir().join(format!("e-loadcompact-ws-{}", std::process::id()));
+    std::fs::create_dir_all(&ws).unwrap();
+    let ws = ws.canonicalize().unwrap();
+    std::env::set_current_dir(&ws).unwrap();
+
+    let model = Model {
+        provider: "mock".into(),
+        id: "m".into(),
+        base_url: "http://127.0.0.1:1".into(),
+        api: Api::Completions,
+        efforts: Vec::new(),
+        thinking: e::core::providers::catalog::Thinking::Manual,
+        context_window: 200_000,
+    };
+
+    // An old session with history, attached the way a resumed session is.
+    let mut old = e::core::session::Session::create(&ws, "m").unwrap();
+    let old_path = old.path().to_path_buf();
+    old.append(&ChatMessage::user("original work")).unwrap();
+    let (agent, _rx) = Agent::new(model);
+    agent.set_session(Some(old));
+
+    // Make the workspace's session directory unwritable so the fresh log's
+    // create fails (the parent stays readable so create_dir_all still passes).
+    let sessions = home.join("sessions");
+    let slug_dir = old_path.parent().unwrap();
+    let before = std::fs::metadata(slug_dir).unwrap().permissions();
+    std::fs::set_permissions(slug_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    agent.load_compacted("Goal: continue.", vec![ChatMessage::user("recent turn")]);
+
+    // Memory moved to the compacted state regardless.
+    let h = agent.history_snapshot();
+    assert_eq!(h.len(), 2);
+    assert!(h[0].content.contains("Goal: continue."));
+    assert_eq!(h[1].content, "recent turn");
+
+    // No second session log appeared.
+    let logs: Vec<_> = walk(&sessions)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+        .collect();
+    assert_eq!(logs.len(), 1, "a fresh log was created despite the failure");
+
+    // And later turns land in the old, complete log — not a headless tail.
+    agent.record_user("after compact".into());
+    let logged = std::fs::read_to_string(&old_path).unwrap();
+    assert!(logged.contains("original work"));
+    assert!(
+        logged.contains("after compact"),
+        "post-compaction turns must join the pre-compaction file"
+    );
+
+    std::fs::set_permissions(slug_dir, before).unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// Every file under `dir`, any depth — small trees only.
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
 }

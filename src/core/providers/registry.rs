@@ -1,5 +1,5 @@
 //! The provider registry: providers are data, dialects are code — the
-//! reference architecture. Each file in `providers/` declares one provider:
+//! reference architecture. Each file in `data/` declares one provider:
 //! its gateway, dialect, auth surface (which OAuth flow and/or which API-key
 //! env var), and seed models with per-model compat (context window, effort
 //! support). Adding an API-key provider is a data edit; only a bespoke OAuth
@@ -37,6 +37,10 @@ pub struct Auth {
     pub key_env: Option<String>,
     #[serde(default)]
     pub key_hint: String,
+    /// No credential at all — a local backend (Ollama, LM Studio) that
+    /// accepts any bearer. Such providers count as signed in always.
+    #[serde(default)]
+    pub none: bool,
 }
 
 #[derive(Deserialize)]
@@ -69,13 +73,23 @@ pub fn all() -> &'static [Provider] {
     static REGISTRY: OnceLock<Vec<Provider>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
         [
-            include_str!("providers/opencode-go.json"),
-            include_str!("providers/opencode-zen.json"),
-            include_str!("providers/openai-codex.json"),
-            include_str!("providers/xai.json"),
-            include_str!("providers/openai.json"),
-            include_str!("providers/anthropic.json"),
-            include_str!("providers/vercel.json"),
+            include_str!("data/opencode-go.json"),
+            include_str!("data/opencode-zen.json"),
+            include_str!("data/openai-codex.json"),
+            include_str!("data/xai.json"),
+            include_str!("data/openai.json"),
+            include_str!("data/anthropic.json"),
+            include_str!("data/vercel.json"),
+            include_str!("data/google.json"),
+            include_str!("data/groq.json"),
+            include_str!("data/mistral.json"),
+            include_str!("data/deepseek.json"),
+            include_str!("data/cerebras.json"),
+            include_str!("data/openrouter.json"),
+            include_str!("data/together.json"),
+            include_str!("data/fireworks.json"),
+            include_str!("data/ollama.json"),
+            include_str!("data/lmstudio.json"),
         ]
         .iter()
         .map(|json| {

@@ -92,6 +92,12 @@ fn custom_prompt() -> Option<String> {
     settings.system_prompt.filter(|p| !p.trim().is_empty())
 }
 
+/// The system prompt for the process's current directory — the entry point
+/// for frontends that don't carry a cwd of their own.
+pub fn system_prompt_here() -> String {
+    system_prompt(&std::env::current_dir().unwrap_or_default())
+}
+
 pub fn system_prompt(cwd: &Path) -> String {
     let mut prompt = custom_prompt().unwrap_or_else(default_base);
 

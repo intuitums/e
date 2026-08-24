@@ -38,6 +38,9 @@ pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
         return err("read: missing path".into());
     };
     let full = resolve(cwd, path);
+    if let Err(output) = super::require_regular_file(&full, "read", path) {
+        return output;
+    }
     let text = match std::fs::read_to_string(&full) {
         Ok(t) => t,
         Err(e) => return err(format!("read {path}: {e}")),
@@ -72,6 +75,12 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
     };
     let content = args["content"].as_str().unwrap_or("");
     let full = resolve(cwd, path);
+    if let Err(output) = super::require_regular_file(&full, "write", path) {
+        return output;
+    }
+    // Same per-path lock as edit: a concurrent edit's read-modify-write
+    // must not interleave with this overwrite.
+    let _guard = super::fs_write_lock(&full);
     let before = std::fs::read_to_string(&full).unwrap_or_default();
     if let Some(parent) = full.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -167,7 +176,13 @@ pub fn grep(args: &Value, cwd: &Path) -> ToolOutput {
     let root = resolve(cwd, args["path"].as_str().unwrap_or("."));
     let mut hits = Vec::new();
     let mut count = 0usize;
-    walk(&root, cwd, &re, &mut hits, &mut count);
+    if root.is_dir() {
+        walk(&root, cwd, &re, &mut hits, &mut count);
+    } else {
+        // An explicitly requested file is searched as asked — the dotfile
+        // skip rule is a traversal heuristic, not a veto over `.env`.
+        search_file(&root, cwd, &re, &mut hits, &mut count);
+    }
     if hits.is_empty() {
         return ok(String::new(), "0 matches".into());
     }
@@ -179,13 +194,9 @@ fn walk(dir: &Path, cwd: &Path, re: &regex::Regex, hits: &mut Vec<String>, count
     if *count >= 200 {
         return;
     }
-    let entries = if dir.is_dir() {
-        match std::fs::read_dir(dir) {
-            Ok(e) => e.flatten().map(|e| e.path()).collect::<Vec<_>>(),
-            Err(_) => return,
-        }
-    } else {
-        vec![dir.to_path_buf()]
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e.flatten().map(|e| e.path()).collect::<Vec<_>>(),
+        Err(_) => return,
     };
     for path in entries {
         if *count >= 200 {
@@ -200,20 +211,36 @@ fn walk(dir: &Path, cwd: &Path, re: &regex::Regex, hits: &mut Vec<String>, count
         }
         if path.is_dir() {
             walk(&path, cwd, re, hits, count);
-        } else if let Ok(text) = std::fs::read_to_string(&path) {
-            let rel = path
-                .strip_prefix(cwd)
-                .unwrap_or(&path)
-                .display()
-                .to_string();
-            for (n, line) in text.lines().enumerate() {
-                if re.is_match(line) {
-                    hits.push(format!("{rel}:{}: {}", n + 1, line.trim()));
-                    *count += 1;
-                    if *count >= 200 {
-                        return;
-                    }
-                }
+        } else {
+            search_file(&path, cwd, re, hits, count);
+        }
+    }
+}
+
+fn search_file(
+    path: &Path,
+    cwd: &Path,
+    re: &regex::Regex,
+    hits: &mut Vec<String>,
+    count: &mut usize,
+) {
+    // Only regular files: a FIFO in the tree would block the walk forever.
+    if !std::fs::metadata(path)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let rel = path.strip_prefix(cwd).unwrap_or(path).display().to_string();
+    for (n, line) in text.lines().enumerate() {
+        if re.is_match(line) {
+            hits.push(format!("{rel}:{}: {}", n + 1, line.trim()));
+            *count += 1;
+            if *count >= 200 {
+                return;
             }
         }
     }

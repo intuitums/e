@@ -3,8 +3,8 @@
 use std::sync::Mutex;
 
 use e::core::agent::Agent;
-use e::core::provider::catalog::{Api, Model};
-use e::core::provider::ChatMessage;
+use e::core::providers::catalog::{Api, Model};
+use e::core::providers::ChatMessage;
 use e::core::session::{self, Session};
 
 // E_HOME is process-global, so tests that replace it must not overlap.
@@ -22,14 +22,17 @@ fn session_round_trips_and_lists() {
     std::fs::create_dir_all(&cwd).unwrap();
 
     let mut s = Session::create(&cwd, "opencode-go/deepseek-v4-flash").unwrap();
-    s.append(&ChatMessage::user("count the files here please"));
-    s.append(&ChatMessage::assistant("There are three.", Vec::new()));
+    s.append(&ChatMessage::user("count the files here please"))
+        .unwrap();
+    s.append(&ChatMessage::assistant("There are three.", Vec::new()))
+        .unwrap();
     s.append(&ChatMessage::tool_result_with_meta(
         "call-1",
         "line one\nline two",
         e::core::tools::ToolOutcome::Failed,
         "exit 7",
-    ));
+    ))
+    .unwrap();
     let path = s.path().to_path_buf();
     drop(s);
 
@@ -70,7 +73,7 @@ fn opening_e_does_not_count_as_a_session() {
         base_url: "http://127.0.0.1:1".into(),
         api: Api::Completions,
         efforts: Vec::new(),
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 1_000,
     };
     let (_agent, _events) = Agent::new(model);
@@ -90,12 +93,16 @@ fn opening_e_does_not_count_as_a_session() {
     assert_eq!(session::most_recent(&cwd), None);
 
     let mut session = Session::reopen(&path).unwrap();
-    session.append(&ChatMessage::assistant("unsolicited", Vec::new()));
+    session
+        .append(&ChatMessage::assistant("unsolicited", Vec::new()))
+        .unwrap();
     drop(session);
     assert!(session::list(&cwd).is_empty());
 
     let mut session = Session::reopen(&path).unwrap();
-    session.append(&ChatMessage::user("now this is a session"));
+    session
+        .append(&ChatMessage::user("now this is a session"))
+        .unwrap();
     drop(session);
     let listed = session::list(&cwd);
     assert_eq!(listed.len(), 1);
@@ -130,7 +137,9 @@ fn path_separator_and_hyphen_do_not_collide() {
     std::fs::create_dir_all(&second).unwrap();
 
     let mut saved = Session::create(&first, "test/model").unwrap();
-    saved.append(&ChatMessage::user("first workspace only"));
+    saved
+        .append(&ChatMessage::user("first workspace only"))
+        .unwrap();
     drop(saved);
 
     assert_eq!(session::list(&first).len(), 1);
@@ -211,7 +220,9 @@ fn session_keys_preserve_non_utf8_path_bytes() {
         .join(std::ffi::OsString::from_vec(b"project-\xff".to_vec()));
     std::fs::create_dir_all(&cwd).unwrap();
     let mut saved = Session::create(&cwd, "test/model").unwrap();
-    saved.append(&ChatMessage::user("non utf8 workspace"));
+    saved
+        .append(&ChatMessage::user("non utf8 workspace"))
+        .unwrap();
     drop(saved);
 
     assert_eq!(session::list(&cwd).len(), 1);
@@ -233,7 +244,7 @@ fn a_session_open_in_one_place_cannot_be_appended_to_from_another() {
     std::fs::create_dir_all(&cwd).unwrap();
 
     let mut owner = Session::create(&cwd, "test/model").unwrap();
-    owner.append(&ChatMessage::user("owned here"));
+    owner.append(&ChatMessage::user("owned here")).unwrap();
     let path = owner.path().to_path_buf();
 
     let second = Session::reopen(&path).err().unwrap();
@@ -246,7 +257,7 @@ fn a_session_open_in_one_place_cannot_be_appended_to_from_another() {
     // Releasing the first Session releases the lock.
     drop(owner);
     let mut resumed = Session::reopen(&path).unwrap();
-    resumed.append(&ChatMessage::user("back in"));
+    resumed.append(&ChatMessage::user("back in")).unwrap();
     drop(resumed);
     assert_eq!(Session::load(&path).unwrap().len(), 2);
 
@@ -303,8 +314,9 @@ fn a_corrupted_record_is_surfaced_not_silently_dropped() {
     std::fs::create_dir_all(&cwd).unwrap();
 
     let mut s = Session::create(&cwd, "test/model").unwrap();
-    s.append(&ChatMessage::user("first"));
-    s.append(&ChatMessage::assistant("second", Vec::new()));
+    s.append(&ChatMessage::user("first")).unwrap();
+    s.append(&ChatMessage::assistant("second", Vec::new()))
+        .unwrap();
     let path = s.path().to_path_buf();
     drop(s);
 
@@ -328,4 +340,64 @@ fn a_corrupted_record_is_surfaced_not_silently_dropped() {
     assert!(session::list(&cwd).is_empty());
 
     let _ = std::fs::remove_dir_all(home);
+}
+
+/// A session that cannot be created must say so — once per failure episode,
+/// not per message, and not never.
+#[tokio::test(flavor = "multi_thread")]
+async fn persistence_failure_warns_once_not_silently() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    // E_HOME pointing at a regular file makes every session create fail.
+    let blocked = std::env::temp_dir().join(format!("e-blocked-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&blocked);
+    let _ = std::fs::remove_file(&blocked);
+    std::fs::write(&blocked, "not a directory").unwrap();
+    std::env::set_var("E_HOME", &blocked);
+
+    let model = Model {
+        provider: "mock".into(),
+        id: "m".into(),
+        base_url: "http://127.0.0.1:1".into(),
+        api: Api::Completions,
+        efforts: Vec::new(),
+        thinking: e::core::providers::catalog::Thinking::Manual,
+        context_window: 200_000,
+    };
+    let (agent, mut rx) = Agent::new(model);
+    agent.record_user("first".into());
+    agent.record_user("second".into());
+
+    let mut warnings = 0;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, e::core::agent::SessionEvent::Warning(_)) {
+            warnings += 1;
+        }
+    }
+    assert_eq!(warnings, 1, "one warning per failure episode");
+    // The in-memory conversation still advanced.
+    assert_eq!(agent.history_snapshot().len(), 2);
+    let _ = std::fs::remove_file(&blocked);
+}
+
+/// The persisted name is part of session identity: it must be readable back
+/// for resume, and the latest entry wins.
+#[test]
+fn the_latest_persisted_name_is_readable_for_resume() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("e-name-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+    let cwd = std::env::temp_dir().join("e-name-proj");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut s = Session::create(&cwd, "mock/m").unwrap();
+    s.append(&ChatMessage::user("hello")).unwrap();
+    s.set_name("alpha").unwrap();
+    s.set_name("beta").unwrap();
+    let path = s.path().to_path_buf();
+    drop(s);
+
+    assert_eq!(session::name_of(&path).as_deref(), Some("beta"));
+    let _ = std::fs::remove_dir_all(&home);
 }

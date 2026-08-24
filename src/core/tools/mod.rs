@@ -252,6 +252,61 @@ fn sanitize_inline(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Serializes the mutating filesystem tools' read-modify-write windows per
+/// canonical path. Batch members run concurrently; without this, two edits
+/// to one file both read the original and the last whole-file write
+/// silently erases the other's change while both report success. Per-path
+/// (not one global lock) so unrelated files never wait on each other and a
+/// tool stalled on one path (dead NFS mount, Esc-detached task) can wedge
+/// only that path, not every future edit and write in the process.
+static FS_WRITE_HELD: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+static FS_WRITE_FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+struct PathWriteGuard {
+    key: PathBuf,
+}
+
+impl Drop for PathWriteGuard {
+    fn drop(&mut self) {
+        let mut held = FS_WRITE_HELD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        held.retain(|p| p != &self.key);
+        FS_WRITE_FREED.notify_all();
+    }
+}
+
+fn fs_write_lock(path: &Path) -> PathWriteGuard {
+    // Canonicalize so relative, absolute, and symlinked spellings of one
+    // file contend on one key; a not-yet-existing file keeps its given path.
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut held = FS_WRITE_HELD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while held.contains(&key) {
+        held = FS_WRITE_FREED
+            .wait(held)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    held.push(key.clone());
+    PathWriteGuard { key }
+}
+
+/// Text-file tools only operate on regular files: a FIFO or device would
+/// block `read_to_string` forever with Esc inert (issue: a `read` on a
+/// writerless named pipe hangs the turn). Missing files pass — the caller's
+/// own open reports the real error.
+fn require_regular_file(path: &Path, tool: &str, shown: &str) -> Result<(), ToolOutput> {
+    match std::fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => Err(ToolOutput {
+            content: format!("{tool} {shown}: not a regular file"),
+            outcome: ToolOutcome::Failed,
+            summary: "error".into(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// Resolve a possibly-relative path against the workspace root.
 fn resolve(cwd: &Path, p: &str) -> PathBuf {
     let path = Path::new(p);

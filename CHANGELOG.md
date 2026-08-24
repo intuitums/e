@@ -8,6 +8,69 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- Bugbot review fixes: a failed session-name write at log creation no longer
+  discards the freshly created session (the next commit would open a
+  different file and strand in-memory history); compaction's keep-cut no
+  longer separates an Anthropic signed thinking block from the assistant
+  turn it precedes; and Google's live model refresh speaks the Gemini
+  dialect (`x-goog-api-key`, `models[].name`) instead of an OpenAI-shaped
+  `/models`, so signed-in Google users see more than the seed ids. A failed
+  compaction-seed write now keeps the old session log attached instead of
+  detaching first, so a crash resumes into the complete pre-compaction
+  conversation rather than a fresh file holding only an unanchored tail.
+
+- The audit backlog's five remaining epics are fixed:
+  - *Sessions* — persistence failures (unwritable home, full disk) surface
+    as a visible warning instead of silently losing history; /new and
+    /resume are refused while a turn is running; a `-r` launch prompt
+    waits for the session pick; the session name travels with session
+    identity (cleared on /new, restored on resume); and the status line
+    shows the live session name and queued prompt count.
+  - *Providers* — Anthropic signed thinking blocks replay on tool loops;
+    a body transport failure before output retries like a 503; usage
+    reports the inclusive prompt total, ending premature auto-compaction
+    on cached turns.
+  - *Tools* — parallel edits to one file can no longer erase each other
+    while both claim success; FIFOs and other non-regular files fail fast
+    instead of hanging the turn with Esc inert; live bash output survives
+    UTF-8 split across pipe reads; grep searches an explicitly requested
+    dotfile.
+  - *Extensions* — a child that stops reading stdin can't wedge hooks or
+    quit; failed handshakes can't leave orphans; one-shot CLI paths send
+    shutdown; duplicate tool names are rejected visibly; late command and
+    shell results are discarded when the session changed under them;
+    prompts queue behind a running `!` command and survive the TurnEnd
+    race in order.
+  - *TUI* — model output and extension notices render inert (no terminal
+    control injection); one guard restores every terminal mode on every
+    exit path; width math is display columns end to end (CJK, emoji);
+    overlong tokens wrap instead of vanishing; the composer draws exactly
+    one cursor; paste placeholders retire on submit; and keystrokes typed
+    during the startup background probe reach the composer.
+
+- Streaming no longer lags or hangs the TUI. The blink tick stops
+  invalidating finished blocks' render caches (only a running tool row
+  actually blinks), the statusline's sign-in and effort state is cached
+  instead of read from disk every frame, painting moved to a dedicated
+  thread with latest-wins coalescing so a slow terminal can't stall input
+  handling, session events are drained in batches under a 33ms frame
+  budget, and the OSC-11 background probe runs once at startup instead of
+  blocking the loop on every theme change.
+
+- Truncated, refused, or filtered replies are no longer silent successes:
+  every dialect maps its stop/finish reason, the agent surfaces abnormal
+  endings as visible warnings, and malformed SSE payloads are counted and
+  reported instead of being dropped.
+
+- Provider coverage: a native Gemini dialect (thought-signature replay on
+  tool loops, thinking levels, safety/limit finishes), eight new API-key
+  providers as data — Google, Groq, Mistral, DeepSeek, Cerebras,
+  OpenRouter, Together, Fireworks — and keyless local backends (Ollama,
+  LM Studio) whose models appear whenever the local server is running.
+
+- The provider module is reorganized as `providers/{api,data}`: wire
+  dialects under `api/`, provider definitions under `data/`.
+
 - Audit fixes: session directories now use collision-resistant workspace keys
   while safely discovering legacy logs; provider SSE parsing preserves UTF-8
   across arbitrary byte chunks; live-discovered models inherit their

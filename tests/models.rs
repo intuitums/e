@@ -10,19 +10,19 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// Registry env keys leak real sign-ins into signed-out assertions when the
 /// developer's shell exports them — clear them for this process.
 fn clear_env_keys() {
-    for provider in e::core::provider::registry::all() {
+    for provider in e::core::providers::registry::all() {
         if let Some(env) = &provider.auth.key_env {
             std::env::remove_var(env);
         }
     }
 }
 
-fn with_models_json(json: &str) -> Vec<e::core::provider::catalog::Model> {
+fn with_models_json(json: &str) -> Vec<e::core::providers::catalog::Model> {
     let dir = std::env::temp_dir().join(format!("e-models-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("models.json"), json).unwrap();
     std::env::set_var("E_HOME", &dir);
-    let catalog = e::core::provider::catalog::catalog();
+    let catalog = e::core::providers::catalog::catalog();
     let _ = std::fs::remove_dir_all(&dir);
     catalog
 }
@@ -100,7 +100,7 @@ fn trust_gates_project_instructions() {
 fn xai_builtins_carry_their_real_windows() {
     let _lock = ENV_LOCK.lock().unwrap();
     std::env::set_var("E_HOME", std::env::temp_dir().join("e-models-none"));
-    let catalog = e::core::provider::catalog::catalog();
+    let catalog = e::core::providers::catalog::catalog();
     let find = |id: &str| {
         catalog
             .iter()
@@ -114,10 +114,13 @@ fn xai_builtins_carry_their_real_windows() {
         "grok-build-0.1 was culled from the built-ins"
     );
     assert_eq!(find("grok-4.6").base_url, "https://api.x.ai/v1");
-    assert_eq!(e::core::provider::catalog::display_name("xai"), "xAI");
-    assert_eq!(e::core::provider::catalog::display_name("openai"), "OpenAI");
+    assert_eq!(e::core::providers::catalog::display_name("xai"), "xAI");
     assert_eq!(
-        e::core::provider::catalog::display_name("anthropic"),
+        e::core::providers::catalog::display_name("openai"),
+        "OpenAI"
+    );
+    assert_eq!(
+        e::core::providers::catalog::display_name("anthropic"),
         "Anthropic"
     );
     let anthropic = catalog
@@ -127,7 +130,7 @@ fn xai_builtins_carry_their_real_windows() {
     assert_eq!(anthropic.context_window, 1_000_000);
     assert!(matches!(
         anthropic.api,
-        e::core::provider::catalog::Api::Anthropic
+        e::core::providers::catalog::Api::Anthropic
     ));
     let openai = catalog
         .iter()
@@ -136,18 +139,18 @@ fn xai_builtins_carry_their_real_windows() {
     assert_eq!(openai.context_window, 1_050_000);
     assert!(matches!(
         openai.api,
-        e::core::provider::catalog::Api::Responses
+        e::core::providers::catalog::Api::Responses
     ));
     assert_eq!(
-        e::core::provider::catalog::display_name("opencode-go"),
+        e::core::providers::catalog::display_name("opencode-go"),
         "OpenCode Go"
     );
     assert_eq!(
-        e::core::provider::catalog::display_name("openai-codex"),
+        e::core::providers::catalog::display_name("openai-codex"),
         "OpenAI Codex"
     );
     assert_eq!(
-        e::core::provider::catalog::display_name("vercel"),
+        e::core::providers::catalog::display_name("vercel"),
         "Vercel AI Gateway"
     );
     let sonnet = catalog
@@ -157,10 +160,10 @@ fn xai_builtins_carry_their_real_windows() {
     assert_eq!(sonnet.base_url, "https://ai-gateway.vercel.sh/v1");
     assert!(matches!(
         sonnet.api,
-        e::core::provider::catalog::Api::Completions
+        e::core::providers::catalog::Api::Completions
     ));
     assert_eq!(
-        e::core::provider::catalog::slug(sonnet),
+        e::core::providers::catalog::slug(sonnet),
         "vercel/anthropic/claude-sonnet-5"
     );
 }
@@ -174,15 +177,15 @@ fn only_signed_in_providers_are_available() {
     std::env::set_var("E_HOME", &dir);
 
     // Signed out: nothing is available and nothing resolves.
-    assert!(e::core::provider::catalog::available().is_empty());
-    assert!(e::core::provider::catalog::resolve("grok-4.6").is_none());
+    assert!(e::core::providers::catalog::available().is_empty());
+    assert!(e::core::providers::catalog::resolve("grok-4.6").is_none());
 
     // Anthropic only: claude models appear, everyone else stays hidden.
     std::fs::write(dir.join("auth.json"), r#"{"anthropic":{"key":"k"}}"#).unwrap();
-    let available = e::core::provider::catalog::available();
+    let available = e::core::providers::catalog::available();
     assert!(available.iter().all(|m| m.provider == "anthropic"));
-    assert!(e::core::provider::catalog::resolve("claude-fable-5").is_some());
-    assert!(e::core::provider::catalog::resolve("grok-4.6").is_none());
+    assert!(e::core::providers::catalog::resolve("claude-fable-5").is_some());
+    assert!(e::core::providers::catalog::resolve("grok-4.6").is_none());
 
     // A configured model whose provider is signed out falls back to an
     // available one instead of sticking.
@@ -192,7 +195,7 @@ fn only_signed_in_providers_are_available() {
     )
     .unwrap();
     assert_eq!(
-        e::core::provider::catalog::default_model().provider,
+        e::core::providers::catalog::default_model().provider,
         "anthropic"
     );
 
@@ -214,19 +217,19 @@ fn cycle_pool_follows_the_scope() {
 
     // No scope: the pool is everything available.
     assert_eq!(
-        e::core::provider::catalog::cycle_pool().len(),
-        e::core::provider::catalog::available().len()
+        e::core::providers::catalog::cycle_pool().len(),
+        e::core::providers::catalog::available().len()
     );
 
     // A scope narrows the pool — and unavailable entries are ignored.
-    e::core::provider::catalog::set_scope(&[
+    e::core::providers::catalog::set_scope(&[
         "anthropic/claude-fable-5".into(),
         "xai/grok-4.6".into(),
         "openai/gpt-5.5".into(), // openai is not signed in
     ]);
-    let pool: Vec<String> = e::core::provider::catalog::cycle_pool()
+    let pool: Vec<String> = e::core::providers::catalog::cycle_pool()
         .iter()
-        .map(e::core::provider::catalog::slug)
+        .map(e::core::providers::catalog::slug)
         .collect();
     assert_eq!(pool, vec!["xai/grok-4.6", "anthropic/claude-fable-5"]);
 
@@ -249,7 +252,7 @@ fn every_docs_topic_has_a_body() {
 fn zen_and_go_are_distinct_providers() {
     let _lock = ENV_LOCK.lock().unwrap();
     std::env::set_var("E_HOME", std::env::temp_dir().join("e-models-none2"));
-    let catalog = e::core::provider::catalog::catalog();
+    let catalog = e::core::providers::catalog::catalog();
     let go = catalog
         .iter()
         .find(|m| m.provider == "opencode-go")
@@ -261,11 +264,11 @@ fn zen_and_go_are_distinct_providers() {
     assert_eq!(go.base_url, "https://opencode.ai/zen/go/v1");
     assert_eq!(zen.base_url, "https://opencode.ai/zen/v1");
     assert_eq!(
-        e::core::provider::catalog::display_name("opencode-zen"),
+        e::core::providers::catalog::display_name("opencode-zen"),
         "OpenCode Zen"
     );
     assert_eq!(
-        e::core::provider::catalog::display_name("opencode-go"),
+        e::core::providers::catalog::display_name("opencode-go"),
         "OpenCode Go"
     );
 }
@@ -277,7 +280,7 @@ fn legacy_opencode_auth_keys_still_sign_in() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::env::set_var("E_HOME", &dir);
-    for provider in e::core::provider::registry::all() {
+    for provider in e::core::providers::registry::all() {
         if let Some(env) = &provider.auth.key_env {
             std::env::remove_var(env);
         }
@@ -290,7 +293,7 @@ fn legacy_opencode_auth_keys_still_sign_in() {
         matches!(auth.get("opencode-zen"), Some(e::core::auth::Credential::ApiKey { key }) if key == "sk-old"),
         "legacy key not honored"
     );
-    assert!(e::core::provider::catalog::available()
+    assert!(e::core::providers::catalog::available()
         .iter()
         .any(|m| m.provider == "opencode-zen"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -342,13 +345,13 @@ async fn provider_reported_models_appear_without_a_release() {
     )
     .unwrap();
 
-    e::core::provider::catalog::refresh_remote().await;
+    e::core::providers::catalog::refresh_remote().await;
     let sent = server.join().unwrap();
     assert!(sent.contains("GET /models"));
     assert!(sent.contains("Bearer sk-live") || sent.contains("bearer sk-live"));
 
     // The unheard-of model is now in the catalog — and available.
-    let catalog = e::core::provider::catalog::catalog();
+    let catalog = e::core::providers::catalog::catalog();
     let fresh = catalog
         .iter()
         .find(|m| m.provider == "mock" && m.id == "brand-new-model")
@@ -357,7 +360,7 @@ async fn provider_reported_models_appear_without_a_release() {
     assert_eq!(fresh.context_window, 64_000);
     // A discovered id speaks the provider's declared wire dialect instead of
     // silently falling back to chat completions.
-    assert_eq!(fresh.api, e::core::provider::catalog::Api::Anthropic);
+    assert_eq!(fresh.api, e::core::providers::catalog::Api::Anthropic);
     // And the report wins over what e already lists: "small" was declared
     // without a window (the 200K default) — the gateway's 123456 replaces it.
     let known = catalog
@@ -377,28 +380,35 @@ async fn provider_reported_models_appear_without_a_release() {
         .find(|m| m.provider == "mock" && m.id == "typed-chat")
         .expect("language type is kept");
     assert_eq!(typed.context_window, 8_000);
-    let available = e::core::provider::catalog::available();
+    let available = e::core::providers::catalog::available();
     assert!(available.iter().any(|m| m.id == "brand-new-model"));
 
     // A fresh cache is not refetched within the window.
-    e::core::provider::catalog::refresh_remote().await; // would hang/panic if it re-hit the dead server
+    e::core::providers::catalog::refresh_remote().await; // would hang/panic if it re-hit the dead server
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn the_registry_is_coherent() {
-    use e::core::provider::registry;
+    use e::core::providers::registry;
     let all = registry::all();
-    assert!(all.len() >= 6);
+    assert!(all.len() >= 17);
     for provider in all {
         assert!(
             !provider.display.is_empty(),
             "{} has no display name",
             provider.name
         );
-        assert!(provider.base_url.starts_with("https://"));
+        // Remote backends speak TLS; only keyless local backends may not.
         assert!(
-            provider.auth.oauth.is_some() || provider.auth.key,
+            provider.base_url.starts_with("https://")
+                || (provider.auth.none && provider.base_url.starts_with("http://localhost")),
+            "{}: suspicious base_url {}",
+            provider.name,
+            provider.base_url
+        );
+        assert!(
+            provider.auth.oauth.is_some() || provider.auth.key || provider.auth.none,
             "{} has no way to sign in",
             provider.name
         );
@@ -409,16 +419,28 @@ fn the_registry_is_coherent() {
                 provider.name
             );
         }
+        // Local backends discover their models live; everyone else ships seeds.
+        assert!(
+            provider.auth.none || !provider.models.is_empty(),
+            "{} has no seed models",
+            provider.name
+        );
     }
-    // The panels' contents, from data: two account flows, six key providers.
+    // The panels' contents, from data: two account flows, fourteen key
+    // providers (the keyless locals appear in neither panel).
     assert_eq!(registry::oauth_providers().len(), 2);
-    assert_eq!(registry::key_providers().len(), 6);
+    assert_eq!(registry::key_providers().len(), 14);
     let vercel = registry::find("vercel").expect("vercel is a built-in");
     assert_eq!(vercel.display, "Vercel AI Gateway");
     assert_eq!(vercel.base_url, "https://ai-gateway.vercel.sh/v1");
     assert_eq!(vercel.auth.key_env.as_deref(), Some("AI_GATEWAY_API_KEY"));
     assert!(vercel.auth.oauth.is_none(), "gateway is API-key only");
     assert!(vercel.auth.key);
+    let google = registry::find("google").expect("google is a built-in");
+    assert_eq!(google.api(), e::core::providers::catalog::Api::Google);
+    assert_eq!(google.auth.key_env.as_deref(), Some("GEMINI_API_KEY"));
+    let ollama = registry::find("ollama").expect("ollama is a built-in");
+    assert!(ollama.auth.none && !ollama.auth.key);
 }
 
 #[test]
@@ -431,15 +453,15 @@ fn env_var_keys_sign_a_provider_in() {
     // No provider may sign in through the ambient environment — clear every
     // key_env the registry declares, or a dev box with OPENAI_API_KEY set
     // fails the emptiness assert below.
-    for provider in e::core::provider::registry::all() {
+    for provider in e::core::providers::registry::all() {
         if let Some(env) = &provider.auth.key_env {
             std::env::remove_var(env);
         }
     }
 
-    assert!(e::core::provider::catalog::available().is_empty());
+    assert!(e::core::providers::catalog::available().is_empty());
     std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-env");
-    let available = e::core::provider::catalog::available();
+    let available = e::core::providers::catalog::available();
     assert!(available.iter().any(|m| m.provider == "anthropic"));
     // auth.json still wins over the environment.
     std::fs::write(dir.join("auth.json"), r#"{"anthropic":{"key":"sk-file"}}"#).unwrap();
@@ -461,13 +483,36 @@ fn vercel_env_key_signs_the_gateway_in() {
     std::env::set_var("E_HOME", &dir);
     clear_env_keys();
 
-    assert!(e::core::provider::catalog::available().is_empty());
+    assert!(e::core::providers::catalog::available().is_empty());
     std::env::set_var("AI_GATEWAY_API_KEY", "vck-test");
-    let available = e::core::provider::catalog::available();
+    let available = e::core::providers::catalog::available();
     assert!(available.iter().all(|m| m.provider == "vercel"));
-    assert!(e::core::provider::catalog::resolve("anthropic/claude-sonnet-5").is_some());
-    assert!(e::core::provider::catalog::resolve("vercel/anthropic/claude-sonnet-5").is_some());
+    assert!(e::core::providers::catalog::resolve("anthropic/claude-sonnet-5").is_some());
+    assert!(e::core::providers::catalog::resolve("vercel/anthropic/claude-sonnet-5").is_some());
     std::env::remove_var("AI_GATEWAY_API_KEY");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Keyless local backends (Ollama, LM Studio) count as signed in with no
+/// stored credential and no env var — but never as phantom `auth::load()`
+/// entries, so first-run onboarding still sees an empty credential file.
+/// Their models come solely from the live /models refresh, so with no
+/// server running they contribute nothing to the catalog.
+#[test]
+fn keyless_local_providers_are_signed_in_without_credentials() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("e-keyless-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+    clear_env_keys();
+
+    let auth = e::core::auth::load();
+    assert!(auth.is_empty(), "no phantom credentials for keyless locals");
+    assert!(e::core::auth::signed_in(&auth, "ollama"));
+    assert!(e::core::auth::signed_in(&auth, "lmstudio"));
+    assert!(!e::core::auth::signed_in(&auth, "anthropic"));
+    assert!(e::core::providers::catalog::available().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -491,7 +536,7 @@ fn a_partial_builtin_override_inherits_transport_not_global_defaults() {
     );
     assert_eq!(
         model.api,
-        e::core::provider::catalog::Api::Anthropic,
+        e::core::providers::catalog::Api::Anthropic,
         "partial override must keep the built-in dialect"
     );
     assert_eq!(model.context_window, 123_456, "the correction itself lands");
@@ -520,7 +565,7 @@ fn partial_override_keeps_declared_windows_and_efforts() {
 fn current_anthropic_builtins_are_adaptive_haiku_is_manual() {
     let _lock = ENV_LOCK.lock().unwrap();
     clear_env_keys();
-    let catalog = e::core::provider::catalog::catalog();
+    let catalog = e::core::providers::catalog::catalog();
     let thinking = |id: &str| {
         catalog
             .iter()
@@ -528,7 +573,7 @@ fn current_anthropic_builtins_are_adaptive_haiku_is_manual() {
             .unwrap_or_else(|| panic!("{id} missing from the built-in catalog"))
             .thinking
     };
-    use e::core::provider::catalog::Thinking::*;
+    use e::core::providers::catalog::Thinking::*;
     for id in [
         "claude-fable-5",
         "claude-opus-5",
@@ -553,7 +598,7 @@ fn a_partial_override_inherits_the_builtins_thinking_mode() {
     assert_eq!(sonnet.context_window, 12345);
     assert_eq!(
         sonnet.thinking,
-        e::core::provider::catalog::Thinking::Adaptive,
+        e::core::providers::catalog::Thinking::Adaptive,
         "correcting one field must not swap the thinking wire shape"
     );
 }
@@ -571,7 +616,7 @@ fn a_custom_provider_without_base_url_is_rejected_with_a_warning() {
     )
     .unwrap();
 
-    let catalog = e::core::provider::catalog::catalog();
+    let catalog = e::core::providers::catalog::catalog();
     assert!(
         !catalog
             .iter()
@@ -579,7 +624,7 @@ fn a_custom_provider_without_base_url_is_rejected_with_a_warning() {
         "a provider with no endpoint must not inherit an unrelated host"
     );
     assert_eq!(
-        e::core::provider::catalog::config_warnings(),
+        e::core::providers::catalog::config_warnings(),
         vec!["models.json: provider custom requires an explicit base_url"]
     );
 
@@ -641,4 +686,74 @@ fn legacy_utf8_trust_keys_remain_readable() {
     );
 
     let _ = std::fs::remove_dir_all(&home);
+}
+
+// Google's live list is its own dialect: same `/models` path, but
+// `x-goog-api-key` auth and a `models[].name` payload. The overlay must speak
+// it — otherwise signed-in Google users only ever see the seed ids.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn google_model_refresh_speaks_the_gemini_dialect() {
+    use std::io::{Read, Write};
+    let _lock = ENV_LOCK.lock().unwrap();
+    clear_env_keys();
+    let dir = std::env::temp_dir().join(format!("e-google-live-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut a, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let n = a.read(&mut buf).unwrap();
+        let sent = String::from_utf8_lossy(&buf[..n]).to_string();
+        let body = r#"{"models":[
+            {"name":"models/gemini-fresh-pro","supportedGenerationMethods":["generateContent"],"inputTokenLimit":1048576},
+            {"name":"models/gemini-text-embedding","supportedGenerationMethods":["embedContent"]},
+            {"name":"models/veo-video","supportedGenerationMethods":["predictLongRunning"]}
+        ]}"#;
+        let _ = a.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        sent
+    });
+
+    std::fs::write(dir.join("auth.json"), r#"{"google":{"key":"AIza-test"}}"#).unwrap();
+    // Every google id rides the mock: refresh_remote dedupes to one base_url
+    // per provider — the first catalog entry's — so leaving any builtin on
+    // the real endpoint would send the probe there instead of here.
+    std::fs::write(
+        dir.join("models.json"),
+        format!(r#"{{"providers":{{"google":{{"base_url":"http://127.0.0.1:{port}","api":"google-generative-ai","models":["gemini-3-pro","gemini-3-flash","gemini-fresh-pro"]}}}}}}"#),
+    )
+    .unwrap();
+
+    e::core::providers::catalog::refresh_remote().await;
+    let sent = server.join().unwrap();
+    assert!(sent.contains("GET /models"));
+    assert!(
+        sent.contains("x-goog-api-key: AIza-test"),
+        "Google's list endpoint takes the key header, not a bearer token"
+    );
+
+    let catalog = e::core::providers::catalog::catalog();
+    let fresh = catalog
+        .iter()
+        .find(|m| m.provider == "google" && m.id == "gemini-fresh-pro")
+        .expect("the `models[].name` payload applies to the catalog");
+    // The reported input limit wins for the window.
+    assert_eq!(fresh.context_window, 1_048_576);
+    // The `models/` prefix is stripped — requests want the bare id.
+    assert_eq!(fresh.api, e::core::providers::catalog::Api::Google);
+    // Embeddings and video generation stay out of the picker.
+    assert!(!catalog
+        .iter()
+        .any(|m| m.provider == "google" && (m.id.contains("embedding") || m.id.contains("veo"))));
+    let _ = std::fs::remove_dir_all(&dir);
 }

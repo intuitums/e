@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 
 use crate::core::agent::{Agent, SessionEvent};
 use crate::core::output::{format_duration, format_tokens};
-use crate::core::provider::catalog::{self as model, Model};
+use crate::core::providers::catalog::{self as model, Model};
 use crate::tui::authpanel::{self, AuthStage};
 use crate::tui::composer::{Editor, EditorResult, Key};
 use crate::tui::menu::{Menu, MenuItem, MenuKind, HINT_SCOPED, HINT_USE};
-use crate::tui::screen::Screen;
+use crate::tui::screen::Painter;
 use crate::tui::statusline::{
     statusline, RecoveredStatus, RetryStatus, StatusData, Turn, TurnPhase, RECOVERED_VISIBLE_MS,
 };
@@ -57,26 +57,29 @@ enum AppJob {
     /// A line for the transcript (login progress, extension notify…).
     Notice(String),
     /// A prompt an extension command asked to submit as the user.
-    Prompt(String),
+    Prompt { text: String, epoch: u64 },
     /// An input hook's verdict on a submitted line: consume/replace/notice.
     InputVerdict {
         sequence: u64,
         text: String,
         verdict: crate::core::api::InputVerdict,
     },
-    /// An extension named the session (tool or command result).
-    Rename(String),
+    /// An extension named the session (command result). Tagged with the
+    /// session epoch the command started in.
+    Rename { name: String, epoch: u64 },
     /// A finished /compact: the summary and the recent messages kept verbatim.
     Compacted {
         summary: String,
-        kept: Vec<crate::core::provider::ChatMessage>,
+        kept: Vec<crate::core::providers::ChatMessage>,
     },
     /// A /compact that didn't produce a summary.
     CompactFailed(String),
-    /// A finished `!` shell command: what ran and what it printed.
+    /// A finished `!` shell command: what ran and what it printed. Tagged
+    /// with the session epoch it started in.
     Shell {
         cmd: String,
         output: crate::core::tools::ToolOutput,
+        epoch: u64,
     },
     /// A /reload finished: the restarted extension host.
     Reloaded(std::sync::Arc<crate::core::api::ExtensionHost>),
@@ -206,10 +209,25 @@ struct App {
     outputs: Vec<(String, String)>,
     /// The ctrl+o full-detail viewer, when open.
     viewer: Option<Viewer>,
+    /// Bumped whenever session identity changes (/new, resume). Async work
+    /// launched in one epoch may not mutate a later one: a late extension
+    /// command or shell result carries the epoch it started in and is
+    /// dropped on mismatch.
+    session_epoch: u64,
     /// A new version is installed on disk; /reload switches to it.
     update_installed: Option<String>,
     /// Exit the loop and exec the (updated) binary with -c.
     relaunch: bool,
+    /// OSC-11 background detection, probed once at startup before the
+    /// event stream owns stdin. Re-probing mid-session would block the
+    /// loop and swallow keystrokes, so a changed terminal background
+    /// applies on restart.
+    light_background: bool,
+    /// Cached statusline inputs. Deriving them reads `~/.e/auth.json` and
+    /// `~/.e/settings.json`; doing that per frame stalls streaming, so
+    /// they refresh only via `refresh_status_cache`.
+    signed_in: bool,
+    status_effort: Option<String>,
 }
 
 impl App {
@@ -308,13 +326,13 @@ impl App {
         let percent = ((self.context_tokens.saturating_mul(100)) / window).min(100) as u8;
         // Nothing is signed in for the current model — it's a bootstrap
         // placeholder, not something the user chose, so don't show it.
-        let signed_in = crate::core::auth::load().contains_key(&self.agent.model.provider);
+        let signed_in = self.signed_in;
         let data = StatusData {
             model: signed_in.then(|| self.agent.model_slug()),
-            effort: signed_in.then(|| self.agent.effort()).flatten(),
-            session_name: None,
+            effort: signed_in.then(|| self.status_effort.clone()).flatten(),
+            session_name: self.agent.session_name(),
             context_percent: Some(percent),
-            queued: 0,
+            queued: self.agent.queued_count() + self.held_prompts.len(),
         };
         let hint = self
             .settings
@@ -365,7 +383,13 @@ impl App {
             MenuItem::new("/version", "show the version", "/version"),
             MenuItem::new("/quit", "exit", "/quit"),
         ];
+        // Built-in dispatch wins name clashes, so a template or extension
+        // command shadowed by a built-in is unreachable — listing it would
+        // show a duplicate row that runs the built-in anyway.
         for template in crate::core::resources::prompts::list(&self.agent.cwd()) {
+            if is_builtin_command(&template.name) {
+                continue;
+            }
             let slash = format!("/{}", template.name);
             let description = if template.argument_hint.is_empty() {
                 template.description.clone()
@@ -375,6 +399,9 @@ impl App {
             items.push(MenuItem::new(&slash, &description, &slash));
         }
         for (name, description) in self.host.commands() {
+            if is_builtin_command(&name) {
+                continue;
+            }
             let slash = format!("/{name}");
             items.push(MenuItem::new(&slash, &description, &slash));
         }
@@ -482,9 +509,14 @@ impl App {
         };
         persist_model(&pool[next]);
         self.agent.model = pool[next].clone();
+        self.refresh_status_cache();
     }
 
     fn open_resume_menu(&mut self) {
+        if self.active.is_some() {
+            self.notice("a turn is running — press Esc to stop it, then /resume".into());
+            return;
+        }
         let cwd = self.agent.cwd();
         let items: Vec<MenuItem> = crate::core::session::list(&cwd)
             .into_iter()
@@ -518,10 +550,18 @@ impl App {
     }
 
     fn resume_path(&mut self, path: std::path::PathBuf) {
+        // The picker can already be open when a turn starts (queued prompt);
+        // re-check here so a selection can never splice a running turn's
+        // output into the resumed session.
+        if self.active.is_some() {
+            self.notice("a turn is running — press Esc to stop it, then resume".into());
+            return;
+        }
         let messages = match crate::core::session::Session::load(&path) {
             Ok(m) => m,
             Err(e) => {
                 self.notice(format!("could not open session: {e}"));
+                self.release_initial_prompt();
                 return;
             }
         };
@@ -531,12 +571,21 @@ impl App {
             Ok(s) => s,
             Err(e) => {
                 self.notice(format!("could not resume session: {e}"));
+                self.release_initial_prompt();
                 return;
             }
         };
         self.transcript.clear();
         self.transcript
             .push(Block::new(Kind::Banner, crate::VERSION));
+        // The old transcript's shell block index and held prompts die with
+        // it; a still-running `!` command's result is epoch-discarded, and a
+        // /compact still summarizing the old session must not land its swap
+        // on the resumed one.
+        self.shell_block = None;
+        self.held_prompts.clear();
+        self.compacting = false;
+        self.compact_requested = false;
         let mut restored_calls = std::collections::HashMap::<String, (usize, u64)>::new();
         let mut restored_id = 0u64;
         for m in &messages {
@@ -595,12 +644,22 @@ impl App {
         }
         self.agent.load_history(messages);
         self.agent.set_session(Some(session));
+        // Identity travels together: the resumed log's persisted name
+        // replaces whatever the previous session was called.
+        self.agent
+            .adopt_session_name(crate::core::session::name_of(&path));
+        self.session_epoch += 1;
         self.notice(format!(
             "resumed {}",
             path.file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default()
         ));
+        // A -r launch prompt waits for this selection; deliver it against
+        // the loaded history.
+        if let Some(initial) = self.pending_initial.take() {
+            self.submit(initial);
+        }
     }
 
     fn open_settings(&mut self) {
@@ -616,7 +675,7 @@ impl App {
         // the open picker when the answer lands.
         let results = self.results.clone();
         tokio::spawn(async move {
-            crate::core::provider::catalog::refresh_remote_within(60_000).await;
+            crate::core::providers::catalog::refresh_remote_within(60_000).await;
             let _ = results.send(AppJob::CatalogRefreshed).await;
         });
         self.build_model_menu();
@@ -723,7 +782,7 @@ impl App {
     /// A subscription picked on the account panel — the registry names the
     /// flow; this just dispatches it.
     fn auth_account(&mut self, selected: usize) {
-        let providers = crate::core::provider::registry::oauth_providers();
+        let providers = crate::core::providers::registry::oauth_providers();
         let Some(provider) = providers.get(selected) else {
             return;
         };
@@ -737,7 +796,7 @@ impl App {
 
     /// A provider picked on the API-key panel.
     fn auth_key(&mut self, selected: usize) {
-        let providers = crate::core::provider::registry::key_providers();
+        let providers = crate::core::providers::registry::key_providers();
         let Some(provider) = providers.get(selected) else {
             return;
         };
@@ -885,6 +944,7 @@ impl App {
                     persist_model(&found);
                     self.notice(format!("model set to {}", model::slug(&found)));
                     self.agent.model = found;
+                    self.refresh_status_cache();
                 }
             }
         }
@@ -1021,6 +1081,7 @@ impl App {
                 persist_model(&found);
                 self.notice(format!("model set to {}", model::slug(&found)));
                 self.agent.model = found;
+                self.refresh_status_cache();
             } else {
                 self.notice(format!(
                     "no available model matches {query:?} — sign in to its provider with /login"
@@ -1043,6 +1104,12 @@ impl App {
                 self.notice(help);
             }
             "/new" | "/clear" => {
+                // A running turn owns the history and session log; replacing
+                // them mid-turn would commit its reply into the wrong session.
+                if self.active.is_some() {
+                    self.notice("a turn is running — press Esc to stop it, then /new".into());
+                    return;
+                }
                 self.compacting = false;
                 self.compact_requested = false;
                 self.held_prompts.clear();
@@ -1051,6 +1118,10 @@ impl App {
                 self.context_tokens = 0;
                 self.agent.clear();
                 self.agent.set_session(None);
+                // The name is part of session identity: a fresh session must
+                // not inherit the old one's.
+                self.agent.adopt_session_name(None);
+                self.session_epoch += 1;
                 self.transcript.clear();
                 self.transcript
                     .push(Block::new(Kind::Banner, crate::VERSION));
@@ -1078,16 +1149,17 @@ impl App {
                     let host = self.host.clone();
                     let results = self.results.clone();
                     let (name, args) = (name.to_string(), args.to_string());
+                    let epoch = self.session_epoch;
                     tokio::spawn(async move {
                         let out = host.run_command(&name, &args).await;
                         if let Some(notice) = out.notice {
                             let _ = results.send(AppJob::Notice(notice)).await;
                         }
-                        if let Some(prompt) = out.prompt {
-                            let _ = results.send(AppJob::Prompt(prompt)).await;
+                        if let Some(text) = out.prompt {
+                            let _ = results.send(AppJob::Prompt { text, epoch }).await;
                         }
-                        if let Some(rename) = out.session_name.filter(|n| !n.trim().is_empty()) {
-                            let _ = results.send(AppJob::Rename(rename)).await;
+                        if let Some(name) = out.session_name.filter(|n| !n.trim().is_empty()) {
+                            let _ = results.send(AppJob::Rename { name, epoch }).await;
                         }
                     });
                 } else {
@@ -1107,7 +1179,7 @@ impl App {
             return;
         }
         let flow =
-            crate::core::provider::registry::find(&provider).and_then(|p| p.auth.oauth.clone());
+            crate::core::providers::registry::find(&provider).and_then(|p| p.auth.oauth.clone());
         if flow.as_deref() == Some("codex") {
             self.notice(format!(
                 "starting the {} sign-in…",
@@ -1132,10 +1204,23 @@ impl App {
         }
     }
 
+    /// Deliver a held -r launch prompt into the current session — the pick
+    /// it was waiting for fell through (declined, or the resume failed), and
+    /// stranding it would silently drop typed text. The trust question, if
+    /// still open, keeps holding it.
+    fn release_initial_prompt(&mut self) {
+        if self.trust.is_none() {
+            if let Some(initial) = self.pending_initial.take() {
+                self.submit(initial);
+            }
+        }
+    }
+
     fn prompt(&mut self, text: String) {
-        // While compacting or reloading, hold the message; it submits after.
-        if self.compacting || self.reloading {
-            self.transcript.push(Block::new(Kind::User, text.clone()));
+        // While compacting, reloading, or a `!` shell command is running,
+        // hold the message; it submits (and displays) when the block lifts —
+        // a turn must not start without the shell output it was promised.
+        if self.compacting || self.reloading || self.shell_block.is_some() {
             self.held_prompts.push(text);
             return;
         }
@@ -1187,7 +1272,11 @@ impl App {
                 if let Some(s) = &mut self.active {
                     s.turn.phase = TurnPhase::AssistantText;
                     s.turn.note_text(&delta);
-                    s.text.push_str(&delta);
+                    // Model output is untrusted: strip control sequences
+                    // before it can reach the paint stream. (The raw text
+                    // still goes to the model's own history in core.)
+                    s.text
+                        .push_str(&crate::core::tools::sanitize_display(&delta));
                     let idx = match s.block {
                         Some(idx) => idx,
                         None => {
@@ -1296,17 +1385,20 @@ impl App {
             SessionEvent::Usage {
                 input,
                 output,
-                cache_read,
+                cache_read: _,
             } => {
-                self.context_tokens = input + cache_read + output;
+                // `input` is the inclusive prompt total per the Usage
+                // contract — adding the cached subset again would double
+                // count and trigger compaction early.
+                self.context_tokens = input + output;
                 if let Some(s) = &mut self.active {
                     // The seed estimate holds the counters until the first
                     // real usage lands; from then on, accumulate per step.
                     if s.usage_seen {
-                        s.turn.input += input + cache_read;
+                        s.turn.input += input;
                         s.turn.output += output;
                     } else {
-                        s.turn.input = input + cache_read;
+                        s.turn.input = input;
                         s.turn.output = output;
                         s.usage_seen = true;
                     }
@@ -1352,8 +1444,11 @@ impl App {
                     self.notice(format!("error: {message}"));
                 }
             }
+            SessionEvent::Warning(message) => {
+                self.notice(format!("warning: {message}"));
+            }
             SessionEvent::TurnEnd { aborted } => {
-                self.agent.on_turn_end();
+                let stranded = self.agent.on_turn_end();
                 if aborted {
                     // Every started or serially pending member reaches a
                     // terminal state; no ghost Running row survives Esc.
@@ -1407,6 +1502,17 @@ impl App {
                     let auto = !self.compact_requested;
                     self.compact_requested = false;
                     self.start_compaction(auto);
+                }
+                // A prompt submitted in the gap between the worker's final
+                // pending check and this handler had no worker left to drain
+                // it. Resubmit in order; after Esc, dropping it visibly
+                // beats silently starting a turn the user just stopped.
+                for text in stranded {
+                    if aborted {
+                        self.notice(format!("queued message discarded by Esc: {text}"));
+                    } else {
+                        self.prompt(text);
+                    }
                 }
             }
         }
@@ -1474,6 +1580,7 @@ impl App {
         self.shell_block = Some(self.transcript.blocks.len() - 1);
         let results = self.results.clone();
         let cwd = self.agent.cwd();
+        let epoch = self.session_epoch;
         tokio::spawn(async move {
             let shell_cmd = cmd.clone();
             let output = tokio::task::spawn_blocking(move || {
@@ -1485,7 +1592,7 @@ impl App {
                 outcome: crate::core::tools::ToolOutcome::Failed,
                 summary: "error".into(),
             });
-            let _ = results.send(AppJob::Shell { cmd, output }).await;
+            let _ = results.send(AppJob::Shell { cmd, output, epoch }).await;
         });
     }
 
@@ -1565,11 +1672,22 @@ impl App {
         }
     }
 
-    /// Reload the theme from settings (auto detects the terminal).
+    /// Reload the theme from settings, using the startup background probe.
     fn apply_theme(&mut self) {
-        let detected = crate::tui::background::detect_light().unwrap_or(false);
-        self.theme = crate::tui::theme::resolve(&crate::core::config::settings::theme(), detected);
+        self.theme = crate::tui::theme::resolve(
+            &crate::core::config::settings::theme(),
+            self.light_background,
+        );
         self.transcript.invalidate();
+    }
+
+    /// Re-derive the cached sign-in and effort state from disk. Call after
+    /// anything that can change them: sign-in, model switch, effort cycle,
+    /// settings changes, /reload.
+    fn refresh_status_cache(&mut self) {
+        self.signed_in =
+            crate::core::auth::signed_in(&crate::core::auth::load(), &self.agent.model.provider);
+        self.status_effort = self.agent.effort();
     }
 
     fn notice(&mut self, text: String) {
@@ -1624,9 +1742,8 @@ fn ago(ms: u64) -> String {
     }
 }
 
-pub fn system_prompt() -> String {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    crate::core::agent::context::system_prompt(&cwd)
+fn system_prompt() -> String {
+    crate::core::agent::context::system_prompt_here()
 }
 
 fn persist_model(m: &Model) {
@@ -1645,6 +1762,30 @@ fn command_arg<'a>(input: &'a str, command: &str) -> Option<&'a str> {
 /// Decide whether a command-line prompt may start now or must wait for the
 /// first-visit trust panel. Kept separate so launch ordering stays testable
 /// without constructing a terminal frame.
+/// Command names dispatch resolves before templates and extension commands.
+/// Keep in sync with `dispatch_command`'s match arms.
+fn is_builtin_command(name: &str) -> bool {
+    matches!(
+        name,
+        "login"
+            | "models"
+            | "model"
+            | "scoped-models"
+            | "reload"
+            | "resume"
+            | "new"
+            | "clear"
+            | "copy"
+            | "compact"
+            | "trust"
+            | "settings"
+            | "help"
+            | "version"
+            | "quit"
+            | "exit"
+    )
+}
+
 fn stage_initial_prompt(
     initial: String,
     awaiting_trust: bool,
@@ -1736,12 +1877,13 @@ pub async fn run(
     mut jobs_rx: tokio::sync::mpsc::Receiver<String>,
 ) -> std::io::Result<()> {
     // A panic mid-frame must not strand the shell in raw mode with a hidden
-    // cursor — restore the terminal first, then report as usual.
+    // cursor or kitty keyboard flags — restore the terminal first, then
+    // report as usual. (\x1b[<u pops the keyboard enhancement stack.)
     {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = terminal::disable_raw_mode();
-            print!("\x1b[?2004l\x1b[?25h\r\n");
+            print!("\x1b[<u\x1b[?2004l\x1b[?25h\r\n");
             use std::io::Write as _;
             let _ = std::io::stdout().flush();
             default_hook(info);
@@ -1749,8 +1891,10 @@ pub async fn run(
     }
 
     // Raw mode first: background detection needs the reply un-line-buffered.
+    // The guard exists before any further mode changes, so every exit path —
+    // including `?` returns below — restores all of them.
     terminal::enable_raw_mode()?;
-    let _guard = RawGuard;
+    let _guard = TerminalGuard;
     execute!(
         std::io::stdout(),
         EnableBracketedPaste,
@@ -1758,11 +1902,12 @@ pub async fn run(
         // for shift+enter and multi-line entry is unreachable.
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
-    let detected = crate::tui::background::detect_light().unwrap_or(false);
+    let (detected, typed_during_probe) = crate::tui::background::detect_light();
+    let detected = detected.unwrap_or(false);
     let theme = crate::tui::theme::resolve(&crate::core::config::settings::theme(), detected);
 
-    let (cols, rows) = terminal::size()?;
-    let mut screen = Screen::new(cols, rows);
+    let (mut cols, mut rows) = terminal::size()?;
+    let mut painter = Painter::spawn(cols, rows);
     let (mut agent, mut session_events) = Agent::new(model::default_model());
     let (logins_tx, mut logins_rx) =
         tokio::sync::mpsc::channel::<crate::core::auth::login::Outcome>(4);
@@ -1799,9 +1944,22 @@ pub async fn run(
         reload_block: None,
         outputs: Vec::new(),
         viewer: None,
+        session_epoch: 0,
         update_installed: None,
         relaunch: false,
+        light_background: detected,
+        signed_in: false,
+        status_effort: None,
     };
+    app.refresh_status_cache();
+    // Keystrokes that landed during the background probe belong in the
+    // composer, not the void.
+    for c in String::from_utf8_lossy(&typed_during_probe)
+        .chars()
+        .filter(|c| !c.is_control())
+    {
+        app.editor.insert(c);
+    }
     app.transcript
         .push(Block::new(Kind::Banner, crate::VERSION));
     for warning in model::config_warnings() {
@@ -1824,7 +1982,7 @@ pub async fn run(
     // Providers' model lists refresh in the background (the reference
     // behavior, sourced from each gateway's own /models): a model a provider
     // ships today shows in /models today, no e release involved.
-    tokio::spawn(crate::core::provider::catalog::refresh_remote());
+    tokio::spawn(crate::core::providers::catalog::refresh_remote());
     if crate::core::auth::load().is_empty() {
         app.notice(
             "no provider signed in — use /login to sign in with an account or API key".into(),
@@ -1841,15 +1999,34 @@ pub async fn run(
             ));
         }
     }
-    // -c continues this workspace's most recent session.
-    let continue_flag = args.iter().any(|a| a == "-c" || a == "--continue");
-    let resume_flag = args.iter().any(|a| a == "-r" || a == "--resume");
-    let message_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-    let initial: String = message_args
-        .iter()
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
+    // -c continues this workspace's most recent session. Only the flags e
+    // actually knows are removed from the prompt — a word like `-O2` is
+    // prompt content, and `--` ends flag parsing entirely.
+    let mut continue_flag = false;
+    let mut resume_flag = false;
+    let mut message_args: Vec<&str> = Vec::new();
+    let mut past_flags = false;
+    for arg in &args {
+        if !past_flags {
+            match arg.as_str() {
+                "--" => {
+                    past_flags = true;
+                    continue;
+                }
+                "-c" | "--continue" => {
+                    continue_flag = true;
+                    continue;
+                }
+                "-r" | "--resume" => {
+                    resume_flag = true;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        message_args.push(arg);
+    }
+    let initial: String = message_args.join(" ");
     if resume_flag {
         // The reference behavior: launch straight into the session picker.
         app.open_resume_menu();
@@ -1870,12 +2047,21 @@ pub async fn run(
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
 
-    if let Some(initial) =
-        stage_initial_prompt(initial, app.trust.is_some(), &mut app.pending_initial)
-    {
+    // A -r launch prompt must wait for the session pick, or it would start a
+    // turn whose reply splices into whichever session gets selected.
+    let hold_initial = app.trust.is_some() || (resume_flag && app.menu.is_some());
+    if let Some(initial) = stage_initial_prompt(initial, hold_initial, &mut app.pending_initial) {
         app.submit(initial);
     }
-    screen.paint(&app.frame(screen.cols as usize))?;
+    painter.frame(app.frame(cols as usize));
+
+    // Frame pacing: every select arm may change what's on screen, but frames
+    // are built at most once per interval — a token burst becomes one paint,
+    // and a deferred paint fires when the interval lapses.
+    const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+    let mut next_paint = tokio::time::Instant::now();
+    let mut paint_deferred = false;
+    let mut event_buf: Vec<SessionEvent> = Vec::with_capacity(128);
 
     loop {
         tokio::select! {
@@ -1889,7 +2075,11 @@ pub async fn run(
                         app.editor.insert_paste(&text.replace('\r', "\n"));
                         app.sync_menu();
                     }
-                    TermEvent::Resize(c, r) => screen.resize(c, r),
+                    TermEvent::Resize(c, r) => {
+                        cols = c;
+                        rows = r;
+                        painter.resize(c, r);
+                    }
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
                         if app.viewer.is_some() {
@@ -1949,8 +2139,14 @@ pub async fn run(
                                             if !trusted {
                                                 app.notice("working untrusted — project AGENTS.md and .e skills/prompts ignored (/trust to allow)".into());
                                             }
-                                            if let Some(initial) = app.pending_initial.take() {
-                                                app.submit(initial);
+                                            // An open -r picker still owns
+                                            // the launch prompt; submitting
+                                            // it now would start a turn the
+                                            // session pick then refuses.
+                                            if app.menu.is_none() {
+                                                if let Some(initial) = app.pending_initial.take() {
+                                                    app.submit(initial);
+                                                }
                                             }
                                         }
                                     }
@@ -1966,8 +2162,10 @@ pub async fn run(
                                 KeyCode::Esc | KeyCode::Enter => app.settings = None,
                                 _ => {}
                             }
-                            // A theme change applies immediately.
+                            // A theme change applies immediately; settings can
+                            // also change what the statusline derives from disk.
                             app.apply_theme();
+                            app.refresh_status_cache();
                         } else if let Some(stage) = &mut app.auth {
                             match (&mut *stage, k.code) {
                                 (AuthStage::Choose { selected }, KeyCode::Up | KeyCode::Down) => {
@@ -1978,15 +2176,15 @@ pub async fn run(
                                     app.auth_choose(choice);
                                 }
                                 (AuthStage::Account { selected }, KeyCode::Up | KeyCode::Down) => {
-                                    let n = crate::core::provider::registry::oauth_providers().len();
+                                    let n = crate::core::providers::registry::oauth_providers().len();
                                     *selected = (*selected + 1) % n.max(1);
                                 }
                                 (AuthStage::Key { selected }, KeyCode::Up) => {
-                                    let n = crate::core::provider::registry::key_providers().len();
+                                    let n = crate::core::providers::registry::key_providers().len();
                                     *selected = (*selected + n - 1) % n.max(1);
                                 }
                                 (AuthStage::Key { selected }, KeyCode::Down) => {
-                                    let n = crate::core::provider::registry::key_providers().len();
+                                    let n = crate::core::providers::registry::key_providers().len();
                                     *selected = (*selected + 1) % n.max(1);
                                 }
                                 (AuthStage::Account { selected }, KeyCode::Enter) => {
@@ -2040,7 +2238,13 @@ pub async fn run(
                                 KeyCode::Up => { app.menu.as_mut().unwrap().step(-1); }
                                 KeyCode::Down => { app.menu.as_mut().unwrap().step(1); }
                                 KeyCode::Enter => { app.select_menu(); }
-                                KeyCode::Esc => { app.menu = None; }
+                                KeyCode::Esc => {
+                                    app.menu = None;
+                                    // Declining the -r picker releases a
+                                    // held launch prompt into the current
+                                    // session.
+                                    app.release_initial_prompt();
+                                }
                                 _ => {}
                             }
                         } else if k.code == KeyCode::Esc && app.pending_key.is_some() {
@@ -2078,7 +2282,7 @@ pub async fn run(
                             // statusline already shows the new level; only a
                             // model without a reasoning knob gets a notice.
                             match app.agent.cycle_effort() {
-                                Some(_) => {}
+                                Some(_) => app.refresh_status_cache(),
                                 None => app.notice("this model has no reasoning effort control".into()),
                             }
                         } else if let Some(key) = key_of(&k) {
@@ -2091,16 +2295,31 @@ pub async fn run(
                     _ => {}
                 }
             }
-            event = session_events.recv() => {
-                match event {
-                    Some(e) => app.on_session_event(e),
-                    None => break,
+            count = session_events.recv_many(&mut event_buf, 128) => {
+                if count == 0 {
+                    break;
+                }
+                // Apply the whole burst before building one frame — a fast
+                // stream must not cost one paint per delta.
+                for e in event_buf.drain(..) {
+                    app.on_session_event(e);
                 }
             }
             job = results_rx.recv() => {
                 match job {
                     Some(AppJob::Notice(notice)) => app.notice(notice),
-                    Some(AppJob::Prompt(prompt)) => app.prompt(prompt),
+                    Some(AppJob::Prompt { text, epoch }) => {
+                        // A prompt from a command that started in an earlier
+                        // session must not start a turn in its replacement.
+                        if epoch == app.session_epoch {
+                            app.prompt(text);
+                        } else {
+                            app.notice(
+                                "an extension command finished after the session changed — its prompt was discarded"
+                                    .into(),
+                            );
+                        }
+                    }
                     Some(AppJob::InputVerdict { sequence, text, verdict }) => {
                         // A later hook may finish first; hold it until every
                         // earlier submission has a verdict, then apply the
@@ -2111,9 +2330,13 @@ pub async fn run(
                             app.apply_input_verdict(text, verdict);
                         }
                     }
-                    Some(AppJob::Rename(name)) => {
-                        app.agent.set_session_name(name.clone());
-                        app.notice(format!("session: {name}"));
+                    Some(AppJob::Rename { name, epoch }) => {
+                        // A rename from a command that started in an earlier
+                        // session must not rename its replacement.
+                        if epoch == app.session_epoch {
+                            app.agent.set_session_name(name.clone());
+                            app.notice(format!("session: {name}"));
+                        }
                     }
                     Some(AppJob::Compacted { summary, kept }) => {
                         // Ignore a result that outlived its session (/new won).
@@ -2170,39 +2393,57 @@ pub async fn run(
                         app.host = host.clone();
                         app.agent.set_host(host);
                         app.apply_theme();
+                        app.refresh_status_cache();
                         finish_reload_notice(&mut app.transcript, app.reload_block.take());
                         for text in std::mem::take(&mut app.held_prompts) {
                             app.prompt(text);
                         }
                     }
-                    Some(AppJob::Shell { cmd, output }) => {
-                        // Display a trimmed tail in the live block; history
-                        // gets the full (tool-truncated) output.
-                        let display_output = crate::core::tools::sanitize_display(&output.content);
-                        let shown: String = {
-                            let lines: Vec<&str> = display_output.lines().collect();
-                            let tail = &lines[lines.len().saturating_sub(20)..];
-                            let mut text = tail.join("\n");
-                            if lines.len() > 20 {
-                                text = format!("… ({} more lines above)\n{text}", lines.len() - 20);
+                    Some(AppJob::Shell { cmd, output, epoch }) => {
+                        // A result from a command started in an earlier
+                        // session must not be recorded into this one.
+                        if epoch != app.session_epoch {
+                            app.notice(format!(
+                                "`{cmd}` finished after the session changed — output discarded"
+                            ));
+                        } else {
+                            // Display a trimmed tail in the live block;
+                            // history gets the full (tool-truncated) output.
+                            let display_output =
+                                crate::core::tools::sanitize_display(&output.content);
+                            let shown: String = {
+                                let lines: Vec<&str> = display_output.lines().collect();
+                                let tail = &lines[lines.len().saturating_sub(20)..];
+                                let mut text = tail.join("\n");
+                                if lines.len() > 20 {
+                                    text = format!(
+                                        "… ({} more lines above)\n{text}",
+                                        lines.len() - 20
+                                    );
+                                }
+                                text
+                            };
+                            if let Some(idx) = app.shell_block.take() {
+                                if let Some(block) = app.transcript.blocks.get_mut(idx) {
+                                    block.done = true;
+                                    block.is_error = output.is_error();
+                                    block.detail = Some(shown);
+                                    block.touch();
+                                }
                             }
-                            text
-                        };
-                        if let Some(idx) = app.shell_block.take() {
-                            if let Some(block) = app.transcript.blocks.get_mut(idx) {
-                                block.done = true;
-                                block.is_error = output.is_error();
-                                block.detail = Some(shown);
-                                block.touch();
+                            if !output.content.trim().is_empty() {
+                                app.remember_output(format!("$ {cmd}"), display_output);
+                            }
+                            app.agent.record_user(format!(
+                                "I ran `{cmd}` in my shell. Output:\n```\n{}\n```",
+                                output.content
+                            ));
+                            // Prompts held for the shell result submit now,
+                            // ordered after it.
+                            for text in std::mem::take(&mut app.held_prompts) {
+                                app.prompt(text);
                             }
                         }
-                        if !output.content.trim().is_empty() {
-                            app.remember_output(format!("$ {cmd}"), display_output);
-                        }
-                        app.agent.record_user(format!(
-                            "I ran `{cmd}` in my shell. Output:\n```\n{}\n```",
-                            output.content
-                        ));
                     }
                     None => {}
                 }
@@ -2222,16 +2463,17 @@ pub async fn run(
                             if matches!(app.auth, Some(AuthStage::Waiting)) {
                                 app.auth = None;
                             }
-                            tokio::spawn(crate::core::provider::catalog::refresh_remote());
+                            tokio::spawn(crate::core::providers::catalog::refresh_remote());
                             // A fresh credential may make new models available:
                             // if the current model's provider is still signed out,
                             // fall back to the first available model.
-                            if !crate::core::auth::load().contains_key(&app.agent.model.provider) {
-                                if let Some(m) = crate::core::provider::catalog::available().into_iter().next() {
-                                    app.notice(format!("model set to {}", crate::core::provider::catalog::slug(&m)));
+                            if !crate::core::auth::signed_in(&crate::core::auth::load(), &app.agent.model.provider) {
+                                if let Some(m) = crate::core::providers::catalog::available().into_iter().next() {
+                                    app.notice(format!("model set to {}", crate::core::providers::catalog::slug(&m)));
                                     app.agent.model = m;
                                 }
                             }
+                            app.refresh_status_cache();
                         }
                     Some(crate::core::auth::login::Outcome::Failed { flow_id })
                         if app.login_outcome_is_current(Some(flow_id)) => {
@@ -2246,6 +2488,9 @@ pub async fn run(
             }
             _ = sigterm.recv() => break,
             _ = sighup.recv() => break,
+            // A paint was skipped inside the frame interval; fire it when
+            // the interval lapses.
+            _ = tokio::time::sleep_until(next_paint), if paint_deferred => {}
             _ = tick.tick() => {
                 if let Some(at) = app.armed_at {
                     if at.elapsed() > Duration::from_millis(1600) {
@@ -2262,27 +2507,28 @@ pub async fn run(
                 }
             }
         }
-        let frame = if app.viewer.is_some() {
-            app.viewer_frame(screen.cols as usize, screen.rows as usize)
+        let now = tokio::time::Instant::now();
+        if now >= next_paint || app.should_quit {
+            let frame = if app.viewer.is_some() {
+                app.viewer_frame(cols as usize, rows as usize)
+            } else {
+                app.frame(cols as usize)
+            };
+            painter.frame(frame);
+            next_paint = now + FRAME_INTERVAL;
+            paint_deferred = false;
         } else {
-            app.frame(screen.cols as usize)
-        };
-        screen.paint(&frame)?;
+            paint_deferred = true;
+        }
         if app.should_quit {
             break;
         }
     }
 
+    // Let the final frame land before the terminal is restored.
+    painter.shutdown();
     app.host.shutdown().await;
-    let _ = execute!(
-        std::io::stdout(),
-        PopKeyboardEnhancementFlags,
-        DisableBracketedPaste
-    );
     drop(_guard);
-    let mut out = std::io::stdout();
-    write!(out, "\r\n\x1b[?25h")?;
-    out.flush()?;
     if app.relaunch {
         // The terminal is restored and the host is down: replace this
         // process with the updated binary, continuing the same session.
@@ -2303,10 +2549,23 @@ fn arm(app: &mut App) {
     app.overlay = Some("press ctrl+c again to exit".into());
 }
 
-struct RawGuard;
-impl Drop for RawGuard {
+/// Restores every terminal mode the TUI enables — keyboard enhancement
+/// flags, bracketed paste, raw mode, cursor visibility — on every exit
+/// path, `?` returns and unwinds included. Popping a mode that never got
+/// enabled is harmless; leaving one enabled corrupts the user's shell.
+struct TerminalGuard;
+impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = execute!(
+            std::io::stdout(),
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste
+        );
         let _ = terminal::disable_raw_mode();
+        use std::io::Write as _;
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\r\n\x1b[?25h");
+        let _ = out.flush();
     }
 }
 

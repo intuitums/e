@@ -1,0 +1,21 @@
+{
+	"name": "fireworks",
+	"display": "Fireworks",
+	"base_url": "https://api.fireworks.ai/inference/v1",
+	"api": "openai-completions",
+	"auth": {
+		"key": true,
+		"key_env": "FIREWORKS_API_KEY",
+		"key_hint": "fireworks.ai account settings"
+	},
+	"models": [
+		{
+			"id": "accounts/fireworks/models/deepseek-v4-flash",
+			"context_window": 1000000
+		},
+		{
+			"id": "accounts/fireworks/models/kimi-k3-instruct",
+			"context_window": 1048576
+		}
+	]
+}

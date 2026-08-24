@@ -4,23 +4,29 @@ its provider files from).
 
     python3 scripts/generate-catalog.py            # show what would change
     python3 scripts/generate-catalog.py --write    # apply it
+    python3 scripts/generate-catalog.py --check    # exit 1 on drift (CI)
 
-For every provider file in src/core/provider/providers/, models found on
+For every provider file in src/core/providers/data/, models found on
 models.dev get their context_window corrected. Models e lists that
 models.dev lacks are left alone; models.dev models e doesn't list are
 reported, never auto-added — the seed list stays curated, the live
-/models overlay covers discovery.
+/models overlay covers discovery. Keyless local providers (empty seed
+lists) are skipped.
 """
 import json, pathlib, sys, urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PROVIDERS = ROOT / "src" / "core" / "provider" / "providers"
+PROVIDERS = ROOT / "src" / "core" / "providers" / "data"
 # models.dev ids for e's provider names, where they differ.
 # openai-codex is deliberately absent: models.dev's "openai" entry describes
 # the platform API, and the ChatGPT-backend codex deployment serves different
 # (smaller, 272k) windows — conflating them once inflated codex to 1.05M.
 DEV_IDS = {"opencode-go": "opencode-go", "opencode-zen": "opencode",
-           "xai": "xai", "openai": "openai", "anthropic": "anthropic"}
+           "xai": "xai", "openai": "openai", "anthropic": "anthropic",
+           "google": "google", "groq": "groq", "mistral": "mistral",
+           "deepseek": "deepseek", "cerebras": "cerebras",
+           "openrouter": "openrouter", "together": "togetherai",
+           "fireworks": "fireworks-ai"}
 
 
 def fetch():
@@ -37,9 +43,13 @@ def fetch():
 
 def main():
     write = "--write" in sys.argv
+    check = "--check" in sys.argv
+    drift = False
     data = fetch()
     for path in sorted(PROVIDERS.glob("*.json")):
         provider = json.loads(path.read_text())
+        if not provider.get("models"):
+            continue  # keyless locals discover models live
         dev = data.get(DEV_IDS.get(provider["name"], provider["name"]))
         if not dev:
             print(f"{provider['name']}: not on models.dev, skipped")
@@ -57,6 +67,7 @@ def main():
                       f"{model.get('context_window')} -> {window}")
                 model["context_window"] = window
                 changed = True
+                drift = True
         unlisted = [m for m in dev_models if not any(
             x["id"] == m for x in provider.get("models", []))]
         if unlisted:
@@ -65,7 +76,9 @@ def main():
                   f"{' …' if len(unlisted) > 8 else ''}")
         if write and changed:
             path.write_text(json.dumps(provider, indent="\t") + "\n")
-    if not write:
+    if check and drift:
+        sys.exit("catalog drift: run scripts/generate-catalog.py --write")
+    if not write and not check:
         print("(dry run — pass --write to apply)")
 
 

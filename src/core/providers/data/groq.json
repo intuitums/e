@@ -1,0 +1,21 @@
+{
+	"name": "groq",
+	"display": "Groq",
+	"base_url": "https://api.groq.com/openai/v1",
+	"api": "openai-completions",
+	"auth": {
+		"key": true,
+		"key_env": "GROQ_API_KEY",
+		"key_hint": "console.groq.com"
+	},
+	"models": [
+		{
+			"id": "llama-3.3-70b-versatile",
+			"context_window": 131072
+		},
+		{
+			"id": "moonshotai/kimi-k2-instruct",
+			"context_window": 131072
+		}
+	]
+}
