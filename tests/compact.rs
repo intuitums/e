@@ -132,12 +132,13 @@ fn split_spares_small_histories() {
 
 #[test]
 fn split_never_cuts_at_a_tool_result() {
-    // Big old turn, then a recent turn whose tool result sits right where a
-    // naive cut would land: the cut must move past it to a non-tool message.
+    // The keep-budget overrun lands exactly on a recent tool result: the cut
+    // must move past it — a result always follows its call — to the next
+    // non-tool message, leaving the result summarized away with its turn.
     let big = "y".repeat(85_000); // ~21k estimated tokens
     let history = vec![
         ChatMessage::user("old work"),
-        ChatMessage::assistant(&big, Vec::new()),
+        ChatMessage::assistant("earlier reply", Vec::new()),
         ChatMessage::user("new task"),
         ChatMessage::assistant(
             "",
@@ -148,16 +149,67 @@ fn split_never_cuts_at_a_tool_result() {
                 signature: None,
             }],
         ),
-        ChatMessage::tool_result("c1", "contents"),
+        ChatMessage::tool_result("c1", &big),
         ChatMessage::assistant("done", Vec::new()),
     ];
     let (to_summarize, kept) = e::core::agent::compact::split(&history);
-    assert!(!to_summarize.is_empty(), "the big turn must be summarized");
-    assert_ne!(kept[0].role, "tool", "cut landed on a tool result");
-    // The kept tail is intact and in order.
-    let roles: Vec<&str> = kept.iter().map(|m| m.role.as_str()).collect();
-    assert!(roles
-        .windows(2)
-        .all(|w| !(w[1] == "tool" && w[0] == "user")));
-    assert_eq!(kept.last().unwrap().content, "done");
+    assert_eq!(
+        kept.len(),
+        1,
+        "the cut skipped the tool result to the next non-tool message"
+    );
+    assert_eq!(kept[0].content, "done");
+    assert_eq!(to_summarize.len(), 5);
+}
+
+#[test]
+fn split_never_separates_signed_thinking_from_its_assistant_turn() {
+    // The keep-budget overrun lands exactly on the assistant turn that follows
+    // a signed thinking block. Cutting there replays the block's absence as an
+    // unsigned history — Anthropic rejects the request. The cut must move past
+    // the pair instead, leaving both sides together.
+    let big_args = "y".repeat(85_000); // ~21k estimated tokens
+    let history = vec![
+        ChatMessage::user("old work"),
+        ChatMessage::assistant("earlier reply", Vec::new()),
+        ChatMessage::user("new task"),
+        ChatMessage {
+            role: "reasoning".into(),
+            content: r#"{"type":"thinking","thinking":"hmm","signature":"sig"}"#.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_meta: None,
+        },
+        ChatMessage::assistant(
+            "",
+            vec![ToolCall {
+                id: "c1".into(),
+                name: "read".into(),
+                arguments: big_args,
+                signature: None,
+            }],
+        ),
+        ChatMessage::tool_result("c1", "ok"),
+        ChatMessage::assistant("done", Vec::new()),
+    ];
+    let (to_summarize, kept) = e::core::agent::compact::split(&history);
+    // A cut happened, and the signed block stayed with its turn: either both
+    // were summarized away or both remain in the kept tail, adjacent.
+    let reasoning_kept = kept.iter().any(|m| m.role == "reasoning");
+    let turn_kept = kept
+        .iter()
+        .any(|m| m.tool_calls.iter().any(|c| c.id == "c1"));
+    assert_eq!(
+        reasoning_kept, turn_kept,
+        "the cut separated the signed thinking block from its assistant turn"
+    );
+    if reasoning_kept {
+        let r = kept.iter().position(|m| m.role == "reasoning").unwrap();
+        let t = kept
+            .iter()
+            .position(|m| m.tool_calls.iter().any(|c| c.id == "c1"))
+            .unwrap();
+        assert_eq!(t, r + 1, "reasoning and its turn must stay adjacent");
+    }
+    assert!(to_summarize.len() >= 3, "the old turns were summarized");
 }

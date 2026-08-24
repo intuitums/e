@@ -40,8 +40,12 @@ fn commit(
     let mut guard = session.lock().unwrap();
     if guard.is_none() {
         let mut created = Session::create(cwd, &slug(model))?;
+        // A pending name applies before the first record. It is best-effort:
+        // failing here must not discard the freshly created log — dropping it
+        // would make the next commit open a different file and strand every
+        // message already in memory outside any session.
         if let Some(name) = session_name.lock().unwrap().clone() {
-            created.set_name(&name)?;
+            let _ = created.set_name(&name);
         }
         *guard = Some(created);
     }

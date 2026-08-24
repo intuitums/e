@@ -5,7 +5,8 @@
 //! turns — the frontend checks at TurnEnd (auto, when context usage crosses
 //! the reserve threshold) or defers a mid-turn /compact until the turn ends.
 //! The cut keeps roughly the most recent `KEEP_RECENT_TOKENS` of messages and
-//! never lands on a tool result (a result must follow its call); everything
+//! never lands on a tool result (a result must follow its call) or between a
+//! signed thinking block and the assistant turn it precedes; everything
 //! before the cut is flattened to plain text and summarized with a structured
 //! checkpoint prompt. The summary seeds a fresh session file, followed by the
 //! kept messages — the old session stays fully resumable.
@@ -64,18 +65,27 @@ fn estimate_tokens(message: &ChatMessage) -> u64 {
 
 /// Split history into (to_summarize, kept): walk backwards accumulating
 /// estimated tokens until the keep budget is reached, then cut at the nearest
-/// non-tool message at or after that point — a tool result always stays with
-/// its call. Returns an empty `to_summarize` when the history is small enough
-/// that compaction would gain nothing.
+/// valid boundary at or after that point — a tool result always stays with
+/// its call, and a signed thinking block ("reasoning") always stays with the
+/// assistant turn it precedes; replaying either apart from its partner fails
+/// the request. Returns an empty `to_summarize` when the history is small
+/// enough that compaction would gain nothing.
 pub fn split(history: &[ChatMessage]) -> (Vec<ChatMessage>, Vec<ChatMessage>) {
     let mut accumulated = 0u64;
     let mut cut = 0usize;
     for (i, message) in history.iter().enumerate().rev() {
         accumulated += estimate_tokens(message);
         if accumulated >= KEEP_RECENT_TOKENS {
-            // The nearest valid cut at or after the overrun point.
+            // The nearest valid cut at or after the overrun point: not on a
+            // tool result, and not between a reasoning block and the
+            // assistant message whose signature it carries.
             cut = (i..history.len())
-                .find(|&c| history[c].role != "tool")
+                .find(|&c| {
+                    history[c].role != "tool"
+                        && !(history[c].role == "assistant"
+                            && c > 0
+                            && history[c - 1].role == "reasoning")
+                })
                 .unwrap_or(history.len());
             break;
         }

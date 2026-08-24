@@ -687,3 +687,73 @@ fn legacy_utf8_trust_keys_remain_readable() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+// Google's live list is its own dialect: same `/models` path, but
+// `x-goog-api-key` auth and a `models[].name` payload. The overlay must speak
+// it — otherwise signed-in Google users only ever see the seed ids.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn google_model_refresh_speaks_the_gemini_dialect() {
+    use std::io::{Read, Write};
+    let _lock = ENV_LOCK.lock().unwrap();
+    clear_env_keys();
+    let dir = std::env::temp_dir().join(format!("e-google-live-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut a, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let n = a.read(&mut buf).unwrap();
+        let sent = String::from_utf8_lossy(&buf[..n]).to_string();
+        let body = r#"{"models":[
+            {"name":"models/gemini-fresh-pro","supportedGenerationMethods":["generateContent"],"inputTokenLimit":1048576},
+            {"name":"models/gemini-text-embedding","supportedGenerationMethods":["embedContent"]},
+            {"name":"models/veo-video","supportedGenerationMethods":["predictLongRunning"]}
+        ]}"#;
+        let _ = a.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        sent
+    });
+
+    std::fs::write(dir.join("auth.json"), r#"{"google":{"key":"AIza-test"}}"#).unwrap();
+    // Every google id rides the mock: refresh_remote dedupes to one base_url
+    // per provider — the first catalog entry's — so leaving any builtin on
+    // the real endpoint would send the probe there instead of here.
+    std::fs::write(
+        dir.join("models.json"),
+        format!(r#"{{"providers":{{"google":{{"base_url":"http://127.0.0.1:{port}","api":"google-generative-ai","models":["gemini-3-pro","gemini-3-flash","gemini-fresh-pro"]}}}}}}"#),
+    )
+    .unwrap();
+
+    e::core::providers::catalog::refresh_remote().await;
+    let sent = server.join().unwrap();
+    assert!(sent.contains("GET /models"));
+    assert!(
+        sent.contains("x-goog-api-key: AIza-test"),
+        "Google's list endpoint takes the key header, not a bearer token"
+    );
+
+    let catalog = e::core::providers::catalog::catalog();
+    let fresh = catalog
+        .iter()
+        .find(|m| m.provider == "google" && m.id == "gemini-fresh-pro")
+        .expect("the `models[].name` payload applies to the catalog");
+    // The reported input limit wins for the window.
+    assert_eq!(fresh.context_window, 1_048_576);
+    // The `models/` prefix is stripped — requests want the bare id.
+    assert_eq!(fresh.api, e::core::providers::catalog::Api::Google);
+    // Embeddings and video generation stay out of the picker.
+    assert!(!catalog
+        .iter()
+        .any(|m| m.provider == "google" && (m.id.contains("embedding") || m.id.contains("veo"))));
+    let _ = std::fs::remove_dir_all(&dir);
+}

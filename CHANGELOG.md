@@ -8,6 +8,14 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- Bugbot review fixes: a failed session-name write at log creation no longer
+  discards the freshly created session (the next commit would open a
+  different file and strand in-memory history); compaction's keep-cut no
+  longer separates an Anthropic signed thinking block from the assistant
+  turn it precedes; and Google's live model refresh speaks the Gemini
+  dialect (`x-goog-api-key`, `models[].name`) instead of an OpenAI-shaped
+  `/models`, so signed-in Google users see more than the seed ids.
+
 - The audit backlog's five remaining epics are fixed:
   - *Sessions* — persistence failures (unwritable home, full disk) surface
     as a visible warning instead of silently losing history; /new and

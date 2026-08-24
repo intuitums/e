@@ -174,7 +174,8 @@ fn dated_alias_of(id: &str) -> Option<&str> {
 }
 
 /// `GET {base}/models` with the provider's credential — (id, window?) per
-/// listed model; None on any failure.
+/// listed model; None on any failure. Google lists at the same path but with
+/// its own auth header and payload shape (`models[].name`, not `data[].id`).
 async fn fetch_models(provider: &str, base: &str) -> Option<Vec<(String, Option<u64>)>> {
     let auth = crate::core::auth::load();
     let key = match auth.get(provider) {
@@ -193,39 +194,66 @@ async fn fetch_models(provider: &str, base: &str) -> Option<Vec<(String, Option<
         Some(key) if provider == "anthropic" => request
             .header("x-api-key", key)
             .header("anthropic-version", "2023-06-01"),
+        Some(key) if provider == "google" => request.header("x-goog-api-key", key),
         Some(key) => request.bearer_auth(key),
         None => request,
     };
     let body: serde_json::Value = request.send().await.ok()?.json().await.ok()?;
-    let entries = body["data"].as_array()?;
-    let all_ids: Vec<&str> = entries.iter().filter_map(|m| m["id"].as_str()).collect();
+    let google = provider == "google";
+    let entries = if google {
+        body["models"].as_array()
+    } else {
+        body["data"].as_array()
+    }?;
+    // The wire id: Gemini reports `models/gemini-…` and wants the bare id back.
+    let id_of = |entry: &serde_json::Value| -> Option<String> {
+        if google {
+            entry["name"]
+                .as_str()
+                .map(|n| n.strip_prefix("models/").unwrap_or(n).to_string())
+        } else {
+            entry["id"].as_str().map(String::from)
+        }
+    };
+    let all_ids: Vec<String> = entries.iter().filter_map(id_of).collect();
     let mut out = Vec::new();
     for entry in entries {
-        let Some(id) = entry["id"].as_str() else {
+        let Some(id) = id_of(entry) else {
             continue;
         };
-        // Providers that report a type list embeddings, images, video, and
-        // speech beside chat models. Keep the picker for language models;
-        // fall back to the id heuristic when the provider doesn't say.
-        if let Some(kind) = entry["type"].as_str() {
+        // Providers that report a type or capability list embeddings, images,
+        // video, and speech beside chat models. Keep the picker for language
+        // models: Gemini says so via supportedGenerationMethods, OpenAI-style
+        // gateways via a `type` field, falling back to the id heuristic when
+        // the provider doesn't say.
+        if google {
+            let serves_chat = entry["supportedGenerationMethods"]
+                .as_array()
+                .is_some_and(|ms| ms.iter().any(|m| m.as_str() == Some("generateContent")));
+            if !serves_chat {
+                continue;
+            }
+        } else if let Some(kind) = entry["type"].as_str() {
             if kind != "language" {
                 continue;
             }
         }
-        if !looks_like_chat_model(id) {
+        if !looks_like_chat_model(&id) {
             continue;
         }
-        if let Some(base_id) = dated_alias_of(id) {
-            if all_ids.contains(&base_id) {
+        if let Some(base_id) = dated_alias_of(&id) {
+            if all_ids.iter().any(|a| a == base_id) {
                 continue;
             }
         }
-        // Some gateways report the window; keep it when they do.
+        // Some gateways report the window; keep it when they do. Gemini's
+        // inputTokenLimit is its context window as far as the picker cares.
         let window = entry["context_length"]
             .as_u64()
             .or(entry["context_window"].as_u64())
-            .or(entry["max_context_length"].as_u64());
-        out.push((id.to_string(), window));
+            .or(entry["max_context_length"].as_u64())
+            .or(entry["inputTokenLimit"].as_u64());
+        out.push((id, window));
     }
     if out.is_empty() {
         None
