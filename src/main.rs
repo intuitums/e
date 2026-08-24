@@ -9,6 +9,17 @@ use e::core::agent::{Agent, SessionEvent};
 use e::core::provider::catalog::{self as model};
 use e::tui::app;
 
+fn auth_status_requested(args: &[String]) -> Result<bool, &'static str> {
+    if args.first().map(String::as_str) != Some("auth") {
+        return Ok(false);
+    }
+    if args.len() == 1 {
+        Ok(true)
+    } else {
+        Err("usage: e auth\nSign in interactively with `/login <provider>`.")
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -63,9 +74,18 @@ e -v, --version"
         }
     }
 
-    if args.first().map(String::as_str) == Some("auth") {
-        e::core::auth::login::auth_status();
-        return Ok(());
+    match auth_status_requested(&args) {
+        Ok(true) => {
+            e::core::auth::login::auth_status();
+            host.shutdown().await;
+            return Ok(());
+        }
+        Ok(false) => {}
+        Err(message) => {
+            eprintln!("{message}");
+            host.shutdown().await;
+            std::process::exit(2);
+        }
     }
     if args.first().map(String::as_str) == Some("ask") {
         return ask(args[1..].join(" "), host).await;
@@ -127,6 +147,9 @@ async fn ask(
         .unwrap_or(80)
         .min(100);
 
+    for warning in model::config_warnings() {
+        eprintln!("warning: {warning}");
+    }
     let (mut agent, mut events) = Agent::new(model::default_model());
     agent.set_host(host.clone());
     agent.submit(prompt, app::system_prompt());
@@ -211,4 +234,27 @@ async fn ask(
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn bare_auth_is_status_only() {
+        assert_eq!(super::auth_status_requested(&args(&["auth"])), Ok(true));
+        assert_eq!(
+            super::auth_status_requested(&args(&["ask", "hello"])),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn auth_provider_argument_is_rejected_with_working_guidance() {
+        let error = super::auth_status_requested(&args(&["auth", "openai-codex"])).unwrap_err();
+        assert!(error.contains("usage: e auth"));
+        assert!(error.contains("/login <provider>"));
+    }
 }
