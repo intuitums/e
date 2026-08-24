@@ -32,6 +32,9 @@ struct ActiveTurn {
     /// The current assistant text block, if one is streaming.
     block: Option<usize>,
     text: String,
+    /// The live thinking block, if reasoning has streamed this turn.
+    thinking_block: Option<usize>,
+    thinking: String,
     turn: Turn,
     started: Instant,
     error: Option<String>,
@@ -173,6 +176,10 @@ struct App {
     auth: Option<AuthStage>,
     /// The settings panel, when /settings is active.
     settings: Option<crate::tui::settingspanel::SettingsPanel>,
+    /// Whether streamed thinking is drawn (the `show_thinking` setting,
+    /// default on). Gating only the drawing — the ↓ token estimate always
+    /// counts reasoning.
+    show_thinking: bool,
     /// Background job narration (login flows) into the transcript.
     jobs: tokio::sync::mpsc::Sender<String>,
     /// How a login flow ended; control flow reads this, never the notices.
@@ -1239,6 +1246,8 @@ impl App {
                 self.active = Some(ActiveTurn {
                     block: None,
                     text: String::new(),
+                    thinking_block: None,
+                    thinking: String::new(),
                     turn: Turn::new(),
                     started: Instant::now(),
                     error: None,
@@ -1266,6 +1275,9 @@ impl App {
                 if let Some(s) = &mut self.active {
                     s.block = None;
                     s.text.clear();
+                    // The steered reply restarts its own thinking block.
+                    s.thinking_block = None;
+                    s.thinking.clear();
                 }
             }
             SessionEvent::TextDelta(delta) => {
@@ -1292,17 +1304,40 @@ impl App {
                     }
                 }
             }
-            // Reasoning summaries are counted toward the ↓ estimate but
-            // never drawn — the reference transcript projects none.
+            // Reasoning stays on screen through the turn — it must not vanish
+            // while the reply streams, and it dims with the committed turn,
+            // not before. Raw provider text is stripped before it can reach
+            // the paint stream, like assistant text.
             SessionEvent::ReasoningDelta(delta) => {
                 if let Some(s) = &mut self.active {
                     s.turn.note_text(&delta);
+                    if self.show_thinking {
+                        s.thinking
+                            .push_str(&crate::core::tools::sanitize_display(&delta));
+                        let idx = match s.thinking_block {
+                            Some(idx) => idx,
+                            None => {
+                                let idx = self.transcript.push(Block::new(Kind::Thinking, ""));
+                                s.thinking_block = Some(idx);
+                                idx
+                            }
+                        };
+                        let text = s.thinking.clone();
+                        if let Some(b) = self.transcript.blocks.get_mut(idx) {
+                            b.text = text;
+                            b.touch();
+                        }
+                    }
                 }
             }
             SessionEvent::ToolBatchStart { calls } => {
                 if let Some(s) = &mut self.active {
                     s.block = None;
                     s.text.clear();
+                    // The pre-batch reasoning stays as its own block above;
+                    // the next burst starts fresh below the tools.
+                    s.thinking_block = None;
+                    s.thinking.clear();
                     s.turn.phase = TurnPhase::Tool;
                     s.pending_tools += calls.len();
                     let children = calls
@@ -1424,6 +1459,10 @@ impl App {
                         reason,
                     });
                     s.turn.recovered = None;
+                    // A retry replays its thinking fresh; the abandoned
+                    // attempt's block stays behind as history.
+                    s.thinking_block = None;
+                    s.thinking.clear();
                 }
             }
             SessionEvent::Recovered { attempt, limit } => {
@@ -1462,6 +1501,13 @@ impl App {
                     }
                 }
                 let Some(s) = self.active.take() else { return };
+                // The turn's thinking dims with it — same moment, not early.
+                if let Some(idx) = s.thinking_block {
+                    if let Some(b) = self.transcript.blocks.get_mut(idx) {
+                        b.done = true;
+                        b.touch();
+                    }
+                }
                 // The reference grammar: a completed turn ends with a dim
                 // duration-and-tokens row; a cancelled one says so instead.
                 if aborted {
@@ -1712,16 +1758,51 @@ fn finish_reload_notice(transcript: &mut Transcript, reload_block: Option<usize>
     }
 }
 
-/// The tab title's path: the working directory, home-relative.
+/// The tab title's path: a short showcase, never the full absolute path.
+/// Under $HOME the prefix collapses to `~`; elsewhere only the last two
+/// components are shown, so a volume-qualified worktree reads cleanly
+/// instead of bleeding its whole path into the tab.
 fn title_path() -> String {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    let home = std::env::var("HOME").unwrap_or_default();
-    if !home.is_empty() && cwd.starts_with(&home) {
-        format!("~{}", &cwd[home.len()..])
+    title_path_from(
+        &std::env::current_dir().unwrap_or_default(),
+        &std::env::var("HOME").unwrap_or_default(),
+    )
+}
+
+/// The shortening rule, split out for tests.
+fn title_path_from(cwd: &std::path::Path, home: &str) -> String {
+    use std::path::Component;
+    let under_home = !home.is_empty() && cwd.starts_with(home);
+    let mut comps: Vec<&str> = cwd
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_str().unwrap_or_default()),
+            _ => None,
+        })
+        .collect();
+    // The `~` marker replaces the whole home prefix, not one level of it.
+    if under_home {
+        let prefix = std::path::Path::new(home)
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(s) => Some(s.to_str().unwrap_or_default()),
+                _ => None,
+            })
+            .count();
+        comps.drain(..prefix.min(comps.len()));
+    }
+    let tail = comps.split_off(comps.len().saturating_sub(2)).join("/");
+    if under_home {
+        if tail.is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{tail}")
+        }
+    } else if tail.is_empty() {
+        // The root itself stays a slash rather than a bare "".
+        "/".to_string()
     } else {
-        cwd
+        tail
     }
 }
 
@@ -1927,6 +2008,8 @@ pub async fn run(
         menu: None,
         auth: None,
         settings: None,
+        show_thinking: crate::core::config::settings::get_string("show_thinking").as_deref()
+            != Some("off"),
         jobs: jobs_tx,
         logins: logins_tx,
         login_task: None,
@@ -2164,7 +2247,14 @@ pub async fn run(
                             }
                             // A theme change applies immediately; settings can
                             // also change what the statusline derives from disk.
+                            // The thinking toggle is file-backed too — re-read
+                            // it so a mid-session change lands this frame.
                             app.apply_theme();
+                            app.show_thinking = crate::core::config::settings::get_string(
+                                "show_thinking",
+                            )
+                            .as_deref()
+                            != Some("off");
                             app.refresh_status_cache();
                         } else if let Some(stage) = &mut app.auth {
                             match (&mut *stage, k.code) {
@@ -2572,6 +2662,38 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_title_shortens_to_two_components() {
+        assert_eq!(
+            title_path_from(
+                std::path::Path::new("/Volumes/v0/workspaces/worktrees/e/bold-fox"),
+                ""
+            ),
+            "e/bold-fox"
+        );
+        assert_eq!(title_path_from(std::path::Path::new("/etc"), ""), "etc");
+        assert_eq!(title_path_from(std::path::Path::new("/"), ""), "/");
+    }
+
+    #[test]
+    fn tab_title_is_home_relative_under_home() {
+        assert_eq!(
+            title_path_from(std::path::Path::new("/Users/fschr/code/x"), "/Users/fschr"),
+            "~/code/x"
+        );
+        assert_eq!(
+            title_path_from(std::path::Path::new("/Users/fschr"), "/Users/fschr"),
+            "~"
+        );
+        assert_eq!(
+            title_path_from(
+                std::path::Path::new("/Users/fschr/code/a/b/c"),
+                "/Users/fschr"
+            ),
+            "~/b/c"
+        );
+    }
 
     #[test]
     fn reload_result_replaces_the_in_progress_notice() {
