@@ -14,7 +14,10 @@ release notes are that section verbatim), open a fresh empty
   longer separates an Anthropic signed thinking block from the assistant
   turn it precedes; and Google's live model refresh speaks the Gemini
   dialect (`x-goog-api-key`, `models[].name`) instead of an OpenAI-shaped
-  `/models`, so signed-in Google users see more than the seed ids.
+  `/models`, so signed-in Google users see more than the seed ids. A failed
+  compaction-seed write now keeps the old session log attached instead of
+  detaching first, so a crash resumes into the complete pre-compaction
+  conversation rather than a fresh file holding only an unanchored tail.
 
 - The audit backlog's five remaining epics are fixed:
   - *Sessions* — persistence failures (unwritable home, full disk) surface

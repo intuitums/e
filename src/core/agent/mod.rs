@@ -311,32 +311,41 @@ impl Agent {
     }
 
     /// Replace the history with the compaction seed plus the kept recent
-    /// messages, detaching from the old session log — everything commits into
-    /// a fresh session file, so the compacted state is itself resumable. The
-    /// old file is untouched.
+    /// messages, committing everything into a fresh session file so the
+    /// compacted state is itself resumable; the old file stays untouched.
+    /// The fresh log is created before the old one is detached: if creation
+    /// fails, the old log stays attached and later turns append to it, so a
+    /// crash resumes into the complete pre-compaction conversation instead
+    /// of a new file holding only an unanchored tail.
     pub fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) {
-        self.history.lock().unwrap().clear();
-        *self.session.lock().unwrap() = None;
-        let result = commit(
-            &self.history,
-            &self.session,
-            &self.cwd,
-            &self.model,
-            ChatMessage::user(crate::core::agent::compact::seed(summary)),
-            &self.session_name,
-        );
+        let seed_message = ChatMessage::user(crate::core::agent::compact::seed(summary));
+        let mut fresh_history = Vec::with_capacity(kept.len() + 1);
+        fresh_history.push(seed_message.clone());
+        fresh_history.extend(kept);
+
+        // Same lock order as `commit`: history before session.
+        let mut history_guard = self.history.lock().unwrap();
+        let mut guard = self.session.lock().unwrap();
+        let result = match Session::create(&self.cwd, &slug(&self.model)) {
+            Ok(mut created) => {
+                // Same best-effort pending-name application as `commit`.
+                if let Some(name) = self.session_name.lock().unwrap().clone() {
+                    let _ = created.set_name(&name);
+                }
+                let mut result = Ok(());
+                for message in &fresh_history {
+                    result = created.append(message);
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                *guard = Some(created);
+                result
+            }
+            Err(e) => Err(e),
+        };
+        *history_guard = fresh_history;
         note_persist(&self.persist_warned, result, &self.events);
-        for message in kept {
-            let result = commit(
-                &self.history,
-                &self.session,
-                &self.cwd,
-                &self.model,
-                message,
-                &self.session_name,
-            );
-            note_persist(&self.persist_warned, result, &self.events);
-        }
     }
 
     /// Attach a session log; created lazily on the first message when None.
