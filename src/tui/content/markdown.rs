@@ -191,7 +191,13 @@ pub fn code_panel(theme: &Theme, code: &str, language: &str, cols: usize) -> Vec
     } else {
         language.chars().count().min(cols.saturating_sub(5))
     };
-    let panel_width = (max_code_width + 4).max(label_width + 5).max(6).min(cols);
+    // Never narrower than the frame arithmetic below can express: a 0–3
+    // column PTY must not underflow `panel_width - 4/-2` (it panics), it
+    // just renders a minimum-width panel that the screen clips.
+    let panel_width = (max_code_width + 4)
+        .max(label_width + 5)
+        .max(6)
+        .min(cols.max(6));
     let inner_width = panel_width - 4;
 
     let mut out = Vec::new();

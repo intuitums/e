@@ -76,6 +76,7 @@ async fn agent_runs_a_tool_then_replies() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
+        thinking: e::core::provider::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -168,6 +169,7 @@ async fn tool_batches_run_concurrently_and_commit_in_source_order() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
+        thinking: e::core::provider::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);

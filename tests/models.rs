@@ -417,3 +417,90 @@ fn env_var_keys_sign_a_provider_in() {
     std::env::remove_var("ANTHROPIC_API_KEY");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_partial_builtin_override_inherits_transport_not_global_defaults() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    clear_env_keys();
+    // The issue's reproduction: correct one field of a built-in Anthropic
+    // model. Transport must stay Anthropic's — not Chat Completions to an
+    // unrelated gateway, which would carry the anthropic credential there.
+    let catalog = with_models_json(
+        r#"{"providers":{"anthropic":{"models":[{"id":"claude-opus-5","context_window":123456}]}}}"#,
+    );
+    let model = catalog
+        .iter()
+        .find(|m| m.provider == "anthropic" && m.id == "claude-opus-5")
+        .unwrap();
+    assert_eq!(
+        model.base_url, "https://api.anthropic.com",
+        "partial override must keep the built-in endpoint"
+    );
+    assert_eq!(
+        model.api,
+        e::core::provider::catalog::Api::Anthropic,
+        "partial override must keep the built-in dialect"
+    );
+    assert_eq!(model.context_window, 123_456, "the correction itself lands");
+}
+
+#[test]
+fn partial_override_keeps_declared_windows_and_efforts() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let catalog = with_models_json(r#"{"providers":{"anthropic":{"models":["claude-sonnet-5"]}}}"#);
+    let model = catalog
+        .iter()
+        .find(|m| m.provider == "anthropic" && m.id == "claude-sonnet-5")
+        .unwrap();
+    assert_eq!(
+        model.context_window, 1_000_000,
+        "a bare-id re-declaration keeps the built-in window"
+    );
+    assert_eq!(
+        model.efforts,
+        vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+        "a bare-id re-declaration keeps the built-in efforts"
+    );
+}
+
+#[test]
+fn current_anthropic_builtins_are_adaptive_haiku_is_manual() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    clear_env_keys();
+    let catalog = e::core::provider::catalog::catalog();
+    let thinking = |id: &str| {
+        catalog
+            .iter()
+            .find(|m| m.provider == "anthropic" && m.id == id)
+            .unwrap_or_else(|| panic!("{id} missing from the built-in catalog"))
+            .thinking
+    };
+    use e::core::provider::catalog::Thinking::*;
+    for id in [
+        "claude-fable-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-opus-4-8",
+    ] {
+        assert_eq!(thinking(id), Adaptive, "{id} must be adaptive-thinking");
+    }
+    assert_eq!(thinking("claude-haiku-4-5"), Manual);
+}
+
+#[test]
+fn a_partial_override_inherits_the_builtins_thinking_mode() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let catalog = with_models_json(
+        r#"{"providers":{"anthropic":{"models":[{"id":"claude-sonnet-5","context_window":12345}]}}}"#,
+    );
+    let sonnet = catalog
+        .iter()
+        .find(|m| m.provider == "anthropic" && m.id == "claude-sonnet-5")
+        .unwrap();
+    assert_eq!(sonnet.context_window, 12345);
+    assert_eq!(
+        sonnet.thinking,
+        e::core::provider::catalog::Thinking::Adaptive,
+        "correcting one field must not swap the thinking wire shape"
+    );
+}

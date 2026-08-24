@@ -450,6 +450,15 @@ impl App {
                 return;
             }
         };
+        // Ownership first: a session another e is appending to must not be
+        // replayed into a second, diverging history.
+        let session = match crate::core::session::Session::reopen(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                self.notice(format!("could not resume session: {e}"));
+                return;
+            }
+        };
         self.transcript.clear();
         self.transcript
             .push(Block::new(Kind::Banner, crate::VERSION));
@@ -510,9 +519,7 @@ impl App {
             }
         }
         self.agent.load_history(messages);
-        if let Ok(s) = crate::core::session::Session::reopen(&path) {
-            self.agent.set_session(Some(s))
-        }
+        self.agent.set_session(Some(session));
         self.notice(format!(
             "resumed {}",
             path.file_name()

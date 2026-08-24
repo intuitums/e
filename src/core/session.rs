@@ -38,6 +38,88 @@ enum Entry {
 pub struct Session {
     path: PathBuf,
     file: File,
+    /// Held for as long as this Session exists; its sidecar file marks
+    /// ownership so a second e cannot append to the same log.
+    _lock: LockGuard,
+}
+
+/// A sidecar `<session>.lock` holding the owner's PID. Exclusive creation
+/// arbitrates ownership; a lock whose PID is no longer alive is stolen, so
+/// a crashed e never wedges a session permanently.
+struct LockGuard {
+    path: PathBuf,
+}
+
+impl LockGuard {
+    fn acquire(session_path: &Path) -> std::io::Result<LockGuard> {
+        let lock_path = session_path.with_extension("lock");
+        loop {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut file) => {
+                    writeln!(file, "{}", std::process::id())?;
+                    return Ok(LockGuard { path: lock_path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if lock_owner_alive(&lock_path) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "this session is already active in another e",
+                        ));
+                    }
+                    // The owner is gone — steal the stale lock and retry;
+                    // if another stealer won the race, its live PID fails
+                    // us on the next pass.
+                    let _ = std::fs::remove_file(&lock_path);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// `kill -0` reports liveness without signaling. Only reached on a lock
+/// conflict, so spawning `/bin/kill` costs nothing on the happy path.
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn lock_owner_alive(lock_path: &Path) -> bool {
+    // An unreadable or empty lock (crashed between create and PID write)
+    // counts as dead — it must never wedge a session shut.
+    let Ok(content) = std::fs::read_to_string(lock_path) else {
+        return false;
+    };
+    let Ok(pid) = content.trim().parse::<u32>() else {
+        return false;
+    };
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        pid_alive(pid)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true // No liveness probe available; stay conservative.
+    }
 }
 
 fn normalized_cwd(cwd: &Path) -> PathBuf {
@@ -83,6 +165,7 @@ impl Session {
         let stamp = now_ms();
         let path = dir.join(format!("{stamp}_{id}.jsonl"));
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let lock = LockGuard::acquire(&path)?;
         let header = Entry::Header {
             id,
             cwd: cwd.to_string_lossy().into_owned(),
@@ -90,14 +173,21 @@ impl Session {
             model: model.to_string(),
         };
         writeln!(file, "{}", serde_json::to_string(&header)?)?;
-        Ok(Session { path, file })
+        Ok(Session {
+            path,
+            file,
+            _lock: lock,
+        })
     }
 
+    /// One serialized record per write call, newline included — even under
+    /// an unexpected second writer, records never share a line.
     pub fn append(&mut self, message: &ChatMessage) {
-        if let Ok(line) = serde_json::to_string(&Entry::Message {
+        if let Ok(mut line) = serde_json::to_string(&Entry::Message {
             message: message.clone(),
         }) {
-            let _ = writeln!(self.file, "{line}");
+            line.push('\n');
+            let _ = self.file.write_all(line.as_bytes());
         }
     }
 
@@ -119,25 +209,40 @@ impl Session {
         &self.path
     }
 
-    /// Read all messages out of a session file.
+    /// Read all messages out of a session file. A malformed record is
+    /// corruption, not noise — returning a shortened history would present
+    /// lost messages as a valid conversation.
     pub fn load(path: &Path) -> std::io::Result<Vec<ChatMessage>> {
         let reader = BufReader::new(File::open(path)?);
         let mut messages = Vec::new();
-        for line in reader.lines() {
+        for (index, line) in reader.lines().enumerate() {
             let line = line?;
-            if let Ok(Entry::Message { message }) = serde_json::from_str(&line) {
-                messages.push(message);
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Entry>(&line) {
+                Ok(Entry::Message { message }) => messages.push(message),
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(std::io::Error::other(format!(
+                        "corrupt session record at line {}: {e}",
+                        index + 1
+                    )))
+                }
             }
         }
         Ok(messages)
     }
 
-    /// Re-open an existing session for appending.
+    /// Re-open an existing session for appending. Fails while another
+    /// process owns the session's lock.
     pub fn reopen(path: &Path) -> std::io::Result<Session> {
+        let lock = LockGuard::acquire(path)?;
         let file = OpenOptions::new().append(true).open(path)?;
         Ok(Session {
             path: path.to_path_buf(),
             file,
+            _lock: lock,
         })
     }
 }

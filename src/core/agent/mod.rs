@@ -516,6 +516,25 @@ impl Agent {
                     break false;
                 }
 
+                // A stream that ends with no text, no calls, no reasoning,
+                // and no error is a blank success — committing it would strand
+                // the turn in silence. The dialect-level causes (dropped
+                // malformed frames, ignored refusal/truncation finish reasons)
+                // are tracked separately; here we guarantee the user at least
+                // sees that something went wrong.
+                if text.is_empty()
+                    && calls.is_empty()
+                    && reasoning_items.is_empty()
+                    && pending.lock().unwrap().is_empty()
+                {
+                    let _ = events
+                        .send(SessionEvent::Error(
+                            "the model returned an empty response".into(),
+                        ))
+                        .await;
+                    break false;
+                }
+
                 // Reasoning items commit first — the dialect that produced
                 // them must replay them ahead of the assistant turn.
                 for item in reasoning_items.drain(..) {
