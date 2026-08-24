@@ -149,7 +149,7 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
             dim("   Sign in with an account"),
             String::new(),
             dim("   Waiting for authorization in the browser…"),
-            dim("   Esc dismisses this panel; the sign-in continues"),
+            dim("   Esc cancels sign-in"),
         ],
     }
 }

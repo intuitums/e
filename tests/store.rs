@@ -168,3 +168,72 @@ fn concurrent_updates_preserve_every_key_and_keep_the_temp_unique() {
         .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
     assert!(!strays, "a temp file was left behind");
 }
+
+#[test]
+fn subprocess_store_writer() {
+    let Ok(path) = std::env::var("E_STORE_CHILD_PATH") else {
+        return;
+    };
+    let key = std::env::var("E_STORE_CHILD_KEY").unwrap();
+    let marker = std::env::var("E_STORE_CHILD_MARKER").ok();
+    let delay_ms = std::env::var("E_STORE_CHILD_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    e::core::config::store::update(std::path::Path::new(&path), 0o644, |object| {
+        if let Some(marker) = marker {
+            std::fs::write(marker, b"read").unwrap();
+        }
+        if delay_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+        object.insert(key, serde_json::json!(true));
+    })
+    .unwrap();
+}
+
+#[test]
+fn concurrent_process_updates_preserve_both_snapshots() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let h = home("concurrent-processes");
+    let path = h.join("settings.json");
+    let marker = h.join("first-has-read");
+
+    let mut first = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "subprocess_store_writer", "--nocapture"])
+        .env("E_HOME", &h)
+        .env("E_STORE_CHILD_PATH", &path)
+        .env("E_STORE_CHILD_KEY", "alpha")
+        .env("E_STORE_CHILD_MARKER", &marker)
+        .env("E_STORE_CHILD_DELAY_MS", "300")
+        .spawn()
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    while !marker.exists() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "first writer never reached its read-modify-write section"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let second = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "subprocess_store_writer", "--nocapture"])
+        .env("E_HOME", &h)
+        .env("E_STORE_CHILD_PATH", &path)
+        .env("E_STORE_CHILD_KEY", "beta")
+        .status()
+        .unwrap();
+    assert!(second.success(), "second config writer failed");
+    assert!(
+        first.wait().unwrap().success(),
+        "first config writer failed"
+    );
+
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(after["alpha"], true);
+    assert_eq!(after["beta"], true);
+}

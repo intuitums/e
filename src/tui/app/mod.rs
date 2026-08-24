@@ -134,6 +134,23 @@ impl PendingInputVerdicts {
     }
 }
 
+struct ActiveLogin {
+    flow_id: u64,
+    cancellation: crate::core::auth::login::LoginCancellation,
+    task: tokio::task::JoinHandle<()>,
+    wait_for_callback: bool,
+}
+
+impl Drop for ActiveLogin {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        self.task.abort();
+        if self.wait_for_callback {
+            crate::core::auth::login::wait_for_callback_release();
+        }
+    }
+}
+
 struct App {
     theme: Theme,
     transcript: Transcript,
@@ -157,6 +174,10 @@ struct App {
     jobs: tokio::sync::mpsc::Sender<String>,
     /// How a login flow ended; control flow reads this, never the notices.
     logins: tokio::sync::mpsc::Sender<crate::core::auth::login::Outcome>,
+    /// The owned OAuth task; dropping it cancels polling and callback waits.
+    login_task: Option<ActiveLogin>,
+    /// Monotonic identity used to ignore a canceled flow's queued outcome.
+    login_sequence: u64,
     /// Extension host; commands and prompts come back on `results`.
     host: std::sync::Arc<crate::core::api::ExtensionHost>,
     results: tokio::sync::mpsc::Sender<AppJob>,
@@ -621,10 +642,68 @@ impl App {
         self.menu = Some(Menu::new(MenuKind::Models, "Models", HINT_USE, items));
     }
 
+    /// Stop both the async flow and any blocking localhost callback wait.
+    /// Returns whether a flow was active.
+    fn cancel_login(&mut self) -> bool {
+        self.login_task.take().is_some()
+    }
+
+    fn next_login_flow(&mut self) -> u64 {
+        self.login_sequence = self.login_sequence.wrapping_add(1);
+        self.login_sequence
+    }
+
+    fn login_outcome_is_current(&self, flow_id: Option<u64>) -> bool {
+        match flow_id {
+            None => true,
+            Some(flow_id) => self
+                .login_task
+                .as_ref()
+                .is_some_and(|login| login.flow_id == flow_id),
+        }
+    }
+    fn start_codex_login(&mut self, provider: String) {
+        self.cancel_login();
+        let flow_id = self.next_login_flow();
+        let cancellation = crate::core::auth::login::LoginCancellation::default();
+        let task = tokio::spawn(crate::core::auth::login::codex_login(
+            provider,
+            self.jobs.clone(),
+            self.logins.clone(),
+            cancellation.clone(),
+            flow_id,
+        ));
+        self.login_task = Some(ActiveLogin {
+            flow_id,
+            cancellation,
+            task,
+            wait_for_callback: true,
+        });
+    }
+
+    fn start_xai_login(&mut self) {
+        self.cancel_login();
+        let flow_id = self.next_login_flow();
+        let cancellation = crate::core::auth::login::LoginCancellation::default();
+        let task = tokio::spawn(crate::core::auth::login::xai_login(
+            self.jobs.clone(),
+            self.logins.clone(),
+            cancellation.clone(),
+            flow_id,
+        ));
+        self.login_task = Some(ActiveLogin {
+            flow_id,
+            cancellation,
+            task,
+            wait_for_callback: false,
+        });
+    }
+
     /// /login: the sign-in panel — the flow's method choice in the auth
     /// surface's own look.
     fn open_login_menu(&mut self) {
         self.menu = None;
+        self.cancel_login();
         self.auth = Some(AuthStage::Choose { selected: 0 });
     }
 
@@ -648,19 +727,8 @@ impl App {
         self.auth = Some(AuthStage::Waiting);
         self.notice(format!("starting the {} sign-in…", provider.display));
         match provider.auth.oauth.as_deref() {
-            Some("xai-device") => {
-                tokio::spawn(crate::core::auth::login::xai_login(
-                    self.jobs.clone(),
-                    self.logins.clone(),
-                ));
-            }
-            _ => {
-                tokio::spawn(crate::core::auth::login::codex_login(
-                    provider.name.clone(),
-                    self.jobs.clone(),
-                    self.logins.clone(),
-                ));
-            }
+            Some("xai-device") => self.start_xai_login(),
+            _ => self.start_codex_login(provider.name.clone()),
         }
     }
 
@@ -670,6 +738,7 @@ impl App {
         let Some(provider) = providers.get(selected) else {
             return;
         };
+        self.cancel_login();
         self.auth = Some(AuthStage::ApiKey {
             provider: provider.name.clone(),
         });
@@ -884,6 +953,7 @@ impl App {
                     .logins
                     .try_send(crate::core::auth::login::Outcome::SignedIn {
                         provider: secret_for,
+                        flow_id: None,
                     });
             }
             Err(e) => self.notice(format!("{secret_for}: {e}")),
@@ -1040,21 +1110,17 @@ impl App {
                 "starting the {} sign-in…",
                 model::display_name(&provider)
             ));
-            tokio::spawn(crate::core::auth::login::codex_login(
-                provider,
-                self.jobs.clone(),
-                self.logins.clone(),
-            ));
+            self.auth = Some(AuthStage::Waiting);
+            self.start_codex_login(provider);
         } else if flow.as_deref() == Some("xai-device") {
             self.notice(format!(
                 "starting the {} sign-in…",
                 model::display_name(&provider)
             ));
-            tokio::spawn(crate::core::auth::login::xai_login(
-                self.jobs.clone(),
-                self.logins.clone(),
-            ));
+            self.auth = Some(AuthStage::Waiting);
+            self.start_xai_login();
         } else {
+            self.cancel_login();
             self.notice(format!(
                 "paste the {provider} API key and press enter (esc cancels)"
             ));
@@ -1715,6 +1781,8 @@ pub async fn run(
         settings: None,
         jobs: jobs_tx,
         logins: logins_tx,
+        login_task: None,
+        login_sequence: 0,
         host,
         results: results_tx,
         input_verdicts: PendingInputVerdicts::default(),
@@ -1733,6 +1801,9 @@ pub async fn run(
     };
     app.transcript
         .push(Block::new(Kind::Banner, crate::VERSION));
+    for warning in model::config_warnings() {
+        app.notice(format!("warning: {warning}"));
+    }
     if crate::core::config::trust::status(&app.agent.cwd()).is_none() {
         app.trust = Some(TrustStage { selected: 0 });
     }
@@ -1920,10 +1991,15 @@ pub async fn run(
                                     app.auth_key(choice);
                                 }
                                 (_, KeyCode::Esc) => {
+                                    let waiting = matches!(&*stage, AuthStage::Waiting);
+                                    let cancelled = app.cancel_login();
                                     app.auth = None;
                                     app.pending_key = None;
                                     app.editor.mask = false;
                                     app.editor.set_text("");
+                                    if waiting && cancelled {
+                                        app.notice("login cancelled".into());
+                                    }
                                 }
                                 (AuthStage::ApiKey { .. }, _) => {
                                     if let Some(key) = key_of(&k) {
@@ -2133,22 +2209,31 @@ pub async fn run(
                 // Control flow hangs off the typed outcome; the human-readable
                 // notice arrives separately on `jobs`.
                 match outcome {
-                    Some(crate::core::auth::login::Outcome::SignedIn { .. }) => {
-                        if matches!(app.auth, Some(AuthStage::Waiting)) {
-                            app.auth = None;
-                        }
-                        tokio::spawn(crate::core::provider::catalog::refresh_remote());
-                        // A fresh credential may make new models available:
-                        // if the current model's provider is still signed out,
-                        // fall back to the first available model.
-                        if !crate::core::auth::load().contains_key(&app.agent.model.provider) {
-                            if let Some(m) = crate::core::provider::catalog::available().into_iter().next() {
-                                app.notice(format!("model set to {}", crate::core::provider::catalog::slug(&m)));
-                                app.agent.model = m;
+                    Some(crate::core::auth::login::Outcome::SignedIn { flow_id, .. })
+                        if app.login_outcome_is_current(flow_id) => {
+                            app.login_task.take();
+                            if matches!(app.auth, Some(AuthStage::Waiting)) {
+                                app.auth = None;
+                            }
+                            tokio::spawn(crate::core::provider::catalog::refresh_remote());
+                            // A fresh credential may make new models available:
+                            // if the current model's provider is still signed out,
+                            // fall back to the first available model.
+                            if !crate::core::auth::load().contains_key(&app.agent.model.provider) {
+                                if let Some(m) = crate::core::provider::catalog::available().into_iter().next() {
+                                    app.notice(format!("model set to {}", crate::core::provider::catalog::slug(&m)));
+                                    app.agent.model = m;
+                                }
                             }
                         }
-                    }
-                    Some(crate::core::auth::login::Outcome::Failed) => app.auth = None,
+                    Some(crate::core::auth::login::Outcome::Failed { flow_id })
+                        if app.login_outcome_is_current(Some(flow_id)) => {
+                            app.login_task.take();
+                            app.auth = None;
+                        }
+                    // A canceled flow can finish just before its task aborts.
+                    // Its queued outcome must not affect the replacement flow.
+                    Some(_) => {}
                     None => {}
                 }
             }
@@ -2284,5 +2369,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["first", "second"]
         );
+    }
+    #[tokio::test]
+    async fn active_login_guard_cancels_on_drop() {
+        let cancellation = crate::core::auth::login::LoginCancellation::default();
+        let observed = cancellation.clone();
+        let task = tokio::spawn(std::future::pending());
+        let login = ActiveLogin {
+            flow_id: 1,
+            cancellation,
+            task,
+            wait_for_callback: false,
+        };
+
+        drop(login);
+        assert!(observed.is_cancelled());
+        tokio::task::yield_now().await;
     }
 }

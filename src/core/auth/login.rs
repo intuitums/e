@@ -1,4 +1,4 @@
-//! Interactive credential acquisition — `e auth <provider>`.
+//! Interactive credential acquisition — `/login <provider>` in the TUI.
 //!
 //! API-key providers prompt for a paste. The ChatGPT backend runs the real
 //! OAuth authorization-code + PKCE flow: a one-shot listener on the fixed
@@ -17,12 +17,49 @@ pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const AUTH_BASE: &str = "https://auth.openai.com";
 
 const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+const CALLBACK_ADDR: &str = "127.0.0.1:1455";
 
 /// Bound on turn-path token refreshes (whole request — they return small
 /// JSON, never a stream). Interactive login flows stay unbounded: the user
 /// is present and can abort them.
 const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Shared cancellation for an interactive login. The TUI also aborts the
+/// async task, while this flag releases the blocking localhost callback wait.
+#[derive(Clone, Default)]
+pub struct LoginCancellation(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl LoginCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Cancellation is synchronous at the UI boundary: wait briefly for the
+/// blocking callback worker to observe its flag and drop the fixed port so a
+/// second login can start immediately.
+pub(crate) fn wait_for_callback_release() {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match TcpListener::bind(CALLBACK_ADDR) {
+            Ok(listener) => {
+                drop(listener);
+                return;
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AddrInUse
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return,
+        }
+    }
+}
 fn b64url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
@@ -57,7 +94,7 @@ async fn launch_browser(url: &str, notify: &tokio::sync::mpsc::Sender<String>) {
 pub fn auth_status() {
     let file = auth::load();
     if file.is_empty() {
-        println!("no credentials — run `e auth <provider>`");
+        println!("no credentials — start e and run `/login <provider>`");
         return;
     }
     for (provider, credential) in &file {
@@ -95,21 +132,31 @@ pub fn save_api_key(provider: &str, key: &str) -> Result<(), String> {
 /// How a login flow ended. The typed signal the TUI acts on — display text
 /// goes out separately as notices; control flow never parses prose.
 pub enum Outcome {
-    SignedIn { provider: String },
-    Failed,
+    SignedIn {
+        provider: String,
+        flow_id: Option<u64>,
+    },
+    Failed {
+        flow_id: u64,
+    },
 }
 
 pub async fn codex_login(
     provider: String,
     notify: tokio::sync::mpsc::Sender<String>,
     outcomes: tokio::sync::mpsc::Sender<Outcome>,
+    cancellation: LoginCancellation,
+    flow_id: u64,
 ) {
-    let (message, outcome) = match codex_login_inner(&provider, &notify).await {
+    let (message, outcome) = match codex_login_inner(&provider, &notify, &cancellation).await {
         Ok(()) => (
             format!("signed in to {provider} — saved to ~/.e/auth.json"),
-            Outcome::SignedIn { provider },
+            Outcome::SignedIn {
+                provider,
+                flow_id: Some(flow_id),
+            },
         ),
-        Err(e) => (format!("login failed: {e}"), Outcome::Failed),
+        Err(e) => (format!("login failed: {e}"), Outcome::Failed { flow_id }),
     };
     let _ = notify.send(message).await;
     let _ = outcomes.send(outcome).await;
@@ -118,6 +165,7 @@ pub async fn codex_login(
 async fn codex_login_inner(
     provider: &str,
     notify: &tokio::sync::mpsc::Sender<String>,
+    cancellation: &LoginCancellation,
 ) -> Result<(), String> {
     let mut verifier_bytes = [0u8; 64];
     rand::rng().fill_bytes(&mut verifier_bytes);
@@ -136,16 +184,18 @@ async fn codex_login_inner(
     );
 
     // Listener first, so the redirect can never race us.
-    let listener = TcpListener::bind("127.0.0.1:1455").map_err(|e| {
+    let listener = TcpListener::bind(CALLBACK_ADDR).map_err(|e| {
         format!("cannot listen on localhost:1455 ({e}) — is another login running?")
     })?;
 
     launch_browser(&authorize, notify).await;
 
     let expected = state.clone();
-    let code = tokio::task::spawn_blocking(move || wait_for_code(&listener, &expected))
-        .await
-        .map_err(|e| e.to_string())??;
+    let cancellation = cancellation.clone();
+    let code =
+        tokio::task::spawn_blocking(move || wait_for_code(&listener, &expected, &cancellation))
+            .await
+            .map_err(|error| error.to_string())??;
 
     let response = crate::core::provider::http()
         .post(format!("{AUTH_BASE}/oauth/token"))
@@ -191,9 +241,31 @@ async fn codex_login_inner(
 }
 
 /// Accept exactly one callback request, validate state, answer with a page.
-fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String, String> {
-    for incoming in listener.incoming() {
-        let mut stream = incoming.map_err(|e| e.to_string())?;
+fn wait_for_code(
+    listener: &TcpListener,
+    expected_state: &str,
+    cancellation: &LoginCancellation,
+) -> Result<String, String> {
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    loop {
+        if cancellation.is_cancelled() {
+            return Err("login cancelled".into());
+        }
+        let (mut stream, _) = match listener.accept() {
+            Ok(pair) => pair,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        // BSD platforms can inherit O_NONBLOCK from the listener. Callback
+        // reads should block only up to the timeout below, not fail before the
+        // browser has written its request.
+        stream.set_nonblocking(false).map_err(|e| e.to_string())?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(250)))
+            .map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
         let mut request_line = String::new();
         reader
@@ -224,7 +296,7 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
                 "State mismatch",
                 "Try again from the terminal.",
             );
-            return Err("state mismatch".into());
+            continue;
         }
         let Some(code) = query.get("code") else {
             let err = query.get("error").copied().unwrap_or("no code");
@@ -239,7 +311,6 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
         respond(&mut stream, 200, "Signed in", "You can close this tab.");
         return Ok(urldecode(code));
     }
-    Err("listener closed".into())
 }
 
 /// The one e surface a browser renders: the wordmark, a title, a dim line —
@@ -339,21 +410,27 @@ const XAI_DEFAULT_LIFETIME_SECS: u64 = 3600;
 pub async fn xai_login(
     notify: tokio::sync::mpsc::Sender<String>,
     outcomes: tokio::sync::mpsc::Sender<Outcome>,
+    cancellation: LoginCancellation,
+    flow_id: u64,
 ) {
-    let (message, outcome) = match xai_login_inner(&notify).await {
+    let (message, outcome) = match xai_login_inner(&notify, &cancellation).await {
         Ok(()) => (
             "signed in to xAI — saved to ~/.e/auth.json".to_string(),
             Outcome::SignedIn {
                 provider: "xai".into(),
+                flow_id: Some(flow_id),
             },
         ),
-        Err(e) => (format!("login failed: {e}"), Outcome::Failed),
+        Err(e) => (format!("login failed: {e}"), Outcome::Failed { flow_id }),
     };
     let _ = notify.send(message).await;
     let _ = outcomes.send(outcome).await;
 }
 
-async fn xai_login_inner(notify: &tokio::sync::mpsc::Sender<String>) -> Result<(), String> {
+async fn xai_login_inner(
+    notify: &tokio::sync::mpsc::Sender<String>,
+    cancellation: &LoginCancellation,
+) -> Result<(), String> {
     let device: serde_json::Value = crate::core::provider::http()
         .post(XAI_DEVICE_CODE_URL)
         .form(&[
@@ -397,6 +474,9 @@ async fn xai_login_inner(notify: &tokio::sync::mpsc::Sender<String>) -> Result<(
     launch_browser(&verify_url, notify).await;
 
     loop {
+        if cancellation.is_cancelled() {
+            return Err("login cancelled".into());
+        }
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
         if std::time::Instant::now() > deadline {
             return Err("xAI device code expired".into());
@@ -476,7 +556,7 @@ pub async fn codex_access(provider: &str) -> Result<(String, String), String> {
     }) = auth::load().get(provider).cloned()
     else {
         return Err(format!(
-            "no OAuth credentials for {provider} — run `e auth {provider}`"
+            "no OAuth credentials for {provider} — start e and run `/login {provider}`"
         ));
     };
     let account = account_id
@@ -503,7 +583,7 @@ pub async fn codex_access(provider: &str) -> Result<(String, String), String> {
     if !response.status().is_success() {
         let status = response.status();
         return Err(format!(
-            "token refresh rejected ({status}) — run `e auth {provider}` again"
+            "token refresh rejected ({status}) — start e and run `/login {provider}` again"
         ));
     }
     let tokens: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
@@ -528,6 +608,24 @@ pub async fn codex_access(provider: &str) -> Result<(String, String), String> {
     Ok((access.to_string(), account))
 }
 
+fn persist_xai_refresh<F>(
+    provider: &str,
+    credential: Credential,
+    persist: F,
+) -> Result<String, String>
+where
+    F: FnOnce(&str, Credential) -> std::io::Result<()>,
+{
+    let access = match &credential {
+        Credential::OAuth { access, .. } => access.clone(),
+        Credential::ApiKey { key } => key.clone(),
+    };
+    persist(provider, credential).map_err(|error| {
+        format!("xAI token refresh succeeded, but saving refreshed credentials failed: {error}")
+    })?;
+    Ok(access)
+}
+
 /// A Bearer / x-api-key value for dialects that don't need an account header.
 /// API keys pass through; OAuth refreshes lazily via the provider's declared
 /// flow (`xai-device` or `codex`).
@@ -548,11 +646,7 @@ pub async fn access_token(provider: &str) -> Result<String, String> {
             match flow.as_deref() {
                 Some("xai-device") => {
                     let fresh = xai_refresh(&refresh).await?;
-                    let _ = auth::set(provider, fresh.clone());
-                    match fresh {
-                        Credential::OAuth { access, .. } => Ok(access),
-                        Credential::ApiKey { key } => Ok(key),
-                    }
+                    persist_xai_refresh(provider, fresh, auth::set)
                 }
                 Some("codex") => codex_access(provider).await.map(|(access, _)| access),
                 other => Err(format!(
@@ -638,5 +732,76 @@ mod tests {
         assert_eq!(super::browser_opener(), "xdg-open");
         #[cfg(target_os = "macos")]
         assert_eq!(super::browser_opener(), "open");
+    }
+    fn callback(addr: std::net::SocketAddr, path: &str) -> String {
+        use std::io::{Read, Write};
+        let mut client = std::net::TcpStream::connect(addr).unwrap();
+        write!(client, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn wrong_state_callback_does_not_abort_the_active_login() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cancellation = super::LoginCancellation::default();
+        let server_cancel = cancellation.clone();
+        let server =
+            std::thread::spawn(move || super::wait_for_code(&listener, "expected", &server_cancel));
+
+        let wrong = callback(addr, "/auth/callback?code=stale&state=wrong");
+        assert!(wrong.starts_with("HTTP/1.1 400"));
+        let correct = callback(addr, "/auth/callback?code=fresh&state=expected");
+        assert!(correct.starts_with("HTTP/1.1 200"));
+        assert_eq!(server.join().unwrap().unwrap(), "fresh");
+    }
+
+    #[test]
+    fn cancellation_releases_the_callback_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cancellation = super::LoginCancellation::default();
+        let server_cancel = cancellation.clone();
+        let server =
+            std::thread::spawn(move || super::wait_for_code(&listener, "expected", &server_cancel));
+
+        cancellation.cancel();
+        assert_eq!(server.join().unwrap().unwrap_err(), "login cancelled");
+        std::net::TcpListener::bind(addr).expect("cancelled login releases its callback port");
+    }
+
+    #[test]
+    fn xai_refresh_persistence_failure_is_not_reported_as_success() {
+        let fresh = super::xai_credential(
+            &serde_json::json!({
+                "access_token": "new-access",
+                "refresh_token": "rotated-refresh",
+                "expires_in": 3600
+            }),
+            Some("old-refresh"),
+        )
+        .unwrap();
+        let result = super::persist_xai_refresh("xai", fresh, |_, credential| {
+            match credential {
+                super::Credential::OAuth {
+                    access, refresh, ..
+                } => {
+                    assert_eq!(access, "new-access");
+                    assert_eq!(refresh, "rotated-refresh");
+                }
+                super::Credential::ApiKey { .. } => panic!("xAI refresh returned an API key"),
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "auth.json is read-only",
+            ))
+        });
+
+        let error = result.unwrap_err();
+        assert!(error.contains("refresh succeeded"));
+        assert!(error.contains("saving refreshed credentials failed"));
+        assert!(error.contains("Permission denied") || error.contains("read-only"));
     }
 }

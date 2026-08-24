@@ -504,3 +504,88 @@ fn a_partial_override_inherits_the_builtins_thinking_mode() {
         "correcting one field must not swap the thinking wire shape"
     );
 }
+
+#[test]
+fn a_custom_provider_without_base_url_is_rejected_with_a_warning() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("e-model-base-required-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+    std::fs::write(
+        dir.join("models.json"),
+        r#"{"providers":{"custom":{"models":["secret-target"]}}}"#,
+    )
+    .unwrap();
+
+    let catalog = e::core::provider::catalog::catalog();
+    assert!(
+        !catalog
+            .iter()
+            .any(|model| model.provider == "custom" && model.id == "secret-target"),
+        "a provider with no endpoint must not inherit an unrelated host"
+    );
+    assert_eq!(
+        e::core::provider::catalog::config_warnings(),
+        vec!["models.json: provider custom requires an explicit base_url"]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn trust_keys_distinguish_non_utf8_paths_with_the_same_lossy_form() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("e-trust-bytes-{}", std::process::id()));
+    let parent = home.join("workspaces");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&parent).unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    let first = parent.join(std::ffi::OsString::from_vec(b"project-\xff".to_vec()));
+    let second = parent.join(std::ffi::OsString::from_vec(b"project-\xfe".to_vec()));
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+
+    e::core::config::trust::set(&first, true).unwrap();
+    assert_eq!(e::core::config::trust::status(&first), Some(true));
+    assert_eq!(
+        e::core::config::trust::status(&second),
+        None,
+        "a distinct raw path must receive its own trust decision"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn legacy_utf8_trust_keys_remain_readable() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("e-trust-legacy-{}", std::process::id()));
+    let workspace = home.join("workspace");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::env::set_var("E_HOME", &home);
+    let workspace = workspace.canonicalize().unwrap();
+    let legacy = workspace.to_str().unwrap();
+
+    std::fs::write(
+        home.join("trust.json"),
+        serde_json::to_vec(&serde_json::json!({
+            legacy: { "trusted": true }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        e::core::config::trust::status(&workspace),
+        Some(true),
+        "valid UTF-8 trust decisions migrate read-only"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}

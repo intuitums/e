@@ -19,6 +19,9 @@ built-in's provider and id replaces it — the file wins, like themes.
 }
 ```
 
+- `base_url` is required for a new provider. Entries for built-in providers
+  may omit it and inherit that provider's endpoint; e never guesses another
+  provider's host.
 - `api`: `openai-completions` (default), `openai-responses`, or
   `anthropic-messages`.
 - `context_window` may sit on the provider (default for its models) or on a

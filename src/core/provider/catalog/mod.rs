@@ -137,6 +137,27 @@ enum ModelEntry {
     },
 }
 
+/// Configuration problems that caused user-declared providers to be omitted.
+/// Callers surface these in their own UI; the catalog itself stays data-only.
+pub fn config_warnings() -> Vec<String> {
+    let path = home::home().join("models.json");
+    let json = match std::fs::read_to_string(path) {
+        Ok(json) => json,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => return vec![format!("models.json: cannot read configuration: {error}")],
+    };
+    let file = match serde_json::from_str::<ModelsFile>(&json) {
+        Ok(file) => file,
+        Err(error) => return vec![format!("models.json: invalid configuration: {error}")],
+    };
+    file.providers
+        .into_iter()
+        .filter_map(|(provider, entry)| {
+            (entry.base_url.is_none() && crate::core::provider::registry::find(&provider).is_none())
+                .then(|| format!("models.json: provider {provider} requires an explicit base_url"))
+        })
+        .collect()
+}
 /// Built-ins plus `~/.e/models.json` — and the file wins on a name clash,
 /// the same rule as themes: never override what the user declared.
 pub fn catalog() -> Vec<Model> {
@@ -158,12 +179,13 @@ pub fn catalog() -> Vec<Model> {
                     }),
                     None => builtin.map(|p| p.api()).unwrap_or(Api::Completions),
                 };
-                let base = entry.base_url.clone().or_else(|| {
-                    builtin.map(|p| p.base_url.clone()).or_else(|| {
-                        crate::core::provider::registry::find("opencode-go")
-                            .map(|p| p.base_url.clone())
-                    })
-                });
+                let Some(base) = entry
+                    .base_url
+                    .clone()
+                    .or_else(|| builtin.map(|p| p.base_url.clone()))
+                else {
+                    continue;
+                };
                 for model in entry.models {
                     let (id, window, efforts, thinking) = match model {
                         ModelEntry::Id(id) => (id, None, Vec::new(), None),
@@ -178,7 +200,7 @@ pub fn catalog() -> Vec<Model> {
                     let resolved = Model {
                         provider: provider.clone(),
                         id,
-                        base_url: base.clone().unwrap_or_default(),
+                        base_url: base.clone(),
                         api,
                         efforts: match (&entry.efforts, &efforts) {
                             // Per-model declaration wins…
