@@ -1365,6 +1365,9 @@ impl App {
                     self.notice(format!("error: {message}"));
                 }
             }
+            SessionEvent::Warning(message) => {
+                self.notice(format!("warning: {message}"));
+            }
             SessionEvent::TurnEnd { aborted } => {
                 self.agent.on_turn_end();
                 if aborted {
@@ -1647,9 +1650,8 @@ fn ago(ms: u64) -> String {
     }
 }
 
-pub fn system_prompt() -> String {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    crate::core::agent::context::system_prompt(&cwd)
+fn system_prompt() -> String {
+    crate::core::agent::context::system_prompt_here()
 }
 
 fn persist_model(m: &Model) {

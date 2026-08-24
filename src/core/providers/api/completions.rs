@@ -8,13 +8,11 @@ use tokio::sync::mpsc;
 
 use crate::core::auth::login;
 use crate::core::providers::{
-    http, next_sse_chunk, retry_after_seconds, send_request, Event, ProviderError, Request,
-    SseSplitter, ToolCall,
+    http, require_success, send_request, Event, FinishReason, ProviderError, Request, SseStream,
+    StreamEnd, ToolCall,
 };
 
-type RunError = ProviderError;
-
-pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
+pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEnd, ProviderError> {
     let key = login::access_token(request.model.provider.as_str())
         .await
         .map_err(ProviderError::auth)?;
@@ -58,21 +56,17 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         body["tools"] = json!(request.tools);
     }
 
-    let response = send_request(
-        http()
-            .post(format!("{}/chat/completions", request.model.base_url))
-            .bearer_auth(&key)
-            .header("accept", "text/event-stream")
-            .json(&body),
+    let response = require_success(
+        send_request(
+            http()
+                .post(format!("{}/chat/completions", request.model.base_url))
+                .bearer_auth(&key)
+                .header("accept", "text/event-stream")
+                .json(&body),
+        )
+        .await?,
     )
     .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let retry_after = retry_after_seconds(&response);
-        let text = response.text().await.unwrap_or_default();
-        return Err(ProviderError::from_status(status, &text).with_retry_after(retry_after));
-    }
 
     // Tool-call fragments accumulate per stream index until [DONE].
     let mut pending: BTreeMap<u64, ToolCall> = BTreeMap::new();
@@ -88,17 +82,21 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         }
     };
 
-    let mut splitter = SseSplitter::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = next_sse_chunk(&mut stream).await? {
-        for payload in splitter.feed_bytes(&chunk) {
+    let mut sse = SseStream::new(response.bytes_stream());
+    let mut finish = FinishReason::Normal;
+    loop {
+        let payload = sse.next().await?;
+        {
             if payload == "[DONE]" {
                 flush(&mut pending, tx).await;
-                return Ok(());
+                return Ok(sse.end(finish));
             }
             let value: serde_json::Value = match serde_json::from_str(&payload) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(_) => {
+                    sse.malformed();
+                    continue;
+                }
             };
             if let Some(delta) = value["choices"][0]["delta"].as_object() {
                 if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
@@ -133,9 +131,18 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                     }
                 }
             }
-            // A finish_reason of tool_calls closes the accumulation early.
-            if value["choices"][0]["finish_reason"].as_str() == Some("tool_calls") {
-                flush(&mut pending, tx).await;
+            if let Some(reason) = value["choices"][0]["finish_reason"].as_str() {
+                finish = match reason {
+                    "stop" => FinishReason::Normal,
+                    "tool_calls" => FinishReason::ToolCalls,
+                    "length" => FinishReason::Length,
+                    "content_filter" => FinishReason::ContentFilter,
+                    other => FinishReason::Other(other.to_string()),
+                };
+                // A finish_reason of tool_calls closes the accumulation early.
+                if finish == FinishReason::ToolCalls {
+                    flush(&mut pending, tx).await;
+                }
             }
             if let Some(usage) = value.get("usage").filter(|u| !u.is_null()) {
                 let cached = usage["prompt_tokens_details"]["cached_tokens"]
@@ -151,6 +158,4 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
             }
         }
     }
-    // EOF without [DONE] is a broken stream, not a successful empty reply.
-    Err(ProviderError::stalled("stream ended unexpectedly"))
 }

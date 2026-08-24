@@ -72,7 +72,7 @@ async fn responses_tools_are_flat_on_the_wire() {
         match event {
             Event::TextDelta(d) => text.push_str(&d),
             Event::Error(err) => panic!("stream errored: {}", err.message),
-            Event::Done => break,
+            Event::Done(_) => break,
             _ => {}
         }
     }

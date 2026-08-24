@@ -90,7 +90,7 @@ async fn completions_stream_parses_deltas_and_usage() {
                 output,
                 cache_read,
             } => usage = Some((input, output, cache_read)),
-            Event::Done => {
+            Event::Done(_) => {
                 done = true;
                 break;
             }
@@ -327,7 +327,7 @@ async fn unexpected_eof_is_an_error_not_a_silent_done() {
                 terminal = Some(err.message);
                 break;
             }
-            Event::Done => panic!("unexpected EOF must not finish as Done"),
+            Event::Done(_) => panic!("unexpected EOF must not finish as Done"),
             _ => {}
         }
     }
@@ -637,4 +637,126 @@ async fn a_blank_successful_stream_surfaces_an_error_not_silence() {
         }
     }
     assert!(saw_error, "a blank success must surface an error");
+}
+
+/// A 200 stream the provider cut at its output limit must not read as a
+/// finished turn: the finish reason is mapped, and skipped malformed
+/// payloads are counted instead of vanishing.
+#[tokio::test(flavor = "multi_thread")]
+async fn truncation_and_malformed_payloads_surface_in_stream_end() {
+    use e::core::providers::FinishReason;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let home = std::env::temp_dir().join(format!("e-test-finish-{port}"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 8192];
+        let _ = sock.read(&mut buffer);
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            "data: {not json at all}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        sock.write_all(response.as_bytes()).unwrap();
+    });
+
+    let request = Request {
+        model: Model {
+            provider: "mock".into(),
+            id: "m".into(),
+            base_url: format!("http://127.0.0.1:{port}"),
+            api: Api::Completions,
+            efforts: Vec::new(),
+            thinking: e::core::providers::catalog::Thinking::Manual,
+            context_window: 200_000,
+        },
+        system: "sys".into(),
+        messages: vec![ChatMessage::user("hi")],
+        effort: None,
+        tools: Vec::new(),
+    };
+    let (mut rx, _handle) = stream(request);
+
+    let mut end = None;
+    while let Some(event) = rx.recv().await {
+        match event {
+            Event::Done(e) => {
+                end = Some(e);
+                break;
+            }
+            Event::Error(err) => panic!("stream error: {}", err.message),
+            _ => {}
+        }
+    }
+    let end = end.unwrap();
+    assert_eq!(end.finish, FinishReason::Length);
+    assert_eq!(end.malformed, 1);
+}
+
+/// End to end: an abnormal finish becomes a visible turn warning, not a
+/// silently accepted truncation.
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_warns_on_truncated_turn() {
+    use e::core::agent::{Agent, SessionEvent};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let home = std::env::temp_dir().join(format!("e-test-warn-{port}"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 8192];
+        let _ = sock.read(&mut buffer);
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"cut off mid\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        sock.write_all(response.as_bytes()).unwrap();
+    });
+
+    let model = Model {
+        provider: "mock".into(),
+        id: "m".into(),
+        base_url: format!("http://127.0.0.1:{port}"),
+        api: Api::Completions,
+        efforts: Vec::new(),
+        thinking: e::core::providers::catalog::Thinking::Manual,
+        context_window: 200_000,
+    };
+    let (mut agent, mut rx) = Agent::new(model);
+    agent.submit("hi".into(), "sys".into());
+
+    let mut warning = None;
+    while let Some(event) = rx.recv().await {
+        match event {
+            SessionEvent::Warning(message) => warning = Some(message),
+            SessionEvent::TurnEnd { .. } => break,
+            _ => {}
+        }
+    }
+    let warning = warning.expect("a truncated turn must warn");
+    assert!(
+        warning.contains("truncated"),
+        "unexpected warning: {warning}"
+    );
 }

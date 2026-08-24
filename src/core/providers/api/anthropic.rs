@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use crate::core::auth::login;
 use crate::core::providers::catalog::Thinking;
 use crate::core::providers::{
-    http, next_sse_chunk, retry_after_seconds, send_request, Event, FailureCause, ProviderError,
-    Request, SseSplitter, ToolCall,
+    http, require_success, send_request, Event, FailureCause, FinishReason, ProviderError, Request,
+    SseStream, StreamEnd, ToolCall,
 };
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -29,9 +29,7 @@ fn thinking_budget(effort: &str) -> u64 {
     }
 }
 
-type RunError = ProviderError;
-
-pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
+pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEnd, ProviderError> {
     let key = login::access_token(request.model.provider.as_str())
         .await
         .map_err(ProviderError::auth)?;
@@ -112,34 +110,32 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         }
     }
 
-    let response = send_request(
-        http()
-            .post(format!("{}/v1/messages", request.model.base_url))
-            .header("x-api-key", &key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("accept", "text/event-stream")
-            .json(&body),
+    let response = require_success(
+        send_request(
+            http()
+                .post(format!("{}/v1/messages", request.model.base_url))
+                .header("x-api-key", &key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("accept", "text/event-stream")
+                .json(&body),
+        )
+        .await?,
     )
     .await?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let retry_after = retry_after_seconds(&response);
-        let text = response.text().await.unwrap_or_default();
-        return Err(ProviderError::from_status(status, &text).with_retry_after(retry_after));
-    }
-
-    let mut splitter = SseSplitter::new();
-    let mut stream = response.bytes_stream();
+    let mut sse = SseStream::new(response.bytes_stream());
     // Tool input JSON streams in fragments per content block index.
     let mut open_tool: Option<(ToolCall, usize)> = None;
     let mut input_tokens = 0u64;
     let mut cache_read = 0u64;
     let mut output_tokens = 0u64;
+    let mut finish = FinishReason::Normal;
 
-    while let Some(chunk) = next_sse_chunk(&mut stream).await? {
-        for payload in splitter.feed_bytes(&chunk) {
+    loop {
+        let payload = sse.next().await?;
+        {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                sse.malformed();
                 continue;
             };
             match value["type"].as_str().unwrap_or("") {
@@ -193,6 +189,15 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                     if let Some(out) = value["usage"]["output_tokens"].as_u64() {
                         output_tokens = out;
                     }
+                    if let Some(reason) = value["delta"]["stop_reason"].as_str() {
+                        finish = match reason {
+                            "end_turn" | "stop_sequence" => FinishReason::Normal,
+                            "tool_use" => FinishReason::ToolCalls,
+                            "max_tokens" => FinishReason::Length,
+                            "refusal" => FinishReason::Refusal,
+                            other => FinishReason::Other(other.to_string()),
+                        };
+                    }
                 }
                 "message_stop" => {
                     let _ = tx
@@ -202,7 +207,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                             cache_read,
                         })
                         .await;
-                    return Ok(());
+                    return Ok(sse.end(finish));
                 }
                 "error" => {
                     let message = value["error"]["message"]
@@ -225,5 +230,4 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
             }
         }
     }
-    Err(ProviderError::stalled("stream ended unexpectedly"))
 }

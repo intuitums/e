@@ -103,7 +103,7 @@ async fn anthropic_stream_round_trip() {
                 cache_read,
             } => usage = Some((input, output, cache_read)),
             Event::Error(err) => panic!("stream errored: {}", err.message),
-            Event::Done => break,
+            Event::Done(_) => break,
             Event::ReasoningItem(_) => {}
         }
     }
@@ -189,7 +189,7 @@ async fn adaptive_models_take_effort_through_output_config_not_budget_tokens() {
     while let Some(event) = rx.recv().await {
         match event {
             Event::Error(err) => panic!("stream errored: {}", err.message),
-            Event::Done => break,
+            Event::Done(_) => break,
             _ => {}
         }
     }

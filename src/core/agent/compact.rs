@@ -101,7 +101,7 @@ pub async fn summarize(model: Model, history: &[ChatMessage]) -> Result<String, 
         match event {
             Event::TextDelta(d) => summary.push_str(&d),
             Event::Error(err) => return Err(err.message),
-            Event::Done => break,
+            Event::Done(_) => break,
             _ => {}
         }
     }

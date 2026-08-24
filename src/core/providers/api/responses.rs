@@ -11,13 +11,11 @@ use tokio::sync::mpsc;
 
 use crate::core::auth::{self, login, Credential};
 use crate::core::providers::{
-    http, next_sse_chunk, retry_after_seconds, send_request, Event, FailureCause, ProviderError,
-    Request, SseSplitter, ToolCall,
+    http, require_success, send_request, Event, FailureCause, FinishReason, ProviderError, Request,
+    SseStream, StreamEnd, ToolCall,
 };
 
-type RunError = ProviderError;
-
-pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunError> {
+pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEnd, ProviderError> {
     // A plain API key means the standard platform mount (`{base}/responses`,
     // bearer only); OAuth means the ChatGPT backend (`{base}/codex/responses`
     // plus the account header), with lazy refresh.
@@ -117,27 +115,23 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     builder = builder
         .bearer_auth(&access)
         .header("accept", "text/event-stream");
-    let response = send_request(builder.json(&body)).await?;
+    let response = require_success(send_request(builder.json(&body)).await?).await?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let retry_after = retry_after_seconds(&response);
-        let text = response.text().await.unwrap_or_default();
-        return Err(ProviderError::from_status(status, &text).with_retry_after(retry_after));
-    }
-
-    let mut splitter = SseSplitter::new();
-    let mut stream = response.bytes_stream();
+    let mut sse = SseStream::new(response.bytes_stream());
     // function_call items accumulate argument deltas keyed by item id.
     let mut pending: std::collections::BTreeMap<String, ToolCall> = Default::default();
-    while let Some(chunk) = next_sse_chunk(&mut stream).await? {
-        for payload in splitter.feed_bytes(&chunk) {
+    loop {
+        let payload = sse.next().await?;
+        {
             if payload == "[DONE]" {
-                return Ok(());
+                return Ok(sse.end(FinishReason::Normal));
             }
             let value: serde_json::Value = match serde_json::from_str(&payload) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(_) => {
+                    sse.malformed();
+                    continue;
+                }
             };
             match value["type"].as_str().unwrap_or("") {
                 "response.output_text.delta" => {
@@ -210,7 +204,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                         }
                     }
                 }
-                "response.completed" | "response.done" | "response.incomplete" => {
+                kind @ ("response.completed" | "response.done" | "response.incomplete") => {
                     let usage = &value["response"]["usage"];
                     if usage.is_object() {
                         let cached = usage["input_tokens_details"]["cached_tokens"]
@@ -224,7 +218,22 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
                             })
                             .await;
                     }
-                    return Ok(());
+                    // `response.incomplete` is a truncated reply the API still
+                    // delivers with a 200 — name why instead of passing it off
+                    // as a finished turn.
+                    let finish = if kind == "response.incomplete" {
+                        match value["response"]["incomplete_details"]["reason"]
+                            .as_str()
+                            .unwrap_or("")
+                        {
+                            "max_output_tokens" | "max_tokens" => FinishReason::Length,
+                            "content_filter" => FinishReason::ContentFilter,
+                            other => FinishReason::Other(format!("incomplete: {other}")),
+                        }
+                    } else {
+                        FinishReason::Normal
+                    };
+                    return Ok(sse.end(finish));
                 }
                 "response.failed" => {
                     let message = value["response"]["error"]["message"]
@@ -242,5 +251,4 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
             }
         }
     }
-    Err(ProviderError::stalled("stream ended unexpectedly"))
 }

@@ -152,7 +152,7 @@ async fn ask(
     }
     let (mut agent, mut events) = Agent::new(model::default_model());
     agent.set_host(host.clone());
-    agent.submit(prompt, app::system_prompt());
+    agent.submit(prompt, e::core::agent::context::system_prompt_here());
 
     use std::io::Write as _;
     let mut text = String::new();
@@ -215,6 +215,9 @@ async fn ask(
             SessionEvent::Error(message) => {
                 eprintln!("error: {message}");
                 failed = true;
+            }
+            SessionEvent::Warning(message) => {
+                eprintln!("warning: {message}");
             }
             SessionEvent::TurnEnd { .. } => break,
             _ => {}

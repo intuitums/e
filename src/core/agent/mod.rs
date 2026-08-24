@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::core::providers::catalog::{slug, Model};
 use crate::core::providers::{
-    self, ChatMessage, Event as ProviderEvent, FailureCause, Request, ToolCall,
+    self, ChatMessage, Event as ProviderEvent, FailureCause, FinishReason, Request, ToolCall,
 };
 use crate::core::session::Session;
 use crate::core::tools;
@@ -123,6 +123,10 @@ pub enum SessionEvent {
         cache_read: u64,
     },
     Error(String),
+    /// A non-fatal turn problem worth showing: a truncated or refused reply
+    /// the provider delivered as success, or malformed stream frames that
+    /// were skipped.
+    Warning(String),
     /// A retryable failure is being backed off before another attempt.
     Retry {
         attempt: u32,
@@ -513,7 +517,39 @@ impl Agent {
                             let _ = events.send(SessionEvent::Error(message)).await;
                             errored = true;
                         }
-                        ProviderEvent::Done => {}
+                        ProviderEvent::Done(end) => {
+                            // The stream completed, but not necessarily with
+                            // the full answer — a truncated, refused, or
+                            // filtered reply arrives as an HTTP success and
+                            // must not pass silently.
+                            let finish_warning = match &end.finish {
+                                FinishReason::Normal | FinishReason::ToolCalls => None,
+                                FinishReason::Length => Some(
+                                    "reply truncated: the provider hit its output limit".into(),
+                                ),
+                                FinishReason::Refusal => {
+                                    Some("the model refused to answer".to_string())
+                                }
+                                FinishReason::ContentFilter => Some(
+                                    "output blocked by the provider's content filter".to_string(),
+                                ),
+                                FinishReason::Other(reason) => {
+                                    Some(format!("turn ended abnormally: {reason}"))
+                                }
+                            };
+                            if let Some(warning) = finish_warning {
+                                let _ = events.send(SessionEvent::Warning(warning)).await;
+                            }
+                            if end.malformed > 0 {
+                                let _ = events
+                                    .send(SessionEvent::Warning(format!(
+                                        "{} malformed stream event{} skipped",
+                                        end.malformed,
+                                        if end.malformed == 1 { "" } else { "s" }
+                                    )))
+                                    .await;
+                            }
+                        }
                     }
                 }
                 if errored {
@@ -522,10 +558,9 @@ impl Agent {
 
                 // A stream that ends with no text, no calls, no reasoning,
                 // and no error is a blank success — committing it would strand
-                // the turn in silence. The dialect-level causes (dropped
-                // malformed frames, ignored refusal/truncation finish reasons)
-                // are tracked separately; here we guarantee the user at least
-                // sees that something went wrong.
+                // the turn in silence. Abnormal finishes and skipped frames
+                // were already surfaced as warnings above; here we guarantee
+                // the user at least sees that something went wrong.
                 if text.is_empty()
                     && calls.is_empty()
                     && reasoning_items.is_empty()
