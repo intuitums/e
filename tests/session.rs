@@ -217,3 +217,115 @@ fn session_keys_preserve_non_utf8_path_bytes() {
     assert_eq!(session::list(&cwd).len(), 1);
     let _ = std::fs::remove_dir_all(home);
 }
+
+#[test]
+fn a_session_open_in_one_place_cannot_be_appended_to_from_another() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!(
+        "e-session-lock-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    let cwd = home.join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut owner = Session::create(&cwd, "test/model").unwrap();
+    owner.append(&ChatMessage::user("owned here"));
+    let path = owner.path().to_path_buf();
+
+    let second = Session::reopen(&path).err().unwrap();
+    assert_eq!(second.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(
+        second.to_string().contains("already active"),
+        "the error must name the conflict: {second}"
+    );
+
+    // Releasing the first Session releases the lock.
+    drop(owner);
+    let mut resumed = Session::reopen(&path).unwrap();
+    resumed.append(&ChatMessage::user("back in"));
+    drop(resumed);
+    assert_eq!(Session::load(&path).unwrap().len(), 2);
+
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn a_stale_lock_from_a_crashed_e_is_stolen_not_worshipped() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!(
+        "e-session-stale-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    let cwd = home.join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let s = Session::create(&cwd, "test/model").unwrap();
+    let path = s.path().to_path_buf();
+    let lock_path = path.with_extension("lock");
+    assert!(lock_path.exists());
+
+    // A crashed writer leaves its PID behind; that process is gone now if
+    // we write one that cannot exist. The lock must yield.
+    std::fs::write(&lock_path, b"4194304\n").unwrap();
+    assert!(std::path::Path::new(&lock_path).exists());
+    let _ = Session::reopen(&path).unwrap();
+
+    // An empty or unparseable lock (crashed between create and PID write)
+    // must not wedge the session shut either.
+    std::fs::write(&lock_path, b"").unwrap();
+    let _ = Session::reopen(&path).unwrap();
+
+    drop(s);
+
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn a_corrupted_record_is_surfaced_not_silently_dropped() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!(
+        "e-session-corrupt-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    let cwd = home.join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut s = Session::create(&cwd, "test/model").unwrap();
+    s.append(&ChatMessage::user("first"));
+    s.append(&ChatMessage::assistant("second", Vec::new()));
+    let path = s.path().to_path_buf();
+    drop(s);
+
+    // Interleave two half-written records the way unlocked writers would.
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let mut lines: Vec<String> = raw.lines().map(String::from).collect();
+    // Interleave two half-written records the way unlocked writers would:
+    // one shared line holding both JSON objects, then the orphaned tail.
+    let record = std::mem::take(&mut lines[2]);
+    let (head, tail) = record.split_at(20);
+    lines[1].push_str(head);
+    lines.insert(2, tail.to_string());
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+    let err = Session::load(&path).err().unwrap();
+    assert!(
+        err.to_string().contains("corrupt session record"),
+        "load must report corruption: {err}"
+    );
+    // And the file no longer presents itself as a clean resumable session.
+    assert!(session::list(&cwd).is_empty());
+
+    let _ = std::fs::remove_dir_all(home);
+}

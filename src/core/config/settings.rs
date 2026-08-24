@@ -56,6 +56,7 @@ pub fn remove(key: &str) {
 /// extension's initialize so none has to squat on a top-level key.
 pub fn extensions_config() -> serde_json::Value {
     crate::core::config::store::read_object(&home::settings_path())
+        .unwrap_or_default()
         .get("extensions")
         .cloned()
         .unwrap_or(serde_json::Value::Object(Default::default()))
