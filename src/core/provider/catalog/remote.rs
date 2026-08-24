@@ -181,10 +181,9 @@ async fn fetch_models(provider: &str, base: &str) -> Option<Vec<(String, Option<
         let Some(id) = entry["id"].as_str() else {
             continue;
         };
-        // Gateways that report a type (Vercel AI Gateway and friends) list
-        // embeddings, images, video, speech beside chat models. Keep the
-        // picker for language models; fall back to the id heuristic when
-        // the provider doesn't say.
+        // Providers that report a type list embeddings, images, video, and
+        // speech beside chat models. Keep the picker for language models;
+        // fall back to the id heuristic when the provider doesn't say.
         if let Some(kind) = entry["type"].as_str() {
             if kind != "language" {
                 continue;

@@ -1,21 +1,19 @@
 # Audit backlog triage (#51–#99)
 
-Forty-nine issues filed 2026-08-23 from the post-audit pass (after #42–#47 landed in PR #50). Valid findings, unworkable as 49 separate agent tasks.
+Forty-nine issues filed 2026-08-23 from the post-audit pass (after #42–#47 landed in PR #50). Grouped into six epics.
 
 **GitHub epics:** [#100](https://github.com/fschrhunt/e/issues/100)–[#105](https://github.com/fschrhunt/e/issues/105) · **Index:** [#106](https://github.com/fschrhunt/e/issues/106)
 
-**Rule:** one agent branch per epic, not one agent per child issue.
-
 ## Epics
 
-| Order | Epic | Branch | Issues |
-|-------|------|--------|--------|
-| 1 | [#100 Auth, credentials, config](https://github.com/fschrhunt/e/issues/100) | `cursor/auth-config-safety-f600` | 64, 65, 66, 89, 97, 98, 99 |
-| 2 | [#101 Session persistence](https://github.com/fschrhunt/e/issues/101) | `cursor/session-integrity-f600` | 57, 78, 79, 80, 91 |
-| 3 | [#102 Tool execution](https://github.com/fschrhunt/e/issues/102) | `cursor/tool-execution-f600` | 53, 63, 95, 96 |
-| 4 | [#103 Provider streaming](https://github.com/fschrhunt/e/issues/103) | `cursor/provider-streaming-f600` | 51, 52, 56, 58, 73, 74, 75, 76, 90 |
-| 5 | [#104 TUI hardening](https://github.com/fschrhunt/e/issues/104) | `cursor/tui-hardening-f600` | 81–88, 93, 94 |
-| 6 | [#105 Extension lifecycle](https://github.com/fschrhunt/e/issues/105) | `cursor/extension-lifecycle-f600` | 54, 55, 60–62, 67–72, 77, 92 |
+| Order | Epic | Issues |
+|-------|------|--------|
+| 1 | [#100 Auth, credentials, config](https://github.com/fschrhunt/e/issues/100) | 64, 65, 66, 89, 97, 98, 99 |
+| 2 | [#101 Session persistence](https://github.com/fschrhunt/e/issues/101) | 57, 78, 79, 80, 91 |
+| 3 | [#102 Tool execution](https://github.com/fschrhunt/e/issues/102) | 53, 63, 95, 96 |
+| 4 | [#103 Provider streaming](https://github.com/fschrhunt/e/issues/103) | 51, 52, 56, 58, 73, 74, 75, 76, 90 |
+| 5 | [#104 TUI hardening](https://github.com/fschrhunt/e/issues/104) | 81–88, 93, 94 |
+| 6 | [#105 Extension lifecycle](https://github.com/fschrhunt/e/issues/105) | 54, 55, 60–62, 67–72, 77, 92 |
 
 ## Per-issue slotting
 
@@ -91,16 +89,6 @@ Forty-nine issues filed 2026-08-23 from the post-audit pass (after #42–#47 lan
 | 85 | 0–3 column terminal — extreme edge |
 | 89 | Non-UTF-8 path trust collision — exotic |
 | 63 | grep dotfile quirk |
-
-## Agent checklist (every epic PR)
-
-```sh
-cargo test
-cargo fmt --check && cargo clippy --all-targets -- -D warnings
-./scripts/guard.sh
-```
-
-TUI epic (#104): verify with PTY harness in `scripts/`.
 
 ## #90 body (was empty at filing)
 

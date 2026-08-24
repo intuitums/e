@@ -150,18 +150,18 @@ fn xai_builtins_carry_their_real_windows() {
         e::core::provider::catalog::display_name("vercel"),
         "Vercel AI Gateway"
     );
-    let nano = catalog
+    let sonnet = catalog
         .iter()
-        .find(|m| m.provider == "vercel" && m.id == "openai/gpt-4.1-nano")
+        .find(|m| m.provider == "vercel" && m.id == "anthropic/claude-sonnet-5")
         .unwrap();
-    assert_eq!(nano.base_url, "https://ai-gateway.vercel.sh/v1");
+    assert_eq!(sonnet.base_url, "https://ai-gateway.vercel.sh/v1");
     assert!(matches!(
-        nano.api,
+        sonnet.api,
         e::core::provider::catalog::Api::Completions
     ));
     assert_eq!(
-        e::core::provider::catalog::slug(nano),
-        "vercel/openai/gpt-4.1-nano"
+        e::core::provider::catalog::slug(sonnet),
+        "vercel/anthropic/claude-sonnet-5"
     );
 }
 
@@ -465,8 +465,8 @@ fn vercel_env_key_signs_the_gateway_in() {
     std::env::set_var("AI_GATEWAY_API_KEY", "vck-test");
     let available = e::core::provider::catalog::available();
     assert!(available.iter().all(|m| m.provider == "vercel"));
-    assert!(e::core::provider::catalog::resolve("openai/gpt-4.1-nano").is_some());
-    assert!(e::core::provider::catalog::resolve("vercel/openai/gpt-4.1-nano").is_some());
+    assert!(e::core::provider::catalog::resolve("anthropic/claude-sonnet-5").is_some());
+    assert!(e::core::provider::catalog::resolve("vercel/anthropic/claude-sonnet-5").is_some());
     std::env::remove_var("AI_GATEWAY_API_KEY");
     let _ = std::fs::remove_dir_all(&dir);
 }
