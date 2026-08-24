@@ -75,6 +75,7 @@ pub fn all() -> &'static [Provider] {
             include_str!("providers/xai.json"),
             include_str!("providers/openai.json"),
             include_str!("providers/anthropic.json"),
+            include_str!("providers/vercel.json"),
         ]
         .iter()
         .map(|json| {

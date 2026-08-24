@@ -146,6 +146,23 @@ fn xai_builtins_carry_their_real_windows() {
         e::core::provider::catalog::display_name("openai-codex"),
         "OpenAI Codex"
     );
+    assert_eq!(
+        e::core::provider::catalog::display_name("vercel"),
+        "Vercel AI Gateway"
+    );
+    let nano = catalog
+        .iter()
+        .find(|m| m.provider == "vercel" && m.id == "openai/gpt-4.1-nano")
+        .unwrap();
+    assert_eq!(nano.base_url, "https://ai-gateway.vercel.sh/v1");
+    assert!(matches!(
+        nano.api,
+        e::core::provider::catalog::Api::Completions
+    ));
+    assert_eq!(
+        e::core::provider::catalog::slug(nano),
+        "vercel/openai/gpt-4.1-nano"
+    );
 }
 
 #[test]
@@ -304,7 +321,9 @@ async fn provider_reported_models_appear_without_a_release() {
             {"id":"brand-new-model","context_length":64000},
             {"id":"small","context_length":123456},
             {"id":"text-embedding-large"},
-            {"id":"brand-new-model-20260101"}
+            {"id":"brand-new-model-20260101"},
+            {"id":"fine-looking-embed","type":"embedding","context_length":8192},
+            {"id":"typed-chat","type":"language","context_window":8000}
         ]}"#;
         let _ = a.write_all(
             format!(
@@ -346,9 +365,18 @@ async fn provider_reported_models_appear_without_a_release() {
         .find(|m| m.provider == "mock" && m.id == "small")
         .expect("declared model stays listed");
     assert_eq!(known.context_window, 123_456);
-    // Non-chat ids and dated aliases of listed models stay out.
+    // Non-chat ids, typed non-language models, and dated aliases stay out.
     assert!(!catalog.iter().any(|m| m.id == "text-embedding-large"));
     assert!(!catalog.iter().any(|m| m.id == "brand-new-model-20260101"));
+    assert!(
+        !catalog.iter().any(|m| m.id == "fine-looking-embed"),
+        "a non-language type is dropped even when the id looks like chat"
+    );
+    let typed = catalog
+        .iter()
+        .find(|m| m.provider == "mock" && m.id == "typed-chat")
+        .expect("language type is kept");
+    assert_eq!(typed.context_window, 8_000);
     let available = e::core::provider::catalog::available();
     assert!(available.iter().any(|m| m.id == "brand-new-model"));
 
@@ -382,9 +410,15 @@ fn the_registry_is_coherent() {
             );
         }
     }
-    // The panels' contents, from data: two account flows, five key providers.
+    // The panels' contents, from data: two account flows, six key providers.
     assert_eq!(registry::oauth_providers().len(), 2);
-    assert_eq!(registry::key_providers().len(), 5);
+    assert_eq!(registry::key_providers().len(), 6);
+    let vercel = registry::find("vercel").expect("vercel is a built-in");
+    assert_eq!(vercel.display, "Vercel AI Gateway");
+    assert_eq!(vercel.base_url, "https://ai-gateway.vercel.sh/v1");
+    assert_eq!(vercel.auth.key_env.as_deref(), Some("AI_GATEWAY_API_KEY"));
+    assert!(vercel.auth.oauth.is_none(), "gateway is API-key only");
+    assert!(vercel.auth.key);
 }
 
 #[test]
@@ -415,6 +449,25 @@ fn env_var_keys_sign_a_provider_in() {
         _ => panic!("wrong credential kind"),
     }
     std::env::remove_var("ANTHROPIC_API_KEY");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn vercel_env_key_signs_the_gateway_in() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("e-vercel-env-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+    clear_env_keys();
+
+    assert!(e::core::provider::catalog::available().is_empty());
+    std::env::set_var("AI_GATEWAY_API_KEY", "vck-test");
+    let available = e::core::provider::catalog::available();
+    assert!(available.iter().all(|m| m.provider == "vercel"));
+    assert!(e::core::provider::catalog::resolve("openai/gpt-4.1-nano").is_some());
+    assert!(e::core::provider::catalog::resolve("vercel/openai/gpt-4.1-nano").is_some());
+    std::env::remove_var("AI_GATEWAY_API_KEY");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
