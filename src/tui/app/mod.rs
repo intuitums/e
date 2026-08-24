@@ -306,9 +306,12 @@ impl App {
         }
         let window = self.agent.model.context_window.max(1);
         let percent = ((self.context_tokens.saturating_mul(100)) / window).min(100) as u8;
+        // Nothing is signed in for the current model — it's a bootstrap
+        // placeholder, not something the user chose, so don't show it.
+        let signed_in = crate::core::auth::load().contains_key(&self.agent.model.provider);
         let data = StatusData {
-            model: self.agent.model_slug(),
-            effort: self.agent.effort(),
+            model: signed_in.then(|| self.agent.model_slug()),
+            effort: signed_in.then(|| self.agent.effort()).flatten(),
             session_name: None,
             context_percent: Some(percent),
             queued: 0,
@@ -1826,6 +1829,10 @@ pub async fn run(
         app.notice(
             "no provider signed in — use /login to sign in with an account or API key".into(),
         );
+        // Route straight to sign-in instead of leaving a phantom model
+        // implied on the status bar. Yields to the trust panel above it,
+        // if that's showing too — this still renders once trust is settled.
+        app.open_login_menu();
     } else if let Some(wanted) = crate::core::config::settings::get_string("model") {
         let current = app.agent.model_slug();
         if wanted != current {
