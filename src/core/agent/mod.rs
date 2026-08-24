@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::core::provider::catalog::{slug, Model};
-use crate::core::provider::{
+use crate::core::providers::catalog::{slug, Model};
+use crate::core::providers::{
     self, ChatMessage, Event as ProviderEvent, FailureCause, Request, ToolCall,
 };
 use crate::core::session::Session;
@@ -393,7 +393,7 @@ impl Agent {
                 // initial request. MAX_ATTEMPTS is a request budget, not a
                 // retry budget.
                 let mut attempt = 1u32;
-                let (mut rx, mut handle) = provider::stream(clone_request(&request));
+                let (mut rx, mut handle) = providers::stream(clone_request(&request));
 
                 let mut text = String::new();
                 let mut calls: Vec<ToolCall> = Vec::new();
@@ -487,7 +487,7 @@ impl Agent {
                                     handle.abort();
                                     break 'turn true;
                                 }
-                                let (nrx, nhandle) = provider::stream(clone_request(&request));
+                                let (nrx, nhandle) = providers::stream(clone_request(&request));
                                 rx = nrx;
                                 handle = nhandle;
                                 continue 'stream;

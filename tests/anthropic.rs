@@ -6,8 +6,8 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
-use e::core::provider::catalog::{Api, Model};
-use e::core::provider::{self, ChatMessage, Event, Request};
+use e::core::providers::catalog::{Api, Model};
+use e::core::providers::{self, ChatMessage, Event, Request};
 
 fn sse(body: &str) -> String {
     format!(
@@ -63,7 +63,7 @@ async fn anthropic_stream_round_trip() {
             base_url: format!("http://127.0.0.1:{port}"),
             api: Api::Anthropic,
             efforts: vec!["low".into(), "medium".into(), "high".into()],
-            thinking: e::core::provider::catalog::Thinking::Manual,
+            thinking: e::core::providers::catalog::Thinking::Manual,
             context_window: 200_000,
         },
         system: "be helpful".into(),
@@ -71,7 +71,7 @@ async fn anthropic_stream_round_trip() {
             ChatMessage::user("read a.txt"),
             ChatMessage::assistant(
                 "",
-                vec![provider::ToolCall {
+                vec![providers::ToolCall {
                     id: "tu_0".into(),
                     name: "read".into(),
                     arguments: "{\"path\":\"old.txt\"}".into(),
@@ -87,7 +87,7 @@ async fn anthropic_stream_round_trip() {
         })],
     };
 
-    let (mut rx, _handle) = provider::stream(request);
+    let (mut rx, _handle) = providers::stream(request);
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut calls = Vec::new();
@@ -176,7 +176,7 @@ async fn adaptive_models_take_effort_through_output_config_not_budget_tokens() {
             base_url: format!("http://127.0.0.1:{port}"),
             api: Api::Anthropic,
             efforts: vec!["low".into(), "medium".into(), "high".into()],
-            thinking: e::core::provider::catalog::Thinking::Adaptive,
+            thinking: e::core::providers::catalog::Thinking::Adaptive,
             context_window: 200_000,
         },
         system: "be helpful".into(),
@@ -185,7 +185,7 @@ async fn adaptive_models_take_effort_through_output_config_not_budget_tokens() {
         tools: Vec::new(),
     };
 
-    let (mut rx, _handle) = provider::stream(request);
+    let (mut rx, _handle) = providers::stream(request);
     while let Some(event) = rx.recv().await {
         match event {
             Event::Error(err) => panic!("stream errored: {}", err.message),

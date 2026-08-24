@@ -6,7 +6,7 @@
 use crossterm::terminal;
 
 use e::core::agent::{Agent, SessionEvent};
-use e::core::provider::catalog::{self as model};
+use e::core::providers::catalog::{self as model};
 use e::tui::app;
 
 fn auth_status_requested(args: &[String]) -> Result<bool, &'static str> {

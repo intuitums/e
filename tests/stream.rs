@@ -4,8 +4,8 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
-use e::core::provider::catalog::{Api, Model};
-use e::core::provider::{stream, ChatMessage, Event, Request, SseSplitter};
+use e::core::providers::catalog::{Api, Model};
+use e::core::providers::{stream, ChatMessage, Event, Request, SseSplitter};
 
 #[test]
 fn sse_splitter_handles_fragmentation_and_crlf() {
@@ -67,7 +67,7 @@ async fn completions_stream_parses_deltas_and_usage() {
             base_url: format!("http://127.0.0.1:{port}"),
             api: Api::Completions,
             efforts: Vec::new(),
-            thinking: e::core::provider::catalog::Thinking::Manual,
+            thinking: e::core::providers::catalog::Thinking::Manual,
             context_window: 200_000,
         },
         system: "sys".into(),
@@ -138,7 +138,7 @@ async fn agent_folds_provider_events_into_one_session_stream() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -195,7 +195,7 @@ async fn agent_reports_errors_and_still_ends_the_turn_exactly_once() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -250,7 +250,7 @@ async fn agent_interrupt_ends_a_stalled_stream() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -308,7 +308,7 @@ async fn unexpected_eof_is_an_error_not_a_silent_done() {
             base_url: format!("http://127.0.0.1:{port}"),
             api: Api::Completions,
             efforts: Vec::new(),
-            thinking: e::core::provider::catalog::Thinking::Manual,
+            thinking: e::core::providers::catalog::Thinking::Manual,
             context_window: 200_000,
         },
         system: "sys".into(),
@@ -341,7 +341,7 @@ async fn unexpected_eof_is_an_error_not_a_silent_done() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unanswered_request_fails_instead_of_hanging() {
-    use e::core::provider::{http, send_request_within, FailureCause};
+    use e::core::providers::{http, send_request_within, FailureCause};
     use std::time::Duration;
 
     // The gap between connect (client-bounded) and body reads (chunk-bounded):
@@ -400,7 +400,7 @@ async fn agent_interrupt_ends_a_turn_stuck_before_headers() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -430,7 +430,7 @@ async fn agent_interrupt_ends_a_turn_stuck_before_headers() {
 #[tokio::test(flavor = "multi_thread")]
 async fn retry_recovers_after_a_transient_failure() {
     use e::core::agent::{Agent, SessionEvent};
-    use e::core::provider::FailureCause;
+    use e::core::providers::FailureCause;
 
     // First attempt hits a 503; the retry succeeds. Exercises the whole
     // pipeline: status classification -> retry decision -> backoff -> a
@@ -472,7 +472,7 @@ async fn retry_recovers_after_a_transient_failure() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -549,7 +549,7 @@ async fn retry_campaign_gives_up_after_max_attempts() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -619,7 +619,7 @@ async fn a_blank_successful_stream_surfaces_an_error_not_silence() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);

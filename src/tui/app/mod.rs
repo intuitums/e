@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::core::agent::{Agent, SessionEvent};
 use crate::core::output::{format_duration, format_tokens};
-use crate::core::provider::catalog::{self as model, Model};
+use crate::core::providers::catalog::{self as model, Model};
 use crate::tui::authpanel::{self, AuthStage};
 use crate::tui::composer::{Editor, EditorResult, Key};
 use crate::tui::menu::{Menu, MenuItem, MenuKind, HINT_SCOPED, HINT_USE};
@@ -69,7 +69,7 @@ enum AppJob {
     /// A finished /compact: the summary and the recent messages kept verbatim.
     Compacted {
         summary: String,
-        kept: Vec<crate::core::provider::ChatMessage>,
+        kept: Vec<crate::core::providers::ChatMessage>,
     },
     /// A /compact that didn't produce a summary.
     CompactFailed(String),
@@ -616,7 +616,7 @@ impl App {
         // the open picker when the answer lands.
         let results = self.results.clone();
         tokio::spawn(async move {
-            crate::core::provider::catalog::refresh_remote_within(60_000).await;
+            crate::core::providers::catalog::refresh_remote_within(60_000).await;
             let _ = results.send(AppJob::CatalogRefreshed).await;
         });
         self.build_model_menu();
@@ -723,7 +723,7 @@ impl App {
     /// A subscription picked on the account panel — the registry names the
     /// flow; this just dispatches it.
     fn auth_account(&mut self, selected: usize) {
-        let providers = crate::core::provider::registry::oauth_providers();
+        let providers = crate::core::providers::registry::oauth_providers();
         let Some(provider) = providers.get(selected) else {
             return;
         };
@@ -737,7 +737,7 @@ impl App {
 
     /// A provider picked on the API-key panel.
     fn auth_key(&mut self, selected: usize) {
-        let providers = crate::core::provider::registry::key_providers();
+        let providers = crate::core::providers::registry::key_providers();
         let Some(provider) = providers.get(selected) else {
             return;
         };
@@ -1107,7 +1107,7 @@ impl App {
             return;
         }
         let flow =
-            crate::core::provider::registry::find(&provider).and_then(|p| p.auth.oauth.clone());
+            crate::core::providers::registry::find(&provider).and_then(|p| p.auth.oauth.clone());
         if flow.as_deref() == Some("codex") {
             self.notice(format!(
                 "starting the {} sign-in…",
@@ -1824,7 +1824,7 @@ pub async fn run(
     // Providers' model lists refresh in the background (the reference
     // behavior, sourced from each gateway's own /models): a model a provider
     // ships today shows in /models today, no e release involved.
-    tokio::spawn(crate::core::provider::catalog::refresh_remote());
+    tokio::spawn(crate::core::providers::catalog::refresh_remote());
     if crate::core::auth::load().is_empty() {
         app.notice(
             "no provider signed in — use /login to sign in with an account or API key".into(),
@@ -1978,15 +1978,15 @@ pub async fn run(
                                     app.auth_choose(choice);
                                 }
                                 (AuthStage::Account { selected }, KeyCode::Up | KeyCode::Down) => {
-                                    let n = crate::core::provider::registry::oauth_providers().len();
+                                    let n = crate::core::providers::registry::oauth_providers().len();
                                     *selected = (*selected + 1) % n.max(1);
                                 }
                                 (AuthStage::Key { selected }, KeyCode::Up) => {
-                                    let n = crate::core::provider::registry::key_providers().len();
+                                    let n = crate::core::providers::registry::key_providers().len();
                                     *selected = (*selected + n - 1) % n.max(1);
                                 }
                                 (AuthStage::Key { selected }, KeyCode::Down) => {
-                                    let n = crate::core::provider::registry::key_providers().len();
+                                    let n = crate::core::providers::registry::key_providers().len();
                                     *selected = (*selected + 1) % n.max(1);
                                 }
                                 (AuthStage::Account { selected }, KeyCode::Enter) => {
@@ -2222,13 +2222,13 @@ pub async fn run(
                             if matches!(app.auth, Some(AuthStage::Waiting)) {
                                 app.auth = None;
                             }
-                            tokio::spawn(crate::core::provider::catalog::refresh_remote());
+                            tokio::spawn(crate::core::providers::catalog::refresh_remote());
                             // A fresh credential may make new models available:
                             // if the current model's provider is still signed out,
                             // fall back to the first available model.
                             if !crate::core::auth::load().contains_key(&app.agent.model.provider) {
-                                if let Some(m) = crate::core::provider::catalog::available().into_iter().next() {
-                                    app.notice(format!("model set to {}", crate::core::provider::catalog::slug(&m)));
+                                if let Some(m) = crate::core::providers::catalog::available().into_iter().next() {
+                                    app.notice(format!("model set to {}", crate::core::providers::catalog::slug(&m)));
                                     app.agent.model = m;
                                 }
                             }

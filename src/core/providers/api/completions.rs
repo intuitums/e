@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
 use crate::core::auth::login;
-use crate::core::provider::{
+use crate::core::providers::{
     http, next_sse_chunk, retry_after_seconds, send_request, Event, ProviderError, Request,
     SseSplitter, ToolCall,
 };

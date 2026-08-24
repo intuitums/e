@@ -197,7 +197,7 @@ async fn codex_login_inner(
             .await
             .map_err(|error| error.to_string())??;
 
-    let response = crate::core::provider::http()
+    let response = crate::core::providers::http()
         .post(format!("{AUTH_BASE}/oauth/token"))
         .form(&[
             ("grant_type", "authorization_code"),
@@ -431,7 +431,7 @@ async fn xai_login_inner(
     notify: &tokio::sync::mpsc::Sender<String>,
     cancellation: &LoginCancellation,
 ) -> Result<(), String> {
-    let device: serde_json::Value = crate::core::provider::http()
+    let device: serde_json::Value = crate::core::providers::http()
         .post(XAI_DEVICE_CODE_URL)
         .form(&[
             ("client_id", XAI_CLIENT_ID),
@@ -481,7 +481,7 @@ async fn xai_login_inner(
         if std::time::Instant::now() > deadline {
             return Err("xAI device code expired".into());
         }
-        let response = crate::core::provider::http()
+        let response = crate::core::providers::http()
             .post(XAI_TOKEN_URL)
             .form(&[
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
@@ -519,7 +519,7 @@ async fn xai_login_inner(
 
 /// Exchange the refresh token; xAI may omit `refresh_token` when unrotated.
 pub async fn xai_refresh(refresh: &str) -> Result<crate::core::auth::Credential, String> {
-    let response = crate::core::provider::http()
+    let response = crate::core::providers::http()
         .post(XAI_TOKEN_URL)
         .form(&[
             ("grant_type", "refresh_token"),
@@ -567,7 +567,7 @@ pub async fn codex_access(provider: &str) -> Result<(String, String), String> {
         return Ok((access, account));
     }
 
-    let response = crate::core::provider::http()
+    let response = crate::core::providers::http()
         .post(format!("{AUTH_BASE}/oauth/token"))
         .form(&[
             ("grant_type", "refresh_token"),
@@ -642,7 +642,7 @@ pub async fn access_token(provider: &str) -> Result<String, String> {
                 return Ok(access);
             }
             let flow =
-                crate::core::provider::registry::find(provider).and_then(|p| p.auth.oauth.clone());
+                crate::core::providers::registry::find(provider).and_then(|p| p.auth.oauth.clone());
             match flow.as_deref() {
                 Some("xai-device") => {
                     let fresh = xai_refresh(&refresh).await?;

@@ -1,5 +1,5 @@
 //! The provider registry: providers are data, dialects are code — the
-//! reference architecture. Each file in `providers/` declares one provider:
+//! reference architecture. Each file in `data/` declares one provider:
 //! its gateway, dialect, auth surface (which OAuth flow and/or which API-key
 //! env var), and seed models with per-model compat (context window, effort
 //! support). Adding an API-key provider is a data edit; only a bespoke OAuth
@@ -69,13 +69,13 @@ pub fn all() -> &'static [Provider] {
     static REGISTRY: OnceLock<Vec<Provider>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
         [
-            include_str!("providers/opencode-go.json"),
-            include_str!("providers/opencode-zen.json"),
-            include_str!("providers/openai-codex.json"),
-            include_str!("providers/xai.json"),
-            include_str!("providers/openai.json"),
-            include_str!("providers/anthropic.json"),
-            include_str!("providers/vercel.json"),
+            include_str!("data/opencode-go.json"),
+            include_str!("data/opencode-zen.json"),
+            include_str!("data/openai-codex.json"),
+            include_str!("data/xai.json"),
+            include_str!("data/openai.json"),
+            include_str!("data/anthropic.json"),
+            include_str!("data/vercel.json"),
         ]
         .iter()
         .map(|json| {

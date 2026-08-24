@@ -1,7 +1,7 @@
 //! Activity row and status line — pure projections of app state.
 
 use crate::core::output::{compact_model_label, format_tokens};
-use crate::core::provider::FailureCause;
+use crate::core::providers::FailureCause;
 use crate::tui::markdown::visible_width;
 use crate::tui::theme::Theme;
 
@@ -217,7 +217,7 @@ pub fn statusline(
 #[cfg(test)]
 mod tests {
     use super::{RecoveredStatus, RetryStatus, Turn, TurnPhase};
-    use crate::core::provider::FailureCause;
+    use crate::core::providers::FailureCause;
 
     #[test]
     fn activity_has_one_owner_per_phase() {

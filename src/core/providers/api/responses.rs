@@ -10,7 +10,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::core::auth::{self, login, Credential};
-use crate::core::provider::{
+use crate::core::providers::{
     http, next_sse_chunk, retry_after_seconds, send_request, Event, FailureCause, ProviderError,
     Request, SseSplitter, ToolCall,
 };

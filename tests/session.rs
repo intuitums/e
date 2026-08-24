@@ -3,8 +3,8 @@
 use std::sync::Mutex;
 
 use e::core::agent::Agent;
-use e::core::provider::catalog::{Api, Model};
-use e::core::provider::ChatMessage;
+use e::core::providers::catalog::{Api, Model};
+use e::core::providers::ChatMessage;
 use e::core::session::{self, Session};
 
 // E_HOME is process-global, so tests that replace it must not overlap.
@@ -70,7 +70,7 @@ fn opening_e_does_not_count_as_a_session() {
         base_url: "http://127.0.0.1:1".into(),
         api: Api::Completions,
         efforts: Vec::new(),
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 1_000,
     };
     let (_agent, _events) = Agent::new(model);

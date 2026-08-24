@@ -2,20 +2,18 @@
 //!
 //! Everything above this module sees `Event`s; everything below is a wire
 //! dialect. Three dialects ship: chat-completions, Responses-API, and
-//! Anthropic Messages (see `completions.rs` / `responses.rs` / `anthropic.rs`).
-//! Providers are data (`providers/*.json`); OAuth refresh lives in `auth::login`.
-//! SSE framing is handled here — one small splitter, tested, shared.
+//! Anthropic Messages (see `api/`). Providers are data (`data/*.json`);
+//! OAuth refresh lives in `auth::login`. SSE framing is handled here — one
+//! small splitter, tested, shared.
 
-pub mod anthropic;
+pub mod api;
 pub mod catalog;
-pub mod completions;
 pub mod registry;
-pub mod responses;
 
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use crate::core::provider::catalog::{Api, Model};
+use crate::core::providers::catalog::{Api, Model};
 
 /// One requested tool invocation, as the model asked for it.
 #[derive(Clone, Debug, serde::Deserialize, Serialize)]
@@ -288,9 +286,9 @@ pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHand
     let (tx, rx) = mpsc::channel(64);
     let handle = tokio::spawn(async move {
         let result = match request.model.api {
-            Api::Completions => crate::core::provider::completions::run(&request, &tx).await,
-            Api::Responses => crate::core::provider::responses::run(&request, &tx).await,
-            Api::Anthropic => crate::core::provider::anthropic::run(&request, &tx).await,
+            Api::Completions => api::completions::run(&request, &tx).await,
+            Api::Responses => api::responses::run(&request, &tx).await,
+            Api::Anthropic => api::anthropic::run(&request, &tx).await,
         };
         match result {
             Ok(()) => {

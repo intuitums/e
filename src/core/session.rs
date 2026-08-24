@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::core::config::home;
-use crate::core::provider::ChatMessage;
+use crate::core::providers::ChatMessage;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]

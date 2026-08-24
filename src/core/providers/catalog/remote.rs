@@ -163,7 +163,7 @@ async fn fetch_models(provider: &str, base: &str) -> Option<Vec<(String, Option<
         crate::core::auth::Credential::ApiKey { key } => key.clone(),
         crate::core::auth::Credential::OAuth { access, .. } => access.clone(),
     };
-    let mut request = crate::core::provider::http()
+    let mut request = crate::core::providers::http()
         .get(format!("{base}/models"))
         .timeout(std::time::Duration::from_secs(15));
     request = if provider == "anthropic" {

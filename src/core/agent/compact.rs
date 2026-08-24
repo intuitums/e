@@ -10,8 +10,8 @@
 //! checkpoint prompt. The summary seeds a fresh session file, followed by the
 //! kept messages — the old session stays fully resumable.
 
-use crate::core::provider::catalog::Model;
-use crate::core::provider::{self, ChatMessage, Event, Request};
+use crate::core::providers::catalog::Model;
+use crate::core::providers::{self, ChatMessage, Event, Request};
 
 /// Auto-compact when context tokens exceed `context_window - RESERVE_TOKENS`.
 pub const RESERVE_TOKENS: u64 = 16_384;
@@ -95,7 +95,7 @@ pub async fn summarize(model: Model, history: &[ChatMessage]) -> Result<String, 
         effort: None,
         tools: Vec::new(),
     };
-    let (mut rx, _handle) = provider::stream(request);
+    let (mut rx, _handle) = providers::stream(request);
     let mut summary = String::new();
     while let Some(event) = rx.recv().await {
         match event {

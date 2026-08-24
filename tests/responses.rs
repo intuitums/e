@@ -9,8 +9,8 @@ use std::sync::Mutex;
 // E_HOME is process-global; serialize the tests that set it.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-use e::core::provider::catalog::{Api, Model};
-use e::core::provider::{self, ChatMessage, Event, Request};
+use e::core::providers::catalog::{Api, Model};
+use e::core::providers::{self, ChatMessage, Event, Request};
 
 fn sse(body: &str) -> String {
     format!(
@@ -53,7 +53,7 @@ async fn responses_tools_are_flat_on_the_wire() {
             base_url: format!("http://127.0.0.1:{port}"),
             api: Api::Responses,
             efforts: vec!["low".into(), "medium".into(), "high".into()],
-            thinking: e::core::provider::catalog::Thinking::Manual,
+            thinking: e::core::providers::catalog::Thinking::Manual,
             context_window: 400_000,
         },
         system: "sys".into(),
@@ -66,7 +66,7 @@ async fn responses_tools_are_flat_on_the_wire() {
         })],
     };
 
-    let (mut rx, _handle) = provider::stream(request);
+    let (mut rx, _handle) = providers::stream(request);
     let mut text = String::new();
     while let Some(event) = rx.recv().await {
         match event {
@@ -157,7 +157,7 @@ async fn reasoning_items_replay_ahead_of_their_calls() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Responses,
         efforts: vec!["low".into(), "medium".into(), "high".into()],
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 400_000,
     };
     let (mut agent, mut rx) = Agent::new(model);

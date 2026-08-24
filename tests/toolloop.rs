@@ -11,7 +11,7 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 use e::core::agent::{Agent, SessionEvent};
-use e::core::provider::catalog::{Api, Model};
+use e::core::providers::catalog::{Api, Model};
 
 fn sse(body: &str) -> String {
     format!(
@@ -76,7 +76,7 @@ async fn agent_runs_a_tool_then_replies() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -169,7 +169,7 @@ async fn tool_batches_run_concurrently_and_commit_in_source_order() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
-        thinking: e::core::provider::catalog::Thinking::Manual,
+        thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);

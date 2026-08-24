@@ -52,7 +52,7 @@ pub fn load() -> AuthFile {
             out.insert("opencode-zen".into(), cred);
         }
     }
-    for provider in crate::core::provider::registry::all() {
+    for provider in crate::core::providers::registry::all() {
         if out.contains_key(&provider.name) {
             continue;
         }
