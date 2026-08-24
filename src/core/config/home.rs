@@ -1,9 +1,8 @@
 //! The e home: `~/.e/`, the single place all of e's state lives.
 //!
-//! Sovereignty with open formats (DESIGN.md §2): everything here is a
-//! convention other tools could read — AGENTS.md, SKILL.md directories,
-//! JSONL sessions — and nothing outside this directory is consulted at
-//! runtime. Migration from other tools is explicit via `e import`.
+//! Its formats are open conventions other tools can read: AGENTS.md, SKILL.md
+//! directories, and JSONL sessions. e does not read another tool's
+//! configuration or state at runtime.
 
 use std::path::PathBuf;
 

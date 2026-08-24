@@ -1,4 +1,4 @@
-//! The extension API: e's code-extensibility surface (DESIGN.md §2).
+//! The extension API: executable subprocesses over a line protocol.
 //!
 //! An extension is any executable in `~/.e/extensions/`, in any language,
 //! speaking the line protocol in `protocol.rs`. Extensions can add tools the

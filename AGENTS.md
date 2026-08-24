@@ -1,7 +1,6 @@
 # Working on e
 
-Instructions for an agent editing this repo. Read [DESIGN.md](DESIGN.md) first —
-it is the why; this is the how.
+Instructions for an agent editing this repo.
 
 ## Build and check
 
@@ -64,8 +63,8 @@ surface? Route it through `panel.rs` so it can't diverge.
 
 - One event stream. The frontend subscribes once; text, tools, usage, errors all
   arrive on it in order (`SessionEvent`). Don't add side channels.
-- The harness is budgeted (DESIGN.md §3). Prefer a spawned process over a daemon,
-  a gate over a pipeline. A feature that can't pay for itself stays out.
+- Keep the harness small. Prefer a spawned process over a daemon and a gate
+  over a pipeline. Add complexity only when the feature requires it.
 - `~/.e/` is the only home e reads. Never reach into another tool's directory.
 - **Don't hardcode what a user might change.** Looks, wordings, and behaviours a
   person could sensibly prefer are read from `~/.e/` with a built-in default —
@@ -73,7 +72,7 @@ surface? Route it through `panel.rs` so it can't diverge.
   prompt the same way. When you add something user-facing, make it a file-backed
   override, not a constant. When data isn't enough there is the extension API
   (`core/api/`, docs/extensions.md) — grow its protocol by need, never by
-  symmetry, and keep hooks fail-open. (This is DESIGN.md §2.)
+  symmetry, and keep hooks fail-open.
 - Verify UI changes with a real frame, not by reasoning about bytes. `scripts/`
   has a pty capture-and-replay harness; that is how the look gets checked.
 - `scripts/guard.sh` pins the trust boundary: allowed network hosts, the

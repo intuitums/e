@@ -77,7 +77,7 @@ Parsed flags are sent to **every** extension that declares typed flags as a
 `flags` notification right after launch (no reply needed) — so a tool-only
 extension reads them from any handler, not just during startup. Extensions
 that use the scaffold get `flag(name)` (the passed value, else the declared
-default, else undefined — pi's `getFlag`) and `flagPassed(name)` in any
+default, else undefined) and `flagPassed(name)` in any
 handler; the raw protocol gets `{"method":"flags",
 "params":{"flags":{…}}}`.
 

@@ -3,7 +3,7 @@
 //! API-key providers prompt for a paste. The ChatGPT backend runs the real
 //! OAuth authorization-code + PKCE flow: a one-shot listener on the fixed
 //! localhost callback port, the browser opened to the authorize URL, the code
-//! exchanged and persisted. No other tool's store is ever read (DESIGN.md §2).
+//! exchanged and persisted. No other tool's credential store is read.
 
 use base64::Engine;
 use rand::Rng;

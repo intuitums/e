@@ -1,6 +1,6 @@
 //! e — a coding agent for your terminal.
 //!
-//! `core/` is the harness — budgeted (DESIGN.md §3), terminal-free. `tui/` is
+//! `core/` is the small, terminal-free harness. `tui/` is
 //! the terminal frontend, grouped as paint / content / surfaces / app.
 
 pub mod core;

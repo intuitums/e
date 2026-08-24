@@ -1,4 +1,4 @@
-//! Credentials: e's own `~/.e/auth.json`, nothing borrowed (DESIGN.md §2).
+//! Credentials stored in e's own `~/.e/auth.json`.
 //!
 //! Two credential shapes: a static API key, and OAuth (access/refresh/expiry,
 //! plus the account id some backends demand in a header). The file is written

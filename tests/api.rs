@@ -445,7 +445,7 @@ rl.on("line", (line) => {
 
 /// Every extension with typed flags gets a `flags` notification at start —
 /// even one with no startup hook. A tool-only extension reads its flags in
-/// any handler (pi's getFlag semantics: passed value, else default).
+/// any handler (passed value, else the declared default).
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn flags_notification_reaches_tool_only_extensions() {
@@ -468,7 +468,7 @@ rl.on("line", (line) => {
     flags = (req.params && req.params.flags) || {};
   } else if (req.method === "tool_call") {
     if (req.params && req.params.name === "peek") {
-      // A handler reads the flags it was given — the getFlag path.
+      // A handler reads the flags it was given.
       process.stdout.write(JSON.stringify({ id: req.id, result: {
         content: JSON.stringify({ dry: flags.dry, tag: flags.tag, hasDry: Object.hasOwn(flags, "dry") }),
       }}) + "\n");
