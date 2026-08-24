@@ -8,6 +8,10 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- Provider tests share one harness in `tests/providers.rs`: the four
+  wire dialects, the catalog, and the registry are cases on the same
+  mock server and `E_HOME` lock, instead of a file per provider.
+
 - Bugbot review fixes: a failed session-name write at log creation no longer
   discards the freshly created session (the next commit would open a
   different file and strand in-memory history); compaction's keep-cut no
