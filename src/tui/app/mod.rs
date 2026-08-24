@@ -32,7 +32,9 @@ struct ActiveTurn {
     /// The current assistant text block, if one is streaming.
     block: Option<usize>,
     text: String,
-    /// The live thinking block, if reasoning has streamed this turn.
+    /// The live thinking block for the current burst, if reasoning has
+    /// streamed. Earlier bursts from this turn stay in the transcript and
+    /// dim together at TurnEnd — this index is only the open segment.
     thinking_block: Option<usize>,
     thinking: String,
     turn: Turn,
@@ -1276,6 +1278,8 @@ impl App {
                     s.block = None;
                     s.text.clear();
                     // The steered reply restarts its own thinking block.
+                    // The prior block stays live until TurnEnd dims the
+                    // whole turn — clearing the index must not finish it.
                     s.thinking_block = None;
                     s.thinking.clear();
                 }
@@ -1335,7 +1339,9 @@ impl App {
                     s.block = None;
                     s.text.clear();
                     // The pre-batch reasoning stays as its own block above;
-                    // the next burst starts fresh below the tools.
+                    // the next burst starts fresh below the tools. The
+                    // prior block stays live until TurnEnd — clearing the
+                    // index must not finish it, or it would dim early.
                     s.thinking_block = None;
                     s.thinking.clear();
                     s.turn.phase = TurnPhase::Tool;
@@ -1460,7 +1466,8 @@ impl App {
                     });
                     s.turn.recovered = None;
                     // A retry replays its thinking fresh; the abandoned
-                    // attempt's block stays behind as history.
+                    // attempt's block stays behind as history and stays
+                    // live until TurnEnd dims the whole turn.
                     s.thinking_block = None;
                     s.thinking.clear();
                 }
@@ -1502,12 +1509,11 @@ impl App {
                 }
                 let Some(s) = self.active.take() else { return };
                 // The turn's thinking dims with it — same moment, not early.
-                if let Some(idx) = s.thinking_block {
-                    if let Some(b) = self.transcript.blocks.get_mut(idx) {
-                        b.done = true;
-                        b.touch();
-                    }
-                }
+                // Tool batches, retries, and steered messages each start a
+                // fresh block without finishing the prior one, so the live
+                // index is only the last segment. Dim every still-live
+                // thinking row, not just that index.
+                dim_thinking(&mut self.transcript);
                 // The reference grammar: a completed turn ends with a dim
                 // duration-and-tokens row; a cancelled one says so instead.
                 if aborted {
@@ -1738,6 +1744,18 @@ impl App {
 
     fn notice(&mut self, text: String) {
         self.transcript.push(Block::new(Kind::Notice, text));
+    }
+}
+
+/// Dim every still-live thinking row. Tool batches, retries, and steered
+/// messages start a fresh block without finishing the prior one, so the
+/// live index is not the full set — TurnEnd walks them all, same moment.
+fn dim_thinking(transcript: &mut Transcript) {
+    for block in &mut transcript.blocks {
+        if block.kind == Kind::Thinking && !block.done {
+            block.done = true;
+            block.touch();
+        }
     }
 }
 
@@ -2773,5 +2791,150 @@ mod tests {
         drop(login);
         assert!(observed.is_cancelled());
         tokio::task::yield_now().await;
+    }
+
+    fn session_app() -> App {
+        let (agent, _rx) = Agent::new(Model {
+            provider: "mock".into(),
+            id: "m".into(),
+            base_url: "http://127.0.0.1".into(),
+            api: crate::core::providers::catalog::Api::Completions,
+            efforts: Vec::new(),
+            thinking: crate::core::providers::catalog::Thinking::Manual,
+            context_window: 200_000,
+        });
+        let (jobs, _) = tokio::sync::mpsc::channel(1);
+        let (logins, _) = tokio::sync::mpsc::channel(1);
+        let (results, _) = tokio::sync::mpsc::channel(1);
+        App {
+            theme: crate::tui::theme::load_bundled(false).unwrap(),
+            transcript: Transcript::default(),
+            editor: Editor::new(),
+            agent,
+            active: None,
+            overlay: None,
+            armed_at: None,
+            should_quit: false,
+            context_tokens: 0,
+            pending_key: None,
+            menu: None,
+            auth: None,
+            settings: None,
+            show_thinking: true,
+            jobs,
+            logins,
+            login_task: None,
+            login_sequence: 0,
+            host: crate::core::api::ExtensionHost::empty(),
+            results,
+            input_verdicts: PendingInputVerdicts::default(),
+            compacting: false,
+            compact_requested: false,
+            held_prompts: Vec::new(),
+            trust: None,
+            pending_initial: None,
+            shell_block: None,
+            reloading: false,
+            reload_block: None,
+            outputs: Vec::new(),
+            viewer: None,
+            session_epoch: 0,
+            update_installed: None,
+            relaunch: false,
+            light_background: false,
+            signed_in: false,
+            status_effort: None,
+        }
+    }
+
+    fn thinking_flags(app: &App) -> Vec<(String, bool)> {
+        app.transcript
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Thinking)
+            .map(|block| (block.text.clone(), block.done))
+            .collect()
+    }
+
+    fn tool_batch() -> SessionEvent {
+        SessionEvent::ToolBatchStart {
+            calls: vec![crate::core::agent::ToolCallPresentation {
+                id: 1,
+                category: "read".into(),
+                running: "reading".into(),
+                completed: "read".into(),
+                target: "f.rs".into(),
+            }],
+        }
+    }
+
+    /// A typical think-then-tools turn opens a second thinking block when
+    /// the batch starts. Both segments stay live through the turn and dim
+    /// together at TurnEnd — not only the last index.
+    #[test]
+    fn turn_end_dims_pre_tool_thinking() {
+        let mut app = session_app();
+        app.on_session_event(SessionEvent::TurnStart);
+        app.on_session_event(SessionEvent::ReasoningDelta("before tools".into()));
+        assert_eq!(thinking_flags(&app), vec![("before tools".into(), false)]);
+
+        app.on_session_event(tool_batch());
+        assert_eq!(
+            thinking_flags(&app),
+            vec![("before tools".into(), false)],
+            "pre-tool thinking must stay live until the turn commits"
+        );
+
+        app.on_session_event(SessionEvent::ReasoningDelta("after tools".into()));
+        assert_eq!(
+            thinking_flags(&app),
+            vec![
+                ("before tools".into(), false),
+                ("after tools".into(), false)
+            ]
+        );
+
+        app.on_session_event(SessionEvent::TurnEnd { aborted: false });
+        assert_eq!(
+            thinking_flags(&app),
+            vec![("before tools".into(), true), ("after tools".into(), true)]
+        );
+    }
+
+    /// Retries and steered messages also drop the live index. Those earlier
+    /// blocks must still dim when the turn commits.
+    #[test]
+    fn turn_end_dims_thinking_cleared_by_retry_and_steer() {
+        let mut app = session_app();
+        app.on_session_event(SessionEvent::TurnStart);
+        app.on_session_event(SessionEvent::ReasoningDelta("attempt one".into()));
+        app.on_session_event(SessionEvent::Retry {
+            attempt: 1,
+            limit: 3,
+            delay_secs: 1,
+            cause: crate::core::providers::FailureCause::Network,
+            reason: "timeout".into(),
+        });
+        app.on_session_event(SessionEvent::ReasoningDelta("attempt two".into()));
+        app.on_session_event(SessionEvent::Steered("also check this".into()));
+        app.on_session_event(SessionEvent::ReasoningDelta("after steer".into()));
+        assert_eq!(
+            thinking_flags(&app),
+            vec![
+                ("attempt one".into(), false),
+                ("attempt two".into(), false),
+                ("after steer".into(), false)
+            ]
+        );
+
+        app.on_session_event(SessionEvent::TurnEnd { aborted: false });
+        assert_eq!(
+            thinking_flags(&app),
+            vec![
+                ("attempt one".into(), true),
+                ("attempt two".into(), true),
+                ("after steer".into(), true)
+            ]
+        );
     }
 }

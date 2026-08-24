@@ -11,9 +11,11 @@ release notes are that section verbatim), open a fresh empty
 - The TUI draws a turn's reasoning live and keeps it on screen until the turn
   ends: thinking dims with the committed turn instead of vanishing while the
   reply streams, gated by a file-backed `show_thinking` setting (default on;)
-  the ↓ token estimate always counts it either way. The tab title now shows a
-  short path showcase — `~`-relative under `$HOME`, the last two components
-  elsewhere — instead of the full absolute working directory.
+  the ↓ token estimate always counts it either way. Every thinking segment of
+  the turn dims at that moment — including pre-tool reasoning that a tool
+  batch, retry, or steered message replaced with a fresh block. The tab title
+  now shows a short path showcase — `~`-relative under `$HOME`, the last two
+  components elsewhere — instead of the full absolute working directory.
 
 - Bugbot review fixes: a failed session-name write at log creation no longer
   discards the freshly created session (the next commit would open a
