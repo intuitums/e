@@ -4,4 +4,5 @@
 
 pub mod anthropic;
 pub mod completions;
+pub mod google;
 pub mod responses;

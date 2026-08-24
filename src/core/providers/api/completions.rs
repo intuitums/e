@@ -118,6 +118,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                             id: String::new(),
                             name: String::new(),
                             arguments: String::new(),
+                            signature: None,
                         });
                         if let Some(id) = fragment["id"].as_str() {
                             entry.id = id.into();

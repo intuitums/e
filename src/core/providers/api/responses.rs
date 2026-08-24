@@ -158,6 +158,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                                 id: item["call_id"].as_str().unwrap_or("").into(),
                                 name: item["name"].as_str().unwrap_or("").into(),
                                 arguments: item["arguments"].as_str().unwrap_or("").into(),
+                                signature: None,
                             },
                         );
                     }
@@ -186,6 +187,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                             id: String::new(),
                             name: String::new(),
                             arguments: String::new(),
+                            signature: None,
                         });
                         // The done item carries the authoritative fields.
                         if let Some(id) = item["call_id"].as_str() {

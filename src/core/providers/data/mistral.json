@@ -1,0 +1,21 @@
+{
+	"name": "mistral",
+	"display": "Mistral",
+	"base_url": "https://api.mistral.ai/v1",
+	"api": "openai-completions",
+	"auth": {
+		"key": true,
+		"key_env": "MISTRAL_API_KEY",
+		"key_hint": "console.mistral.ai"
+	},
+	"models": [
+		{
+			"id": "mistral-large-latest",
+			"context_window": 131072
+		},
+		{
+			"id": "codestral-latest",
+			"context_window": 262144
+		}
+	]
+}

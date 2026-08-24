@@ -1,0 +1,21 @@
+{
+	"name": "cerebras",
+	"display": "Cerebras",
+	"base_url": "https://api.cerebras.ai/v1",
+	"api": "openai-completions",
+	"auth": {
+		"key": true,
+		"key_env": "CEREBRAS_API_KEY",
+		"key_hint": "cloud.cerebras.ai"
+	},
+	"models": [
+		{
+			"id": "llama-3.3-70b",
+			"context_window": 131072
+		},
+		{
+			"id": "gpt-oss-120b",
+			"context_window": 131072
+		}
+	]
+}

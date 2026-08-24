@@ -22,6 +22,11 @@ pub struct ToolCall {
     pub name: String,
     /// Raw JSON argument string, exactly as streamed.
     pub arguments: String,
+    /// An opaque provider signature attached to the call (Gemini thought
+    /// signatures); must be replayed verbatim on the next request of a tool
+    /// loop when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// Presentation metadata persisted beside a tool result, ignored by provider
@@ -327,6 +332,7 @@ pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHand
             Api::Completions => api::completions::run(&request, &tx).await,
             Api::Responses => api::responses::run(&request, &tx).await,
             Api::Anthropic => api::anthropic::run(&request, &tx).await,
+            Api::Google => api::google::run(&request, &tx).await,
         };
         match result {
             Ok(end) => {

@@ -1,0 +1,23 @@
+{
+	"name": "google",
+	"display": "Google",
+	"base_url": "https://generativelanguage.googleapis.com/v1beta",
+	"api": "google-generative-ai",
+	"auth": {
+		"key": true,
+		"key_env": "GEMINI_API_KEY",
+		"key_hint": "aistudio.google.com"
+	},
+	"models": [
+		{
+			"id": "gemini-3-pro",
+			"context_window": 1048576,
+			"efforts": ["low", "high"]
+		},
+		{
+			"id": "gemini-3-flash",
+			"context_window": 1048576,
+			"efforts": ["low", "high"]
+		}
+	]
+}

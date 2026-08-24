@@ -153,6 +153,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                                 id: block["id"].as_str().unwrap_or("").to_string(),
                                 name: block["name"].as_str().unwrap_or("").to_string(),
                                 arguments: String::new(),
+                                signature: None,
                             },
                             index,
                         ));

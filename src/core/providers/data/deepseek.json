@@ -1,0 +1,21 @@
+{
+	"name": "deepseek",
+	"display": "DeepSeek",
+	"base_url": "https://api.deepseek.com/v1",
+	"api": "openai-completions",
+	"auth": {
+		"key": true,
+		"key_env": "DEEPSEEK_API_KEY",
+		"key_hint": "platform.deepseek.com"
+	},
+	"models": [
+		{
+			"id": "deepseek-chat",
+			"context_window": 131072
+		},
+		{
+			"id": "deepseek-reasoner",
+			"context_window": 131072
+		}
+	]
+}

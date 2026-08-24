@@ -75,6 +75,7 @@ async fn anthropic_stream_round_trip() {
                     id: "tu_0".into(),
                     name: "read".into(),
                     arguments: "{\"path\":\"old.txt\"}".into(),
+                    signature: None,
                 }],
             ),
             ChatMessage::tool_result("tu_0", "old contents"),

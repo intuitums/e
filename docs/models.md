@@ -39,9 +39,15 @@ built-in's provider and id replaces it — the file wins, like themes.
 
 `/login` stores keys in `~/.e/auth.json`. A provider with no stored
 credential falls back to its conventional environment variable —
-`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `OPENCODE_API_KEY`,
-`OPENCODE_GO_API_KEY`, `AI_GATEWAY_API_KEY` — which is what CI and scripts
-want. `auth.json` wins when both exist.
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`,
+`GROQ_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`,
+`OPENROUTER_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY`,
+`OPENCODE_API_KEY`, `OPENCODE_GO_API_KEY`, `AI_GATEWAY_API_KEY` — which is
+what CI and scripts want. `auth.json` wins when both exist.
+
+Local backends (Ollama on `localhost:11434`, LM Studio on `localhost:1234`)
+need no credential at all: they are always signed in, and their models
+appear as soon as the local server answers `/models`.
 
 ## The catalog is live
 

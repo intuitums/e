@@ -21,6 +21,8 @@ pub enum Api {
     Responses,
     /// The Anthropic Messages dialect (`/v1/messages`, x-api-key).
     Anthropic,
+    /// The Gemini dialect (`:streamGenerateContent?alt=sse`, x-goog-api-key).
+    Google,
 }
 
 impl Api {
@@ -32,6 +34,7 @@ impl Api {
             "openai-completions" | "completions" => Some(Self::Completions),
             "codex-responses" | "openai-responses" | "responses" => Some(Self::Responses),
             "anthropic-messages" | "anthropic" => Some(Self::Anthropic),
+            "google-generative-ai" | "google" => Some(Self::Google),
             _ => None,
         }
     }

@@ -63,6 +63,16 @@ pub fn load() -> AuthFile {
                 }
             }
         }
+        // A keyless local backend is always signed in; the placeholder rides
+        // the Authorization header, which such servers ignore.
+        if provider.auth.none {
+            out.insert(
+                provider.name.clone(),
+                Credential::ApiKey {
+                    key: "unauthenticated".into(),
+                },
+            );
+        }
     }
     out
 }

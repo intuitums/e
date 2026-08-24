@@ -392,16 +392,23 @@ async fn provider_reported_models_appear_without_a_release() {
 fn the_registry_is_coherent() {
     use e::core::providers::registry;
     let all = registry::all();
-    assert!(all.len() >= 6);
+    assert!(all.len() >= 17);
     for provider in all {
         assert!(
             !provider.display.is_empty(),
             "{} has no display name",
             provider.name
         );
-        assert!(provider.base_url.starts_with("https://"));
+        // Remote backends speak TLS; only keyless local backends may not.
         assert!(
-            provider.auth.oauth.is_some() || provider.auth.key,
+            provider.base_url.starts_with("https://")
+                || (provider.auth.none && provider.base_url.starts_with("http://localhost")),
+            "{}: suspicious base_url {}",
+            provider.name,
+            provider.base_url
+        );
+        assert!(
+            provider.auth.oauth.is_some() || provider.auth.key || provider.auth.none,
             "{} has no way to sign in",
             provider.name
         );
@@ -412,16 +419,28 @@ fn the_registry_is_coherent() {
                 provider.name
             );
         }
+        // Local backends discover their models live; everyone else ships seeds.
+        assert!(
+            provider.auth.none || !provider.models.is_empty(),
+            "{} has no seed models",
+            provider.name
+        );
     }
-    // The panels' contents, from data: two account flows, six key providers.
+    // The panels' contents, from data: two account flows, fourteen key
+    // providers (the keyless locals appear in neither panel).
     assert_eq!(registry::oauth_providers().len(), 2);
-    assert_eq!(registry::key_providers().len(), 6);
+    assert_eq!(registry::key_providers().len(), 14);
     let vercel = registry::find("vercel").expect("vercel is a built-in");
     assert_eq!(vercel.display, "Vercel AI Gateway");
     assert_eq!(vercel.base_url, "https://ai-gateway.vercel.sh/v1");
     assert_eq!(vercel.auth.key_env.as_deref(), Some("AI_GATEWAY_API_KEY"));
     assert!(vercel.auth.oauth.is_none(), "gateway is API-key only");
     assert!(vercel.auth.key);
+    let google = registry::find("google").expect("google is a built-in");
+    assert_eq!(google.api(), e::core::providers::catalog::Api::Google);
+    assert_eq!(google.auth.key_env.as_deref(), Some("GEMINI_API_KEY"));
+    let ollama = registry::find("ollama").expect("ollama is a built-in");
+    assert!(ollama.auth.none && !ollama.auth.key);
 }
 
 #[test]
@@ -471,6 +490,25 @@ fn vercel_env_key_signs_the_gateway_in() {
     assert!(e::core::providers::catalog::resolve("anthropic/claude-sonnet-5").is_some());
     assert!(e::core::providers::catalog::resolve("vercel/anthropic/claude-sonnet-5").is_some());
     std::env::remove_var("AI_GATEWAY_API_KEY");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Keyless local backends (Ollama, LM Studio) are signed in with no file and
+/// no env var — their models come solely from the live /models refresh, so
+/// with no server running they contribute nothing to the catalog.
+#[test]
+fn keyless_local_providers_are_signed_in_without_credentials() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("e-keyless-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("E_HOME", &dir);
+    clear_env_keys();
+
+    let auth = e::core::auth::load();
+    assert!(auth.contains_key("ollama"));
+    assert!(auth.contains_key("lmstudio"));
+    assert!(e::core::providers::catalog::available().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

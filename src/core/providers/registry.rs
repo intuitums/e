@@ -37,6 +37,10 @@ pub struct Auth {
     pub key_env: Option<String>,
     #[serde(default)]
     pub key_hint: String,
+    /// No credential at all — a local backend (Ollama, LM Studio) that
+    /// accepts any bearer. Such providers count as signed in always.
+    #[serde(default)]
+    pub none: bool,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +80,16 @@ pub fn all() -> &'static [Provider] {
             include_str!("data/openai.json"),
             include_str!("data/anthropic.json"),
             include_str!("data/vercel.json"),
+            include_str!("data/google.json"),
+            include_str!("data/groq.json"),
+            include_str!("data/mistral.json"),
+            include_str!("data/deepseek.json"),
+            include_str!("data/cerebras.json"),
+            include_str!("data/openrouter.json"),
+            include_str!("data/together.json"),
+            include_str!("data/fireworks.json"),
+            include_str!("data/ollama.json"),
+            include_str!("data/lmstudio.json"),
         ]
         .iter()
         .map(|json| {
