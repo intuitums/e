@@ -259,6 +259,10 @@ fn wait_for_code(
             }
             Err(e) => return Err(e.to_string()),
         };
+        // BSD platforms can inherit O_NONBLOCK from the listener. Callback
+        // reads should block only up to the timeout below, not fail before the
+        // browser has written its request.
+        stream.set_nonblocking(false).map_err(|e| e.to_string())?;
         stream
             .set_read_timeout(Some(std::time::Duration::from_millis(250)))
             .map_err(|e| e.to_string())?;
