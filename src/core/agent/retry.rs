@@ -5,7 +5,8 @@
 
 use std::time::Duration;
 
-/// Attempts a single failure campaign gets before the turn fails outright.
+/// Total provider requests a single failure campaign gets, including the
+/// initial request, before the turn fails outright.
 pub const MAX_ATTEMPTS: u32 = 10;
 /// Backoff — computed or `Retry-After` — never waits longer than this.
 const CEILING_SECS: u64 = 30;

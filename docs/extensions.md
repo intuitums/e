@@ -68,8 +68,10 @@ is recognized in startup argv — booleans match `--name`, `--name=true|false`,
 parses as `null` (flag present, no value). Last occurrence wins; `--` stops
 parsing. A name that isn't a clean `--name` token (e.g. `"-w, --worktree"`)
 appears in `e --help` but is never parsed — those flags still need the
-startup hook's raw argv. An optional `"default"` gives the value to use
-when the flag is absent.
+startup hook's raw argv. After every startup hook has seen raw argv, e removes
+typed flags and their separated string values before parsing its own
+subcommands or constructing the initial prompt. An optional `"default"`
+gives the value to use when the flag is absent.
 
 Parsed flags are sent to **every** extension that declares typed flags as a
 `flags` notification right after launch (no reply needed) — so a tool-only

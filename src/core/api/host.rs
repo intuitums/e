@@ -177,6 +177,55 @@ impl ExtensionHost {
         serde_json::Value::Object(parsed)
     }
 
+    /// Remove typed extension flags before e parses subcommands and the initial
+    /// prompt. Startup hooks still receive raw argv and may rewrite it first;
+    /// this final pass prevents a tool-only string flag's separated value from
+    /// becoming an accidental user message.
+    fn strip_typed_flags(&self, argv: Vec<String>) -> Vec<String> {
+        let mut kept = Vec::with_capacity(argv.len());
+        let mut i = 0;
+        while i < argv.len() {
+            let arg = &argv[i];
+            if arg == "--" {
+                kept.extend(argv[i..].iter().cloned());
+                break;
+            }
+
+            let mut matched = false;
+            let mut consumes_next = false;
+            for ext in &self.extensions {
+                for flag in &ext.manifest.flags {
+                    let Some(long) = flag.long_form() else {
+                        continue;
+                    };
+                    if flag.flag_type == "string" {
+                        if arg == &long {
+                            matched = true;
+                            consumes_next = argv
+                                .get(i + 1)
+                                .is_some_and(|next| next != "-" && !next.starts_with('-'));
+                        } else if arg.strip_prefix(&format!("{long}=")).is_some() {
+                            matched = true;
+                        }
+                    } else if arg == &long
+                        || arg.strip_prefix(&format!("{long}=")).is_some()
+                        || arg
+                            .strip_prefix("--no-")
+                            .is_some_and(|rest| rest == flag.name)
+                    {
+                        matched = true;
+                    }
+                }
+            }
+
+            if !matched {
+                kept.push(arg.clone());
+            }
+            i += 1 + usize::from(consumes_next);
+        }
+        kept
+    }
+
     /// Chain startup-capable extensions over raw argv. Unlike runtime hooks,
     /// an explicit startup-hook failure is fatal because silently treating a
     /// consumed branch name as a prompt is unsafe and surprising. Parsed
@@ -237,7 +286,7 @@ impl ExtensionHost {
                 return Ok(StartupAction::Relaunch { argv, request });
             }
         }
-        Ok(StartupAction::Continue(argv))
+        Ok(StartupAction::Continue(self.strip_typed_flags(argv)))
     }
 
     /// Built-in schemas with extension tools merged in. An extension tool with
@@ -283,9 +332,9 @@ impl ExtensionHost {
             .collect()
     }
 
-    /// `(name, description, type)` of every extension flag, for `--help`/`/help`.
-    /// Flags are declared for discoverability — e does not parse them; the
-    /// startup hook sees raw argv.
+    /// `(name, description)` of every extension flag, for `--help`/`/help`.
+    /// Typed flags are parsed and removed after startup hooks have seen raw
+    /// argv; display-only declarations remain the hook's responsibility.
     pub fn flags(&self) -> Vec<(String, String)> {
         self.extensions
             .iter()

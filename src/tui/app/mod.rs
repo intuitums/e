@@ -60,6 +60,7 @@ enum AppJob {
     Prompt(String),
     /// An input hook's verdict on a submitted line: consume/replace/notice.
     InputVerdict {
+        sequence: u64,
         text: String,
         verdict: crate::core::api::InputVerdict,
     },
@@ -83,6 +84,54 @@ enum AppJob {
     Updated(String),
     /// A provider model-list refresh finished; rebuild an open picker.
     CatalogRefreshed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputRoute {
+    ApiKey,
+    Hook,
+    Direct,
+}
+
+fn input_route(awaiting_api_key: bool, has_input_hook: bool) -> InputRoute {
+    match (awaiting_api_key, has_input_hook) {
+        (true, _) => InputRoute::ApiKey,
+        (false, true) => InputRoute::Hook,
+        (false, false) => InputRoute::Direct,
+    }
+}
+
+/// Input hooks run concurrently so a slow extension does not block the frame,
+/// but their verdicts must be applied in submission order. Otherwise a fast
+/// second line can overtake a slow first one and reverse the conversation.
+#[derive(Default)]
+struct PendingInputVerdicts {
+    next_sequence: u64,
+    next_to_apply: u64,
+    ready: std::collections::BTreeMap<u64, (String, crate::core::api::InputVerdict)>,
+}
+
+impl PendingInputVerdicts {
+    fn reserve(&mut self) -> u64 {
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        sequence
+    }
+
+    fn complete(
+        &mut self,
+        sequence: u64,
+        text: String,
+        verdict: crate::core::api::InputVerdict,
+    ) -> Vec<(String, crate::core::api::InputVerdict)> {
+        self.ready.insert(sequence, (text, verdict));
+        let mut ordered = Vec::new();
+        while let Some(item) = self.ready.remove(&self.next_to_apply) {
+            ordered.push(item);
+            self.next_to_apply += 1;
+        }
+        ordered
+    }
 }
 
 struct App {
@@ -111,6 +160,8 @@ struct App {
     /// Extension host; commands and prompts come back on `results`.
     host: std::sync::Arc<crate::core::api::ExtensionHost>,
     results: tokio::sync::mpsc::Sender<AppJob>,
+    /// Completed input-hook calls waiting for earlier submissions to finish.
+    input_verdicts: PendingInputVerdicts,
     /// A /compact summary is being generated; cleared when it lands or fails.
     compacting: bool,
     /// /compact was asked for mid-turn; runs when the turn ends (the
@@ -788,18 +839,72 @@ impl App {
             return;
         }
 
+        let route = input_route(self.pending_key.is_some(), self.host.has_input_hook());
+        // API keys are consumed before extension dispatch, matching the
+        // documented boundary that secrets never reach input hooks.
+        if route == InputRoute::ApiKey {
+            self.submit_api_key(&trimmed);
+            return;
+        }
+
         // An input hook can consume or rewrite the line before anything else
-        // sees it (a pasted API key is handled below and never reaches it).
-        if self.host.has_input_hook() {
+        // sees it. Completed calls are applied in submission order below.
+        if route == InputRoute::Hook {
             let host = self.host.clone();
             let results = self.results.clone();
+            let sequence = self.input_verdicts.reserve();
             tokio::spawn(async move {
                 let verdict = host.hook_input(&trimmed).await;
-                let _ = results.send(AppJob::InputVerdict { text, verdict }).await;
+                let _ = results
+                    .send(AppJob::InputVerdict {
+                        sequence,
+                        text,
+                        verdict,
+                    })
+                    .await;
             });
             return;
         }
         self.submit_direct(trimmed);
+    }
+
+    fn submit_api_key(&mut self, key: &str) {
+        let Some(secret_for) = self.pending_key.take() else {
+            return;
+        };
+        self.auth = None;
+        self.editor.mask = false;
+        match crate::core::auth::login::save_api_key(&secret_for, key) {
+            Ok(()) => {
+                self.notice(format!("{secret_for}: key saved to ~/.e/auth.json"));
+                // An API-key sign-in is a sign-in: emit the same typed
+                // outcome the OAuth flows send, so the stranded-model
+                // re-pick happens here too, not only for browser logins.
+                let _ = self
+                    .logins
+                    .try_send(crate::core::auth::login::Outcome::SignedIn {
+                        provider: secret_for,
+                    });
+            }
+            Err(e) => self.notice(format!("{secret_for}: {e}")),
+        }
+    }
+
+    fn apply_input_verdict(&mut self, text: String, verdict: crate::core::api::InputVerdict) {
+        if let Some(notice) = verdict.notice.filter(|n| !n.trim().is_empty()) {
+            self.notice(notice);
+        }
+        if verdict.consume {
+            // Swallowed entirely — nothing reaches the agent.
+        } else if let Some(replace) = verdict.replace {
+            // The extension rewrote the line; it already saw the original, so
+            // no second hook pass.
+            self.submit_direct(replace);
+        } else {
+            // Allowed through — the hook already saw the text, so submit
+            // directly. Re-running submit() here would loop through the hook.
+            self.submit_direct(text);
+        }
     }
 
     /// The real submit flow, after the input hook (if any) has had its say.
@@ -808,29 +913,6 @@ impl App {
         if trimmed.is_empty() {
             return;
         }
-
-        if let Some(secret_for) = self.pending_key.take() {
-            // A pasted API key goes to auth.json and nowhere else — in
-            // particular not into the composer's recall history below.
-            self.auth = None;
-            self.editor.mask = false;
-            match crate::core::auth::login::save_api_key(&secret_for, &trimmed) {
-                Ok(()) => {
-                    self.notice(format!("{secret_for}: key saved to ~/.e/auth.json"));
-                    // An API-key sign-in is a sign-in: emit the same typed
-                    // outcome the OAuth flows send, so the stranded-model
-                    // re-pick happens here too, not only for browser logins.
-                    let _ = self
-                        .logins
-                        .try_send(crate::core::auth::login::Outcome::SignedIn {
-                            provider: secret_for.clone(),
-                        });
-                }
-                Err(e) => self.notice(format!("{secret_for}: {e}")),
-            }
-            return;
-        }
-
         self.editor.push_history(text);
 
         // `!cmd` runs in the shell directly; the output lands in the
@@ -1635,6 +1717,7 @@ pub async fn run(
         logins: logins_tx,
         host,
         results: results_tx,
+        input_verdicts: PendingInputVerdicts::default(),
         compacting: false,
         compact_requested: false,
         held_prompts: Vec::new(),
@@ -1935,21 +2018,14 @@ pub async fn run(
                 match job {
                     Some(AppJob::Notice(notice)) => app.notice(notice),
                     Some(AppJob::Prompt(prompt)) => app.prompt(prompt),
-                    Some(AppJob::InputVerdict { text, verdict }) => {
-                        if let Some(notice) = verdict.notice.filter(|n| !n.trim().is_empty()) {
-                            app.notice(notice);
-                        }
-                        if verdict.consume {
-                            // Swallowed entirely — nothing reaches the agent.
-                        } else if let Some(replace) = verdict.replace {
-                            // The extension rewrote the line; it already saw
-                            // the original, so no second hook pass.
-                            app.submit_direct(replace);
-                        } else {
-                            // Allowed through — the hook already saw the
-                            // text, so submit directly. Re-running submit()
-                            // here would loop back into the hook forever.
-                            app.submit_direct(text);
+                    Some(AppJob::InputVerdict { sequence, text, verdict }) => {
+                        // A later hook may finish first; hold it until every
+                        // earlier submission has a verdict, then apply the
+                        // contiguous ordered prefix.
+                        for (text, verdict) in
+                            app.input_verdicts.complete(sequence, text, verdict)
+                        {
+                            app.apply_input_verdict(text, verdict);
                         }
                     }
                     Some(AppJob::Rename(name)) => {
@@ -2173,5 +2249,40 @@ mod tests {
         let now = stage_initial_prompt("inspect this repo".into(), false, &mut pending);
         assert_eq!(now.as_deref(), Some("inspect this repo"));
         assert!(pending.is_none());
+    }
+
+    #[test]
+    fn api_keys_bypass_input_hooks() {
+        assert_eq!(input_route(true, true), InputRoute::ApiKey);
+        assert_eq!(input_route(true, false), InputRoute::ApiKey);
+        assert_eq!(input_route(false, true), InputRoute::Hook);
+        assert_eq!(input_route(false, false), InputRoute::Direct);
+    }
+
+    #[test]
+    fn input_hook_verdicts_apply_in_submission_order() {
+        let mut pending = PendingInputVerdicts::default();
+        let first = pending.reserve();
+        let second = pending.reserve();
+
+        let later = pending.complete(
+            second,
+            "second".into(),
+            crate::core::api::InputVerdict::default(),
+        );
+        assert!(later.is_empty(), "a later verdict must wait");
+
+        let ordered = pending.complete(
+            first,
+            "first".into(),
+            crate::core::api::InputVerdict::default(),
+        );
+        assert_eq!(
+            ordered
+                .into_iter()
+                .map(|(text, _)| text)
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
     }
 }
