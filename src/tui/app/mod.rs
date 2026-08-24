@@ -322,9 +322,9 @@ impl App {
         let data = StatusData {
             model: signed_in.then(|| self.agent.model_slug()),
             effort: signed_in.then(|| self.status_effort.clone()).flatten(),
-            session_name: None,
+            session_name: self.agent.session_name(),
             context_percent: Some(percent),
-            queued: 0,
+            queued: self.agent.queued_count() + self.held_prompts.len(),
         };
         let hint = self
             .settings
@@ -496,6 +496,10 @@ impl App {
     }
 
     fn open_resume_menu(&mut self) {
+        if self.active.is_some() {
+            self.notice("a turn is running — press Esc to stop it, then /resume".into());
+            return;
+        }
         let cwd = self.agent.cwd();
         let items: Vec<MenuItem> = crate::core::session::list(&cwd)
             .into_iter()
@@ -529,6 +533,13 @@ impl App {
     }
 
     fn resume_path(&mut self, path: std::path::PathBuf) {
+        // The picker can already be open when a turn starts (queued prompt);
+        // re-check here so a selection can never splice a running turn's
+        // output into the resumed session.
+        if self.active.is_some() {
+            self.notice("a turn is running — press Esc to stop it, then resume".into());
+            return;
+        }
         let messages = match crate::core::session::Session::load(&path) {
             Ok(m) => m,
             Err(e) => {
@@ -606,12 +617,21 @@ impl App {
         }
         self.agent.load_history(messages);
         self.agent.set_session(Some(session));
+        // Identity travels together: the resumed log's persisted name
+        // replaces whatever the previous session was called.
+        self.agent
+            .adopt_session_name(crate::core::session::name_of(&path));
         self.notice(format!(
             "resumed {}",
             path.file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default()
         ));
+        // A -r launch prompt waits for this selection; deliver it against
+        // the loaded history.
+        if let Some(initial) = self.pending_initial.take() {
+            self.submit(initial);
+        }
     }
 
     fn open_settings(&mut self) {
@@ -1056,6 +1076,12 @@ impl App {
                 self.notice(help);
             }
             "/new" | "/clear" => {
+                // A running turn owns the history and session log; replacing
+                // them mid-turn would commit its reply into the wrong session.
+                if self.active.is_some() {
+                    self.notice("a turn is running — press Esc to stop it, then /new".into());
+                    return;
+                }
                 self.compacting = false;
                 self.compact_requested = false;
                 self.held_prompts.clear();
@@ -1064,6 +1090,9 @@ impl App {
                 self.context_tokens = 0;
                 self.agent.clear();
                 self.agent.set_session(None);
+                // The name is part of session identity: a fresh session must
+                // not inherit the old one's.
+                self.agent.adopt_session_name(None);
                 self.transcript.clear();
                 self.transcript
                     .push(Block::new(Kind::Banner, crate::VERSION));
@@ -1899,9 +1928,10 @@ pub async fn run(
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
 
-    if let Some(initial) =
-        stage_initial_prompt(initial, app.trust.is_some(), &mut app.pending_initial)
-    {
+    // A -r launch prompt must wait for the session pick, or it would start a
+    // turn whose reply splices into whichever session gets selected.
+    let hold_initial = app.trust.is_some() || (resume_flag && app.menu.is_some());
+    if let Some(initial) = stage_initial_prompt(initial, hold_initial, &mut app.pending_initial) {
         app.submit(initial);
     }
     painter.frame(app.frame(cols as usize));
@@ -2083,7 +2113,18 @@ pub async fn run(
                                 KeyCode::Up => { app.menu.as_mut().unwrap().step(-1); }
                                 KeyCode::Down => { app.menu.as_mut().unwrap().step(1); }
                                 KeyCode::Enter => { app.select_menu(); }
-                                KeyCode::Esc => { app.menu = None; }
+                                KeyCode::Esc => {
+                                    app.menu = None;
+                                    // Declining the -r picker releases a held
+                                    // launch prompt into the current session
+                                    // (the trust question, if open, still
+                                    // holds it).
+                                    if app.trust.is_none() {
+                                        if let Some(initial) = app.pending_initial.take() {
+                                            app.submit(initial);
+                                        }
+                                    }
+                                }
                                 _ => {}
                             }
                         } else if k.code == KeyCode::Esc && app.pending_key.is_some() {

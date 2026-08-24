@@ -25,7 +25,9 @@ use crate::core::session::Session;
 use crate::core::tools;
 
 /// Append a message to history and to the session log, creating the log on
-/// the first message.
+/// the first message. The in-memory turn always proceeds; a persistence
+/// failure comes back as the error so the caller can surface it — silently
+/// losing history is the one thing this must never do.
 fn commit(
     history: &Arc<Mutex<Vec<ChatMessage>>>,
     session: &Arc<Mutex<Option<Session>>>,
@@ -33,19 +35,38 @@ fn commit(
     model: &Model,
     message: ChatMessage,
     session_name: &Arc<Mutex<Option<String>>>,
-) {
+) -> std::io::Result<()> {
     history.lock().unwrap().push(message.clone());
     let mut guard = session.lock().unwrap();
     if guard.is_none() {
-        *guard = Session::create(cwd, &slug(model)).ok();
-        if let Some(s) = guard.as_mut() {
-            if let Some(name) = session_name.lock().unwrap().clone() {
-                s.set_name(&name);
+        let mut created = Session::create(cwd, &slug(model))?;
+        if let Some(name) = session_name.lock().unwrap().clone() {
+            created.set_name(&name)?;
+        }
+        *guard = Some(created);
+    }
+    match guard.as_mut() {
+        Some(s) => s.append(&message),
+        None => Ok(()),
+    }
+}
+
+/// Turn a commit result into at most one warning per failure episode: the
+/// first failure warns, later ones stay quiet until a commit succeeds again.
+fn note_persist(
+    warned: &AtomicBool,
+    result: std::io::Result<()>,
+    events: &mpsc::Sender<SessionEvent>,
+) {
+    match result {
+        Ok(()) => warned.store(false, Ordering::SeqCst),
+        Err(e) => {
+            if !warned.swap(true, Ordering::SeqCst) {
+                let _ = events.try_send(SessionEvent::Warning(format!(
+                    "session not saved: {e} — the conversation continues in memory only"
+                )));
             }
         }
-    }
-    if let Some(s) = guard.as_mut() {
-        s.append(&message);
     }
 }
 
@@ -188,6 +209,8 @@ pub struct Agent {
     /// An extension-set display name, applied when the log exists or when it
     /// is created on the first message.
     session_name: Arc<Mutex<Option<String>>>,
+    /// Latch for the persistence-failure warning (see `note_persist`).
+    persist_warned: Arc<AtomicBool>,
 }
 
 impl Agent {
@@ -204,6 +227,7 @@ impl Agent {
             running: false,
             session: Arc::new(Mutex::new(None)),
             session_name: Arc::new(Mutex::new(None)),
+            persist_warned: Arc::new(AtomicBool::new(false)),
         };
         (agent, rx)
     }
@@ -259,7 +283,7 @@ impl Agent {
     /// starting a turn — the `!` shell passthrough records its output this way
     /// so the model sees what the user ran.
     pub fn record_user(&self, text: String) {
-        commit(
+        let result = commit(
             &self.history,
             &self.session,
             &self.cwd,
@@ -267,6 +291,7 @@ impl Agent {
             ChatMessage::user(text),
             &self.session_name,
         );
+        note_persist(&self.persist_warned, result, &self.events);
     }
 
     /// Replace the history with the compaction seed plus the kept recent
@@ -276,7 +301,7 @@ impl Agent {
     pub fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) {
         self.history.lock().unwrap().clear();
         *self.session.lock().unwrap() = None;
-        commit(
+        let result = commit(
             &self.history,
             &self.session,
             &self.cwd,
@@ -284,8 +309,9 @@ impl Agent {
             ChatMessage::user(crate::core::agent::compact::seed(summary)),
             &self.session_name,
         );
+        note_persist(&self.persist_warned, result, &self.events);
         for message in kept {
-            commit(
+            let result = commit(
                 &self.history,
                 &self.session,
                 &self.cwd,
@@ -293,6 +319,7 @@ impl Agent {
                 message,
                 &self.session_name,
             );
+            note_persist(&self.persist_warned, result, &self.events);
         }
     }
 
@@ -306,11 +333,25 @@ impl Agent {
     /// idempotent — the last one wins.
     pub fn set_session_name(&self, name: String) {
         *self.session_name.lock().unwrap() = Some(name);
-        if let Some(s) = self.session.lock().unwrap().as_mut() {
+        let mut guard = self.session.lock().unwrap();
+        if let Some(s) = guard.as_mut() {
             if let Some(name) = self.session_name.lock().unwrap().clone() {
-                s.set_name(&name);
+                let result = s.set_name(&name);
+                drop(guard);
+                note_persist(&self.persist_warned, result, &self.events);
             }
         }
+    }
+
+    /// Adopt the name a resumed session carries (or clear it for a fresh
+    /// one). In-memory only — the log already holds its own name entries.
+    pub fn adopt_session_name(&self, name: Option<String>) {
+        *self.session_name.lock().unwrap() = name;
+    }
+
+    /// Prompts waiting on the running turn (steering not yet drained).
+    pub fn queued_count(&self) -> usize {
+        self.pending.lock().unwrap().len()
     }
 
     /// The extension-set session name, if any (the derived title still
@@ -333,7 +374,7 @@ impl Agent {
             self.pending.lock().unwrap().push(text);
             return true;
         }
-        commit(
+        let result = commit(
             &self.history,
             &self.session,
             &self.cwd,
@@ -341,6 +382,7 @@ impl Agent {
             ChatMessage::user(text),
             &self.session_name,
         );
+        note_persist(&self.persist_warned, result, &self.events);
         self.start(system);
         false
     }
@@ -359,6 +401,7 @@ impl Agent {
         let pending = self.pending.clone();
         let host = self.host.clone();
         let session_name = self.session_name.clone();
+        let persist_warned = self.persist_warned.clone();
 
         tokio::spawn(async move {
             let _ = events.send(SessionEvent::TurnStart).await;
@@ -371,7 +414,7 @@ impl Agent {
                 let steered: Vec<String> = { pending.lock().unwrap().drain(..).collect() };
                 for message in steered {
                     let _ = events.send(SessionEvent::Steered(message.clone())).await;
-                    commit(
+                    let result = commit(
                         &history,
                         &session,
                         &cwd,
@@ -379,6 +422,7 @@ impl Agent {
                         ChatMessage::user(message),
                         &session_name,
                     );
+                    note_persist(&persist_warned, result, &events);
                 }
 
                 let messages = { history.lock().unwrap().clone() };
@@ -577,7 +621,7 @@ impl Agent {
                 // Reasoning items commit first — the dialect that produced
                 // them must replay them ahead of the assistant turn.
                 for item in reasoning_items.drain(..) {
-                    commit(
+                    let result = commit(
                         &history,
                         &session,
                         &cwd,
@@ -591,9 +635,10 @@ impl Agent {
                         },
                         &session_name,
                     );
+                    note_persist(&persist_warned, result, &events);
                 }
                 // Commit the assistant turn (text + any calls).
-                commit(
+                let result = commit(
                     &history,
                     &session,
                     &cwd,
@@ -601,6 +646,7 @@ impl Agent {
                     ChatMessage::assistant(text, calls.clone()),
                     &session_name,
                 );
+                note_persist(&persist_warned, result, &events);
 
                 if calls.is_empty() {
                     // A plain reply would end the turn — but a message that
@@ -683,7 +729,7 @@ impl Agent {
                             summary: "error".into(),
                         },
                     };
-                    commit(
+                    let result = commit(
                         &history,
                         &session,
                         &cwd,
@@ -696,6 +742,7 @@ impl Agent {
                         ),
                         &session_name,
                     );
+                    note_persist(&persist_warned, result, &events);
                 }
                 if cancel.load(Ordering::SeqCst) {
                     break 'turn true;
