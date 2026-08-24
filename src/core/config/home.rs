@@ -39,10 +39,17 @@ pub fn themes_dir() -> PathBuf {
     home().join("themes")
 }
 
-/// Make sure the home directory itself exists before a write lands in it.
-/// Nothing else is seeded — the reference behavior: subdirectories appear
-/// when something is first written into them, so a bare home stays bare and
-/// every entry in `~/.e` is something the user (or a session) caused.
+/// Make sure the home directory exists before a write lands in it, seeding
+/// one bare `AGENTS.md` — the signpost for global instructions, which unlike
+/// themes or skills has no command that creates it. It stays empty: anything
+/// readable in it becomes system-prompt instructions (see context.rs), so
+/// there is no template to ship. Everything else appears when first written,
+/// so every other entry in `~/.e` is something the user (or a session) caused.
 pub fn ensure() -> std::io::Result<()> {
-    std::fs::create_dir_all(home())
+    std::fs::create_dir_all(home())?;
+    let agents = agents_md_path();
+    if !agents.exists() {
+        std::fs::File::create(&agents)?;
+    }
+    Ok(())
 }
