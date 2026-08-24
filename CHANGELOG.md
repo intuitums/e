@@ -8,6 +8,29 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- Streaming no longer lags or hangs the TUI. The blink tick stops
+  invalidating finished blocks' render caches (only a running tool row
+  actually blinks), the statusline's sign-in and effort state is cached
+  instead of read from disk every frame, painting moved to a dedicated
+  thread with latest-wins coalescing so a slow terminal can't stall input
+  handling, session events are drained in batches under a 33ms frame
+  budget, and the OSC-11 background probe runs once at startup instead of
+  blocking the loop on every theme change.
+
+- Truncated, refused, or filtered replies are no longer silent successes:
+  every dialect maps its stop/finish reason, the agent surfaces abnormal
+  endings as visible warnings, and malformed SSE payloads are counted and
+  reported instead of being dropped.
+
+- Provider coverage: a native Gemini dialect (thought-signature replay on
+  tool loops, thinking levels, safety/limit finishes), eight new API-key
+  providers as data — Google, Groq, Mistral, DeepSeek, Cerebras,
+  OpenRouter, Together, Fireworks — and keyless local backends (Ollama,
+  LM Studio) whose models appear whenever the local server is running.
+
+- The provider module is reorganized as `providers/{api,data}`: wire
+  dialects under `api/`, provider definitions under `data/`.
+
 - Audit fixes: session directories now use collision-resistant workspace keys
   while safely discovering legacy logs; provider SSE parsing preserves UTF-8
   across arbitrary byte chunks; live-discovered models inherit their
