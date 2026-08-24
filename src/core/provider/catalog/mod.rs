@@ -37,6 +37,29 @@ impl Api {
     }
 }
 
+/// How the model takes its reasoning knob. Adaptive models (Claude 4.7+)
+/// reject the legacy manual-thinking shape with a 400, so this is declared
+/// per model in provider data and rides the request through to the
+/// Anthropic dialect.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Thinking {
+    /// `thinking: {"type": "adaptive"}` plus `output_config.effort`.
+    Adaptive,
+    /// Legacy `thinking: {"type": "enabled", "budget_tokens": N}`.
+    Manual,
+}
+
+impl Thinking {
+    fn from_decl(value: Option<&str>) -> Thinking {
+        match value {
+            Some("adaptive") => Thinking::Adaptive,
+            // Undeclared keeps today's wire shape; only data opts into
+            // adaptive, so user-declared models never change behavior.
+            _ => Thinking::Manual,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Model {
     pub provider: String,
@@ -45,6 +68,8 @@ pub struct Model {
     pub api: Api,
     /// Effort values the backend accepts for its reasoning knob, if any.
     pub efforts: Vec<String>,
+    /// Which thinking wire shape the backend accepts for this model.
+    pub thinking: Thinking,
     /// Context window in tokens. The seed value is a fallback: the
     /// provider's own reported window wins once a refresh has seen it.
     pub context_window: u64,
@@ -66,6 +91,7 @@ pub fn builtin_catalog() -> Vec<Model> {
                 base_url: provider.base_url.clone(),
                 api: provider.api(),
                 efforts: decl.efforts.clone(),
+                thinking: Thinking::from_decl(decl.thinking.as_deref()),
                 context_window: decl.context_window,
             })
         })
@@ -83,9 +109,13 @@ struct ProviderEntry {
     base_url: Option<String>,
     #[serde(default)]
     api: Option<String>,
+    #[serde(default)]
+    efforts: Option<Vec<String>>,
     /// Default window for this provider's models; each model may override.
     #[serde(default)]
     context_window: Option<u64>,
+    #[serde(default)]
+    thinking: Option<String>,
     #[serde(default)]
     models: Vec<ModelEntry>,
 }
@@ -102,6 +132,8 @@ enum ModelEntry {
         context_window: Option<u64>,
         #[serde(default)]
         efforts: Vec<String>,
+        #[serde(default)]
+        thinking: Option<String>,
     },
 }
 
@@ -113,32 +145,66 @@ pub fn catalog() -> Vec<Model> {
     if let Ok(json) = std::fs::read_to_string(home::home().join("models.json")) {
         if let Ok(file) = serde_json::from_str::<ModelsFile>(&json) {
             for (provider, entry) in file.providers {
-                let api = entry
-                    .api
-                    .as_deref()
-                    .and_then(Api::parse)
-                    .unwrap_or(Api::Completions);
-                let base = entry.base_url.clone().unwrap_or_else(|| {
-                    crate::core::provider::registry::find("opencode-go")
-                        .map(|p| p.base_url.clone())
-                        .unwrap_or_default()
+                // A partial entry — "correct this one field" — must inherit
+                // the built-in provider's transport and defaults rather than
+                // silently swapping dialect and endpoint. Otherwise tweaking
+                // a context window on an Anthropic model would send that
+                // model's requests (and its credential) to an unrelated
+                // gateway's Chat Completions endpoint.
+                let builtin = crate::core::provider::registry::find(&provider);
+                let api = match entry.api.as_deref() {
+                    Some(name) => Api::parse(name).unwrap_or_else(|| {
+                        panic!("models.json: provider {provider}: unknown api dialect `{name}`")
+                    }),
+                    None => builtin.map(|p| p.api()).unwrap_or(Api::Completions),
+                };
+                let base = entry.base_url.clone().or_else(|| {
+                    builtin.map(|p| p.base_url.clone()).or_else(|| {
+                        crate::core::provider::registry::find("opencode-go")
+                            .map(|p| p.base_url.clone())
+                    })
                 });
                 for model in entry.models {
-                    let (id, window, efforts) = match model {
-                        ModelEntry::Id(id) => (id, None, Vec::new()),
+                    let (id, window, efforts, thinking) = match model {
+                        ModelEntry::Id(id) => (id, None, Vec::new(), None),
                         ModelEntry::Detailed {
                             id,
                             context_window,
                             efforts,
-                        } => (id, context_window, efforts),
+                            thinking,
+                        } => (id, context_window, efforts, thinking),
                     };
+                    let declared = builtin.and_then(|p| p.models.iter().find(|decl| decl.id == id));
                     let resolved = Model {
                         provider: provider.clone(),
                         id,
-                        base_url: base.clone(),
+                        base_url: base.clone().unwrap_or_default(),
                         api,
-                        efforts,
-                        context_window: window.or(entry.context_window).unwrap_or(200_000),
+                        efforts: match (&entry.efforts, &efforts) {
+                            // Per-model declaration wins…
+                            (None, e) if !e.is_empty() => e.clone(),
+                            // …then the per-provider default from the file…
+                            (Some(e), _) if !e.is_empty() => e.clone(),
+                            // …then the built-in's own efforts.
+                            _ => declared.map(|d| d.efforts.clone()).unwrap_or_default(),
+                        },
+                        thinking: match (&thinking, &entry.thinking) {
+                            (Some(t), _) | (_, Some(t)) => match t.as_str() {
+                                "adaptive" => Thinking::Adaptive,
+                                "manual" => Thinking::Manual,
+                                other => panic!(
+                                    "models.json: provider {provider}: unknown thinking mode `{other}`"
+                                ),
+                            },
+                            // …then the built-in's own declaration.
+                            _ => declared
+                                .map(|d| Thinking::from_decl(d.thinking.as_deref()))
+                                .unwrap_or(Thinking::Manual),
+                        },
+                        context_window: window
+                            .or(entry.context_window)
+                            .or_else(|| declared.map(|d| d.context_window))
+                            .unwrap_or(200_000),
                     };
                     models.retain(|m| !(m.provider == resolved.provider && m.id == resolved.id));
                     models.push(resolved);

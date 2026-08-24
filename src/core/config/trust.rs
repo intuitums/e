@@ -24,6 +24,7 @@ fn key(cwd: &Path) -> String {
 /// Some(true) trusted, Some(false) declined, None never asked.
 pub fn status(cwd: &Path) -> Option<bool> {
     store::read_object(&file())
+        .unwrap_or_default()
         .get(&key(cwd))
         .and_then(|v| v.get("trusted"))
         .and_then(|v| v.as_bool())

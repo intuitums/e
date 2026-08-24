@@ -91,7 +91,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     let mut splitter = SseSplitter::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = next_sse_chunk(&mut stream).await? {
-        for payload in splitter.feed(&String::from_utf8_lossy(&chunk)) {
+        for payload in splitter.feed_bytes(&chunk) {
             if payload == "[DONE]" {
                 flush(&mut pending, tx).await;
                 return Ok(());

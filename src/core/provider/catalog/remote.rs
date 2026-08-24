@@ -5,7 +5,7 @@
 //! wins over any seed value. Silent on failure: an offline launch must not
 //! care.
 
-use super::{catalog, Api, Model};
+use super::{catalog, Model, Thinking};
 
 /// How long a provider's fetched model list stays fresh (the reference's
 /// refresh interval).
@@ -18,12 +18,12 @@ fn store_path() -> std::path::PathBuf {
 /// Model ids each provider reported, from the cache. A new model a gateway
 /// ships appears here on the next refresh — no e release involved.
 pub(super) fn remote_overlay(models: &mut Vec<Model>) {
-    let object = crate::core::config::store::read_object(&store_path());
+    let object = crate::core::config::store::read_object(&store_path()).unwrap_or_default();
     for (provider, entry) in object {
-        let Some(base) = models
+        let Some((base, api)) = models
             .iter()
             .find(|m| m.provider == provider)
-            .map(|m| m.base_url.clone())
+            .map(|m| (m.base_url.clone(), m.api))
         else {
             continue; // only providers e knows how to speak to
         };
@@ -54,8 +54,9 @@ pub(super) fn remote_overlay(models: &mut Vec<Model>) {
                     provider: provider.clone(),
                     id: id.to_string(),
                     base_url: base.clone(),
-                    api: Api::Completions,
+                    api,
                     efforts: Vec::new(),
+                    thinking: Thinking::Manual,
                     context_window: item["context_window"].as_u64().unwrap_or(200_000),
                 }),
             }
@@ -80,7 +81,7 @@ pub async fn refresh_remote_within(max_age_ms: u64) {
     let _guard = REFRESH_LOCK.lock().await;
     let auth = crate::core::auth::load();
     let now = crate::core::auth::now_ms();
-    let stored = crate::core::config::store::read_object(&store_path());
+    let stored = crate::core::config::store::read_object(&store_path()).unwrap_or_default();
     // One representative model per signed-in provider gives base + auth kind.
     let mut providers: Vec<(String, String)> = Vec::new();
     for m in catalog() {

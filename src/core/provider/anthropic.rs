@@ -3,12 +3,14 @@
 //! Same event grammar as the reference client: SSE data payloads carry a
 //! `type` — content_block_start/delta/stop stream text, thinking, and
 //! tool_use input JSON; message_start/message_delta carry usage. Effort maps
-//! to an extended-thinking token budget.
+//! to an extended-thinking token budget (manual) or `output_config.effort`
+//! (adaptive), per the model's declared thinking mode.
 
 use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::core::auth::login;
+use crate::core::provider::catalog::Thinking;
 use crate::core::provider::{
     http, next_sse_chunk, retry_after_seconds, send_request, Event, FailureCause, ProviderError,
     Request, SseSplitter, ToolCall,
@@ -93,10 +95,21 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
         body["tools"] = json!(tools);
     }
     if let Some(effort) = &request.effort {
-        body["thinking"] = json!({
-            "type": "enabled",
-            "budget_tokens": thinking_budget(effort),
-        });
+        // Adaptive-thinking models (Claude 4.7+) reject the legacy manual
+        // shape with a 400 before generation; they take the effort through
+        // output_config instead. Manual models keep the token budget.
+        match request.model.thinking {
+            Thinking::Adaptive => {
+                body["thinking"] = json!({"type": "adaptive"});
+                body["output_config"] = json!({"effort": effort});
+            }
+            Thinking::Manual => {
+                body["thinking"] = json!({
+                    "type": "enabled",
+                    "budget_tokens": thinking_budget(effort),
+                });
+            }
+        }
     }
 
     let response = send_request(
@@ -125,7 +138,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<(), RunE
     let mut output_tokens = 0u64;
 
     while let Some(chunk) = next_sse_chunk(&mut stream).await? {
-        for payload in splitter.feed(&String::from_utf8_lossy(&chunk)) {
+        for payload in splitter.feed_bytes(&chunk) {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
                 continue;
             };

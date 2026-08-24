@@ -8,6 +8,7 @@ use crate::core::config::home;
 
 pub fn get_string(key: &str) -> Option<String> {
     crate::core::config::store::read_object(&home::settings_path())
+        .unwrap_or_default()
         .get(key)
         .and_then(|v| v.as_str().map(String::from))
 }
@@ -24,6 +25,7 @@ pub fn set_string(key: &str, val: &str) {
 /// reads as "no scope — everything available is in play").
 pub fn get_strings(key: &str) -> Option<Vec<String>> {
     crate::core::config::store::read_object(&home::settings_path())
+        .unwrap_or_default()
         .get(key)
         .and_then(|v| v.as_array())
         .map(|a| {
@@ -54,6 +56,7 @@ pub fn remove(key: &str) {
 /// extension's initialize so none has to squat on a top-level key.
 pub fn extensions_config() -> serde_json::Value {
     crate::core::config::store::read_object(&home::settings_path())
+        .unwrap_or_default()
         .get("extensions")
         .cloned()
         .unwrap_or(serde_json::Value::Object(Default::default()))

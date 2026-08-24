@@ -9,6 +9,12 @@ use e::core::api::{ExtensionHost, StartupAction};
 // E_HOME is process-global; serialize the tests that set it.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    // A prior panic while holding the lock must not cascade into every
+    // later E_HOME test as PoisonError — clear and continue.
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // hook.tool_call contains "tool_call", so the hook case must match first.
 const FAKE: &str = r#"#!/bin/sh
 while IFS= read -r line; do
@@ -95,7 +101,7 @@ mod tempdir {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn extension_round_trip() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _home = fake_home();
     let (notices, _rx) = tokio::sync::mpsc::channel(16);
     let host = ExtensionHost::start(notices).await;
@@ -208,6 +214,32 @@ async fn empty_host_serves_builtins() {
     assert!(result.is_error);
 }
 
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn extension_exit_wakes_pending_requests() {
+    const EXITING: &str = r#"#!/bin/sh
+IFS= read -r line
+id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"id":%s,"result":{"name":"exiting","tools":[{"name":"boom","parameters":{"type":"object"}}]}}\n' "$id"
+exit 0
+"#;
+    let _lock = env_lock();
+    let _home = tempdir::TempHome::with_extension("exiting.sh", EXITING);
+    let (notices, _rx) = tokio::sync::mpsc::channel(4);
+    let host = ExtensionHost::start(notices).await;
+    assert!(host.owns_tool("boom"));
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        host.call_tool("boom", "{}"),
+    )
+    .await
+    .expect("extension exit should resolve the request immediately");
+    assert!(result.is_error);
+    assert!(result.content.contains("extension exited"));
+    host.shutdown().await;
+}
+
 /// The initialize handshake carries namespaced extension config from
 /// settings.json (`extensions.<name>`), so extensions never squat on a
 /// top-level settings key. The fake answers with its manifest only when it
@@ -229,7 +261,7 @@ while IFS= read -r line; do
   esac
 done
 "#;
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let home = tempdir::TempHome::with_extension("cfg.sh", CONFIG_FAKE);
     std::fs::write(
         home.dir.join("settings.json"),
@@ -276,7 +308,7 @@ rl.on("line", (line) => {
   } else if (req.method === "shutdown") process.exit(0);
 });
 "#;
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _home = tempdir::TempHome::with_extension("flagsprobe.sh", FLAGS_FAKE);
     let (notices, mut rx) = tokio::sync::mpsc::channel(16);
     let host = ExtensionHost::start(notices).await;
@@ -377,7 +409,7 @@ rl.on("line", (line) => {
   } else if (req.method === "shutdown") process.exit(0);
 });
 "#;
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _home = tempdir::TempHome::with_extensions(&[("a.sh", BOTH_FAKE), ("b.sh", BOTH_FAKE)]);
     let (notices, mut rx) = tokio::sync::mpsc::channel(16);
     let host = ExtensionHost::start(notices).await;
@@ -445,7 +477,7 @@ rl.on("line", (line) => {
   } else if (req.method === "shutdown") process.exit(0);
 });
 "#;
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _home = tempdir::TempHome::with_extension("toolonly.sh", TOOLONLY_FAKE);
     let (notices, _rx) = tokio::sync::mpsc::channel(16);
     // No startup hook — the flags notification must arrive on its own.
@@ -473,7 +505,7 @@ async fn dead_extension_fails_fast_instead_of_stalling() {
     const DIES_INSTANTLY: &str = r#"#!/usr/bin/env node
 // no readline, no handlers — the process exits at once
 "#;
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _home = tempdir::TempHome::with_extension("dies.sh", DIES_INSTANTLY);
     let (notices, _rx) = tokio::sync::mpsc::channel(16);
 
@@ -481,8 +513,10 @@ async fn dead_extension_fails_fast_instead_of_stalling() {
     let host = ExtensionHost::start(notices).await;
     let elapsed = t0.elapsed();
     // The extension is discovered but skipped: initialize failed fast.
+    // Bound well under INIT_TIMEOUT (5s); leave headroom for slow CI runners
+    // that occasionally take ~2s just to spawn and observe EOF.
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
+        elapsed < std::time::Duration::from_secs(3),
         "a dead extension stalled launch for {elapsed:?} — it should be skipped in well under the 5 s timeout"
     );
     assert!(host.is_empty(), "dead extension must not be kept");

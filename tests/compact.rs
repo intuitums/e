@@ -52,6 +52,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
+        thinking: e::core::provider::catalog::Thinking::Manual,
         context_window: 200_000,
     };
 

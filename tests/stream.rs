@@ -17,6 +17,19 @@ fn sse_splitter_handles_fragmentation_and_crlf() {
     assert_eq!(s.feed("data: a\ndata: b\n\n"), vec!["a\nb"]);
 }
 
+#[test]
+fn sse_splitter_preserves_utf8_across_byte_chunks() {
+    let event = "data: {\"text\":\"é\"}\n\n";
+    let bytes = event.as_bytes();
+    let split = bytes.iter().position(|byte| *byte == 0xc3).unwrap() + 1;
+    let mut splitter = SseSplitter::new();
+    assert!(splitter.feed_bytes(&bytes[..split]).is_empty());
+    assert_eq!(
+        splitter.feed_bytes(&bytes[split..]),
+        vec![r#"{"text":"é"}"#]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn completions_stream_parses_deltas_and_usage() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -54,6 +67,7 @@ async fn completions_stream_parses_deltas_and_usage() {
             base_url: format!("http://127.0.0.1:{port}"),
             api: Api::Completions,
             efforts: Vec::new(),
+            thinking: e::core::provider::catalog::Thinking::Manual,
             context_window: 200_000,
         },
         system: "sys".into(),
@@ -124,6 +138,7 @@ async fn agent_folds_provider_events_into_one_session_stream() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
+        thinking: e::core::provider::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -180,6 +195,7 @@ async fn agent_reports_errors_and_still_ends_the_turn_exactly_once() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
+        thinking: e::core::provider::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -234,6 +250,7 @@ async fn agent_interrupt_ends_a_stalled_stream() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
+        thinking: e::core::provider::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -291,6 +308,7 @@ async fn unexpected_eof_is_an_error_not_a_silent_done() {
             base_url: format!("http://127.0.0.1:{port}"),
             api: Api::Completions,
             efforts: Vec::new(),
+            thinking: e::core::provider::catalog::Thinking::Manual,
             context_window: 200_000,
         },
         system: "sys".into(),
@@ -382,6 +400,7 @@ async fn agent_interrupt_ends_a_turn_stuck_before_headers() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
+        thinking: e::core::provider::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -453,6 +472,7 @@ async fn retry_recovers_after_a_transient_failure() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
+        thinking: e::core::provider::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -529,6 +549,7 @@ async fn retry_campaign_gives_up_after_max_attempts() {
         base_url: format!("http://127.0.0.1:{port}"),
         api: Api::Completions,
         efforts: Vec::new(),
+        thinking: e::core::provider::catalog::Thinking::Manual,
         context_window: 200_000,
     };
     let (mut agent, mut rx) = Agent::new(model);
@@ -561,4 +582,59 @@ async fn retry_campaign_gives_up_after_max_attempts() {
         "exhaustion wording missing: {message}"
     );
     assert!(!aborted);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blank_successful_stream_surfaces_an_error_not_silence() {
+    use e::core::agent::{Agent, SessionEvent};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let home = std::env::temp_dir().join(format!("e-test-blank-{port}"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
+    std::env::set_var("E_HOME", &home);
+
+    // A well-formed stream that carries nothing: usage only, then [DONE].
+    std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 8192];
+        let _ = sock.read(&mut buffer);
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":0}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        sock.write_all(response.as_bytes()).unwrap();
+    });
+
+    let model = Model {
+        provider: "mock".into(),
+        id: "m".into(),
+        base_url: format!("http://127.0.0.1:{port}"),
+        api: Api::Completions,
+        efforts: Vec::new(),
+        thinking: e::core::provider::catalog::Thinking::Manual,
+        context_window: 200_000,
+    };
+    let (mut agent, mut rx) = Agent::new(model);
+    agent.submit("hi".into(), "sys".into());
+
+    let mut saw_error = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            SessionEvent::Error(message) => {
+                saw_error = true;
+                assert!(message.contains("empty"), "unexpected error: {message}");
+            }
+            SessionEvent::TurnEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(saw_error, "a blank success must surface an error");
 }
