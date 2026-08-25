@@ -240,6 +240,10 @@ fn assert_wire(name: &str, sent: &str) {
             );
             assert!(!sent.contains("chatgpt-account-id"));
             assert!(
+                !sent.contains("prompt_cache_key"),
+                "the codex-only cache key must not ride a plain-key request"
+            );
+            assert!(
                 sent.contains("authorization: Bearer sk-test")
                     || sent.contains("Authorization: Bearer sk-test")
             );
