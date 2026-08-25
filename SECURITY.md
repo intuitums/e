@@ -33,7 +33,7 @@ pinned in `scripts/guard.sh` and enforced in CI:
 ## Reporting a vulnerability
 
 Report privately through
-[GitHub Security Advisories](https://github.com/fschrhunt/e/security/advisories/new).
+[GitHub Security Advisories](https://github.com/intuitumxyz/e/security/advisories/new).
 Do not open a public issue for anything security-sensitive.
 
 Please include:

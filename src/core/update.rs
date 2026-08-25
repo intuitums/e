@@ -9,8 +9,8 @@
 
 use std::path::Path;
 
-const RELEASES: &str = "https://github.com/fschrhunt/e/releases";
-const API_LATEST: &str = "https://api.github.com/repos/fschrhunt/e/releases/latest";
+const RELEASES: &str = "https://github.com/intuitumxyz/e/releases";
+const API_LATEST: &str = "https://api.github.com/repos/intuitumxyz/e/releases/latest";
 
 /// The compile-time target triple, matching the release artifact names.
 pub fn target() -> &'static str {

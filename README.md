@@ -7,11 +7,11 @@
 One small, fast binary — extend it with your own tools, commands, themes, and skills.
 
 ```sh
-cargo install --git https://github.com/fschrhunt/e
+cargo install --git https://github.com/intuitumxyz/e
 ```
 
-Until the first release there is nothing to download — install.sh and the
-Homebrew tap light up with it.
+Until the first release there is nothing to download — install.sh lights up
+with it.
 
 · · ·
 

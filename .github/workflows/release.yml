@@ -1,7 +1,7 @@
 name: Release
 
 # A version tag builds the four release binaries and publishes them with
-# checksums. install.sh and the Homebrew tap both consume these artifacts.
+# checksums. install.sh consumes these artifacts.
 on:
   push:
     tags: ["v*"]
@@ -31,7 +31,7 @@ jobs:
             '$0 == "## " ver || $0 ~ "^## " ver " " {hit=1; next} /^## / {hit=0} hit' \
             CHANGELOG.md > notes.md
           if [ ! -s notes.md ]; then
-            echo "See [CHANGELOG.md](https://github.com/fschrhunt/e/blob/main/CHANGELOG.md)." > notes.md
+            echo "See [CHANGELOG.md](https://github.com/intuitumxyz/e/blob/main/CHANGELOG.md)." > notes.md
           fi
           {
             echo ""
@@ -40,13 +40,12 @@ jobs:
             echo "**Install or update**"
             echo ""
             echo '```sh'
-            echo "curl -fsSL https://raw.githubusercontent.com/fschrhunt/e/main/install.sh | sh"
+            echo "curl -fsSL https://raw.githubusercontent.com/intuitumxyz/e/main/install.sh | sh"
             echo '```'
             echo ""
-            echo "or \`brew install fschrhunt/tap/e\`. After this one manual
-            install, e updates itself (\`e update\`, or the launch-time
-            background check; /reload switches to a downloaded update in
-            place)."
+            echo "After this one manual install, e updates itself (\`e update\`,
+            or the launch-time background check; /reload switches to a
+            downloaded update in place)."
           } >> notes.md
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" --draft --title "e $TAG" --notes-file notes.md
