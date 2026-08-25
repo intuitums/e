@@ -22,8 +22,10 @@ built-in's provider and id replaces it — the file wins, like themes.
 - `base_url` is required for a new provider. Entries for built-in providers
   may omit it and inherit that provider's endpoint; e never guesses another
   provider's host.
-- `api`: `openai-completions` (default), `openai-responses`, or
-  `anthropic-messages`.
+- `api`: `openai-completions` (default), `openai-responses`, `codex-responses`,
+  `anthropic-messages`, or `google-generative-ai`. The short aliases
+  `completions`, `responses`, `anthropic`, and `google` are accepted too;
+  any other name is a load error.
 - `context_window` may sit on the provider (default for its models) or on a
   model object; it drives the statusline percentage and auto-compaction, so
   set it truthfully. Default: 200000.

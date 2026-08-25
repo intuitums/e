@@ -70,16 +70,20 @@ parsing. A name that isn't a clean `--name` token (e.g. `"-w, --worktree"`)
 appears in `e --help` but is never parsed — those flags still need the
 startup hook's raw argv. After every startup hook has seen raw argv, e removes
 typed flags and their separated string values before parsing its own
-subcommands or constructing the initial prompt. An optional `"default"`
-gives the value to use when the flag is absent.
+subcommands or constructing the initial prompt.
 
 Parsed flags are sent to **every** extension that declares typed flags as a
 `flags` notification right after launch (no reply needed) — so a tool-only
-extension reads them from any handler, not just during startup. Extensions
-that use the scaffold get `flag(name)` (the passed value, else the declared
-default, else undefined) and `flagPassed(name)` in any
-handler; the raw protocol gets `{"method":"flags",
-"params":{"flags":{…}}}`.
+extension reads them from any handler, not just during startup. The
+notification carries **only flags actually passed on the command line** — an
+absent flag stays absent, so a handler can tell "passed false" from "not
+passed". An optional `"default"` on a declaration is the value to use when
+the flag is absent: e retains it but never fabricates it into the
+notification, the extension applies it itself — the scaffold's `flag(name)`
+does exactly that (the passed value, else the declared default, else
+undefined), and `flagPassed(name)` is true only when the flag was on the
+command line, regardless of default. The raw protocol gets
+`{"method":"flags","params":{"flags":{…}}}`.
 
 **tool_call** → `{"content":"text the model sees","is_error":false,
 "session_name":"optional new session name"}`

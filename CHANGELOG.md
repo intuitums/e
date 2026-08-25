@@ -8,6 +8,23 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- Gemini thought deltas count as a produced stream: a thinking-only turn
+  that ends without text (MAX_TOKENS mid-thought) now ends with the
+  truncation warning instead of a spurious "empty response" error, and a
+  retryable failure after a long thinking phase is no longer replayed
+  (which used to re-stream the thoughts on screen).
+- The anthropic live model sync fetches `GET {base}/v1/models` — the
+  declared base is the bare host, so the old `/models` path 404'd on every
+  refresh and the live catalog never populated.
+- Plain-key `responses` requests no longer carry the ChatGPT-backend
+  `prompt_cache_key` body field; only the OAuth mount sends it.
+- Syntax highlighting is linear per line instead of O(n²): long single-line
+  tool output (minified JSON, log lines) no longer stalls input for
+  seconds, with a coarse perf regression test pinning it.
+- `FlagDecl` retains an extension's declared flag `default` instead of
+  silently dropping it (the scaffold applies it; e's flags notification
+  still carries only flags actually passed).
+
 - The main-screen renderer no longer moves the cursor relatively: every
   paint diffs the visible window row-by-row against a shadow of what each
   screen row currently shows, and rewrites only the rows that changed, each
