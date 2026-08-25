@@ -160,7 +160,7 @@ fn is_word_char(c: char) -> bool {
 /// geometry tests depend on.
 pub fn highlight_line(theme: &Theme, lang: &str, line: &str) -> String {
     let keywords = keywords_for(lang);
-    let comment_marker = line_comment_for(lang);
+    let comment_marker: Vec<char> = line_comment_for(lang).chars().collect();
     let kw = theme.fg_prefix("syntaxKeyword");
     let strn = theme.fg_prefix("syntaxString");
     let com = theme.fg_prefix("syntaxComment");
@@ -171,8 +171,11 @@ pub fn highlight_line(theme: &Theme, lang: &str, line: &str) -> String {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        // Comment to end of line.
-        if line[byte_at(&chars, i)..].starts_with(comment_marker) {
+        // Comment to end of line. The marker comparison reads the char
+        // slice at i directly — slicing the original line would re-sum the
+        // UTF-8 prefix per char, an O(n²) stall on long single-line tool
+        // output (minified JSON, log lines).
+        if chars[i..].starts_with(&comment_marker) {
             let rest: String = chars[i..].iter().collect();
             if com.is_empty() {
                 out.push_str(&rest);
@@ -247,6 +250,51 @@ pub fn highlight_line(theme: &Theme, lang: &str, line: &str) -> String {
     out
 }
 
-fn byte_at(chars: &[char], idx: usize) -> usize {
-    chars[..idx].iter().map(|c| c.len_utf8()).sum()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn theme() -> Theme {
+        crate::tui::theme::load_bundled(false).unwrap()
+    }
+
+    #[test]
+    fn unstyled_text_passes_through_byte_identical() {
+        let line = "plain text with no tokens";
+        assert_eq!(highlight_line(&theme(), "", line), line);
+    }
+
+    #[test]
+    fn styles_keywords_strings_and_comments() {
+        let t = theme();
+        let kw = t.fg_prefix("syntaxKeyword");
+        let strn = t.fg_prefix("syntaxString");
+        let com = t.fg_prefix("syntaxComment");
+        let out = highlight_line(&t, "rust", r#"let s = "hi"; // note"#);
+        assert!(out.starts_with(&format!("{kw}let\x1b[39m")));
+        assert!(out.contains(&format!("{strn}\"hi\"\x1b[39m")));
+        assert!(out.contains(&format!("{com}// note\x1b[39m")));
+        // Unstyled runs stay verbatim.
+        assert!(out.contains(" s = "));
+        assert!(out.contains("; "));
+    }
+
+    #[test]
+    fn long_single_line_stays_linear() {
+        // Regression: byte_at re-summed the UTF-8 prefix of the whole line
+        // for every char, so a ~64KB single-line tool output cost on the
+        // order of 2×10⁹ char-ops and stalled the frame thread for seconds.
+        let mut line = String::with_capacity(64 * 1024 + 3);
+        line.push('"');
+        line.push_str(&"a".repeat(64 * 1024));
+        line.push_str("\" // note");
+        let start = std::time::Instant::now();
+        let out = highlight_line(&theme(), "rust", &line);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "long single-line highlight took {elapsed:?}"
+        );
+        assert!(out.contains("// note"));
+    }
 }
