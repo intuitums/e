@@ -17,6 +17,7 @@ use crate::core::agent::{Agent, SessionEvent};
 use crate::core::output::{format_duration, format_tokens};
 use crate::core::providers::catalog::{self as model, Model};
 use crate::tui::authpanel::{self, AuthStage};
+use crate::tui::background::stdout_is_tty;
 use crate::tui::composer::{Editor, EditorResult, Key};
 use crate::tui::menu::{Menu, MenuItem, MenuKind, HINT_SCOPED, HINT_USE};
 use crate::tui::screen::Painter;
@@ -1126,6 +1127,7 @@ impl App {
                 self.reload_block = None;
                 self.context_tokens = 0;
                 self.agent.clear();
+                self.agent.clear_session_name();
                 self.agent.set_session(None);
                 // The name is part of session identity: a fresh session must
                 // not inherit the old one's.
@@ -1134,6 +1136,7 @@ impl App {
                 self.transcript.clear();
                 self.transcript
                     .push(Block::new(Kind::Banner, crate::VERSION));
+                set_tab_title(&tab_title(&title_path(), None));
             }
             "/resume" => self.open_resume_menu(),
             "/settings" => self.open_settings(),
@@ -1386,6 +1389,7 @@ impl App {
             SessionEvent::Named(name) => {
                 self.agent.set_session_name(name.clone());
                 self.notice(format!("session: {name}"));
+                set_tab_title(&tab_title(&title_path(), Some(&name)));
             }
             SessionEvent::ToolEnd {
                 id,
@@ -1776,6 +1780,27 @@ fn finish_reload_notice(transcript: &mut Transcript, reload_block: Option<usize>
     }
 }
 
+/// The terminal tab title: the custom glyph, a dot, then the session name
+/// or the working directory (the reference prefers the session name and
+/// falls back to the workspace path).
+fn tab_title(path: &str, session_name: Option<&str>) -> String {
+    let label = session_name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or(path);
+    format!("𝑒 · {label}")
+}
+
+fn set_tab_title(title: &str) {
+    // Escape codes into a pipe are garbage in the pipe; titles only make
+    // sense on a terminal.
+    if !stdout_is_tty() {
+        return;
+    }
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]0;{title}\x07");
+    let _ = out.flush();
+}
+
 /// The tab title's path: a short showcase, never the full absolute path.
 /// Under $HOME the prefix collapses to `~`; elsewhere only the last two
 /// components are shown, so a volume-qualified worktree reads cleanly
@@ -1989,8 +2014,10 @@ pub async fn run(
         }));
     }
 
-    // Raw mode first: background detection needs the reply un-line-buffered.
-    // The guard exists before any further mode changes, so every exit path —
+    // Raw mode first so the frame loop can take the terminal over. Theme
+    // detection reads COLORFGBG only — no OSC 11 stdin probe, which would
+    // race the reply against startup keystrokes (audit #93). The guard
+    // exists before any further mode changes, so every exit path —
     // including `?` returns below — restores all of them.
     terminal::enable_raw_mode()?;
     let _guard = TerminalGuard;
@@ -2001,7 +2028,9 @@ pub async fn run(
         // for shift+enter and multi-line entry is unreachable.
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
-    let (detected, typed_during_probe) = crate::tui::background::detect_light();
+    // COLORFGBG-only detection: nothing is read from stdin, so there are no
+    // probe-window keystrokes to salvage (audit #93).
+    let detected = crate::tui::background::detect_light();
     let detected = detected.unwrap_or(false);
     let theme = crate::tui::theme::resolve(&crate::core::config::settings::theme(), detected);
 
@@ -2053,14 +2082,6 @@ pub async fn run(
         status_effort: None,
     };
     app.refresh_status_cache();
-    // Keystrokes that landed during the background probe belong in the
-    // composer, not the void.
-    for c in String::from_utf8_lossy(&typed_during_probe)
-        .chars()
-        .filter(|c| !c.is_control())
-    {
-        app.editor.insert(c);
-    }
     app.transcript
         .push(Block::new(Kind::Banner, crate::VERSION));
     for warning in model::config_warnings() {
@@ -2135,12 +2156,13 @@ pub async fn run(
         app.resume_recent();
     }
 
-    // Terminal tab title: the custom glyph, a dot, the path.
-    {
-        let mut out = std::io::stdout();
-        write!(out, "]0;𝑒 · {}", title_path())?;
-        out.flush()?;
-    }
+    // Terminal tab title: the custom glyph, a dot, the path — a named
+    // session takes over the title when one lands (fx also prefers the
+    // session name over the workspace).
+    set_tab_title(&tab_title(
+        &title_path(),
+        app.agent.session_name().as_deref(),
+    ));
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     // SIGTERM/SIGHUP (a kill, a closed tab) exit through the same cleanup as
@@ -2444,6 +2466,7 @@ pub async fn run(
                         if epoch == app.session_epoch {
                             app.agent.set_session_name(name.clone());
                             app.notice(format!("session: {name}"));
+                            set_tab_title(&tab_title(&title_path(), Some(&name)));
                         }
                     }
                     Some(AppJob::Compacted { summary, kept }) => {
@@ -2637,6 +2660,9 @@ pub async fn run(
     painter.shutdown();
     app.host.shutdown().await;
     drop(_guard);
+    // The tab title we set at launch (or from a session name) is ours to
+    // clear — the reference leaves the terminal pristine on exit.
+    set_tab_title("");
     if app.relaunch {
         // The terminal is restored and the host is down: replace this
         // process with the updated binary, continuing the same session.
@@ -2748,6 +2774,17 @@ mod tests {
         assert_eq!(input_route(true, false), InputRoute::ApiKey);
         assert_eq!(input_route(false, true), InputRoute::Hook);
         assert_eq!(input_route(false, false), InputRoute::Direct);
+    }
+
+    #[test]
+    fn tab_title_prefers_the_session_name_over_the_path() {
+        assert_eq!(tab_title("~/work", None), "𝑒 · ~/work");
+        assert_eq!(
+            tab_title("~/work", Some("fix the renderer")),
+            "𝑒 · fix the renderer"
+        );
+        // A blank name falls back to the path, never an empty title.
+        assert_eq!(tab_title("~/work", Some("   ")), "𝑒 · ~/work");
     }
 
     #[test]

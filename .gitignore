@@ -27,3 +27,6 @@ __pycache__/
 /examples/
 workspaces.py
 .build/
+
+# Scratch notes (TODO.md lives here) — never ships.
+/.context/

@@ -8,6 +8,30 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- The main-screen renderer no longer moves the cursor relatively: every
+  paint diffs the visible window row-by-row against a shadow of what each
+  screen row currently shows, and rewrites only the rows that changed, each
+  starting from a `\r` plus an absolute position. No motion depends on where
+  the cursor was left, so the pending-wrap rewind class (#123) is
+  structurally gone rather than patched around. When the frame grows past
+  the bottom of the screen, the display scrolls up just enough for the
+  window to sit at the top rows and only the newly blank rows are painted —
+  the transcript keeps flowing into the terminal's scrollback. A resize no
+  longer sends `\x1b[2J` (no blank flash): the shadow is marked unknown and
+  the next paint rewrites the window in place, clearing anything stale
+  below a short frame.
+
+- Theme detection is stdin-free: it reads only `COLORFGBG` (the
+  rxvt/iTerm-style report) and falls back to dark, replacing the OSC 11
+  probe entirely — reading its reply off stdin races whatever reader owns
+  the terminal (audit #93), so there are no probe-window keystrokes to
+  salvage in the first place.
+
+- The tab title now tracks the session lifecycle: it launches as
+  `𝑒 · <short path>`, switches to `𝑒 · <session name>` when a session is
+  named (a rename command or tool), returns to the path on `/new`, and is
+  cleared on exit so the terminal is left pristine. Title writes are
+  guarded by a tty check so escape codes never land in a redirected pipe.
 - The TUI draws a turn's reasoning live and keeps it on screen until the turn
   ends: thinking dims with the committed turn instead of vanishing while the
   reply streams, gated by a file-backed `show_thinking` setting (default on;)
