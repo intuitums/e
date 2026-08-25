@@ -10,8 +10,12 @@ One small, fast binary — extend it with your own tools, commands, themes, and 
 cargo install --git https://github.com/intuitumxyz/e
 ```
 
+</div>
+
 > [!NOTE]
 > 𝑒 is under active development — expect breaking changes and rough edges.
+
+<div align="center">
 
 · · ·
 
