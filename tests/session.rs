@@ -57,7 +57,7 @@ fn session_round_trips_and_lists() {
 }
 
 #[test]
-fn session_name_sets_reads_and_clears() {
+fn session_name_sets_reads_and_adopts_none() {
     let _lock = ENV_LOCK.lock().unwrap();
     let model = Model {
         provider: "test".into(),
@@ -73,7 +73,9 @@ fn session_name_sets_reads_and_clears() {
     assert_eq!(agent.session_name(), None);
     agent.set_session_name("my-session".into());
     assert_eq!(agent.session_name().as_deref(), Some("my-session"));
-    agent.clear_session_name();
+    // /new's reset path: adopting None drops the name without touching the
+    // session log.
+    agent.adopt_session_name(None);
     assert_eq!(agent.session_name(), None);
 }
 

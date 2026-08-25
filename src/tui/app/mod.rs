@@ -1127,7 +1127,6 @@ impl App {
                 self.reload_block = None;
                 self.context_tokens = 0;
                 self.agent.clear();
-                self.agent.clear_session_name();
                 self.agent.set_session(None);
                 // The name is part of session identity: a fresh session must
                 // not inherit the old one's.
