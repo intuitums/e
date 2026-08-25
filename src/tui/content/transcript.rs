@@ -58,6 +58,10 @@ pub enum Kind {
     Banner,
     User,
     Assistant,
+    /// One assistant turn's streamed thinking — drawn live and kept until the
+    /// turn ends, so it never vanishes while the reply streams. Dims with the
+    /// turn's finish like the rest of the committed turn.
+    Thinking,
     Tool,
     /// One provider-issued batch: a tallied header over stable lifecycle
     /// children, including a single call in minimal mode.
@@ -278,6 +282,20 @@ impl Block {
                 render_markdown(theme, text, width.saturating_sub(2).max(8))
                     .into_iter()
                     .map(|l| if l.is_empty() { l } else { format!("  {l}") })
+                    .collect()
+            }
+            Kind::Thinking => {
+                let text = self.text.trim();
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                // Live thinking wears the palette's thinkingText; a committed
+                // turn's thinking dims with it (`dim` on light is one step
+                // further toward the background than statusline).
+                let color = if self.done { "dim" } else { "thinkingText" };
+                wrap_styled(text, width.saturating_sub(4).max(8))
+                    .into_iter()
+                    .map(|l| theme.fg(color, &format!("  · {l}")))
                     .collect()
             }
             Kind::Tool => {
@@ -667,5 +685,55 @@ mod tests {
         let cached = block.cache.as_ref().unwrap().2.as_ptr();
         block.lines(&theme, 80, false);
         assert_eq!(block.cache.as_ref().unwrap().2.as_ptr(), cached);
+    }
+
+    /// Thinking is drawn live in thinkingText and dims with the committed
+    /// turn, never vanishing while the reply streams.
+    #[test]
+    fn thinking_renders_live_and_dims_with_the_turn() {
+        // Distinct colors so the live/done shift is observable.
+        let theme = Theme::from_json(
+            r#"{"vars":{"a":250,"b":240},"colors":{"thinkingText":"a","dim":"b"}}"#,
+        )
+        .unwrap();
+        let mut block = Block::new(Kind::Thinking, "let me look at this\nstep two");
+        let live = block.lines_for_test(&theme, 40);
+        assert!(live.len() >= 2, "thinking rows render");
+        for row in &live {
+            assert!(row.contains("·"), "thinking rows carry a marker");
+            assert!(
+                row.contains(theme.fg_prefix("thinkingText")),
+                "live thinking wears thinkingText"
+            );
+        }
+        block.done = true;
+        block.touch();
+        let dimmed = block.lines_for_test(&theme, 40);
+        assert_eq!(
+            dimmed.len(),
+            live.len(),
+            "thinking persists through the turn"
+        );
+        for row in &dimmed {
+            assert!(
+                row.contains(theme.fg_prefix("dim")),
+                "committed thinking dims with the turn"
+            );
+        }
+    }
+
+    /// Block text stays inert even for the thinking surface.
+    #[test]
+    fn thinking_text_is_sanitized() {
+        let theme = theme();
+        let block = Block::new(Kind::Thinking, "ho \x1b[2Jho and \x1b]52;c;x\x07 tail");
+        for row in block.lines_for_test(&theme, 40) {
+            // The theme's own styling escapes remain; the injected ones go.
+            assert!(
+                !row.contains("\x1b[2J"),
+                "an erase sequence leaked: {row:?}"
+            );
+            assert!(!row.contains("\x1b]"), "an OSC sequence leaked: {row:?}");
+        }
     }
 }
