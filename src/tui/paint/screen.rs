@@ -95,8 +95,17 @@ impl Screen {
 
             // Cursor sits at the end of the previous last row.
             let cursor_row = self.prev.len() - 1;
+            // When the previous last row filled the width exactly, the
+            // cursor is in the pending-wrap state: any control sequence
+            // (including `F`) resolves the wrap first, landing one row
+            // low.  A `\r` moves to column 0 *without* resolving the
+            // wrap, so the subsequent `F` counts from the correct row.
             if start < cursor_row {
-                write!(out, "\x1b[{}F", cursor_row - start)?;
+                if self.prev.last().is_some_and(|l| visible_width(l) == cols) {
+                    write!(out, "\r\x1b[{}F", cursor_row - start)?;
+                } else {
+                    write!(out, "\x1b[{}F", cursor_row - start)?;
+                }
             } else {
                 write!(out, "\r")?;
             }
