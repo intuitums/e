@@ -15,6 +15,11 @@ This file tracks work that has not shipped. Completed work belongs in
   resource contributions, and provider registration when an extension has a
   concrete need for them.
 
+- **More wire dialects** — Vertex and Bedrock need cloud-auth plumbing
+  (GCP tokens, SigV4) beyond the API-key path; a native Mistral
+  conversations dialect only if the compat endpoint proves lossy. New
+  OpenAI-compatible providers are data-only follow-ups on the current rails.
+
 ## Under consideration
 
 - **Permission modes** — optional allow, deny, and ask behavior for tool calls.

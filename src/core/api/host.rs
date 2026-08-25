@@ -74,6 +74,24 @@ impl ExtensionHost {
                 }
             }
         }
+        // Tool names must be unambiguous: schema merging and call routing
+        // both resolve first-declaration-wins, and a duplicate would
+        // advertise one contract while executing another owner. Later
+        // duplicates are dropped with a visible notice.
+        let mut seen_tools: std::collections::HashSet<String> = Default::default();
+        for ext in &mut extensions {
+            let name = ext.manifest.name.clone();
+            ext.manifest.tools.retain(|tool| {
+                let fresh = seen_tools.insert(tool.name.clone());
+                if !fresh {
+                    let _ = notices.try_send(format!(
+                        "extension {name}: tool {} already provided by another extension — ignored",
+                        tool.name
+                    ));
+                }
+                fresh
+            });
+        }
         let host = Arc::new(ExtensionHost {
             extensions,
             ids: AtomicU64::new(1),
@@ -91,7 +109,7 @@ impl ExtensionHost {
                         "params": { "flags": parsed },
                     })
                     .to_string();
-                    let _ = ext.writer.send(line).await;
+                    let _ = ext.writer.try_send(line);
                 }
             }
         }
@@ -491,20 +509,22 @@ impl ExtensionHost {
         InputVerdict::default()
     }
 
-    /// Fire-and-forget lifecycle event to every extension.
+    /// Fire-and-forget lifecycle event to every extension. try_send: a child
+    /// that stopped reading stdin gets its queue dropped, never our loop.
     pub async fn event(&self, name: &str, params: Value) {
         let line =
             json!({"method": "event", "params": {"name": name, "extra": params}}).to_string();
         for ext in &self.extensions {
-            let _ = ext.writer.send(line.clone()).await;
+            let _ = ext.writer.try_send(line.clone());
         }
     }
 
     /// Graceful shutdown: a notification, a beat, then the processes die.
+    /// try_send throughout — quitting must never block on a wedged child.
     pub async fn shutdown(&self) {
         let line = json!({"method": "shutdown"}).to_string();
         for ext in &self.extensions {
-            let _ = ext.writer.send(line.clone()).await;
+            let _ = ext.writer.try_send(line.clone());
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
         for ext in &self.extensions {
@@ -527,25 +547,49 @@ impl ExtensionHost {
         let id = self.ids.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         ext.pending.lock().unwrap().insert(id, tx);
+        // Whatever ends this call — response, timeout, or the caller
+        // dropping the future on Esc — the pending entry goes with it: a
+        // stale sender must not linger until the extension answers.
+        let _guard = PendingGuard {
+            pending: ext.pending.clone(),
+            id,
+        };
         // Close the race with the stdout reader ending between the first
         // liveness check and inserting this request into the pending map.
         if !ext.alive.load(Ordering::SeqCst) {
-            ext.pending.lock().unwrap().remove(&id);
             return Err("extension exited".into());
         }
         let line = json!({"id": id, "method": method, "params": params}).to_string();
-        if ext.writer.send(line).await.is_err() {
-            ext.pending.lock().unwrap().remove(&id);
-            return Err("extension exited".into());
-        }
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("extension exited".into()),
-            Err(_) => {
-                ext.pending.lock().unwrap().remove(&id);
-                Err("timed out".into())
+        // The whole exchange shares one budget — including the enqueue: an
+        // extension that stops reading stdin fills the pipe and the channel,
+        // and an unbounded send here would hang past every timeout.
+        match tokio::time::timeout(timeout, async {
+            if ext.writer.send(line).await.is_err() {
+                return Err("extension exited".to_string());
             }
+            match rx.await {
+                Ok(result) => result,
+                Err(_) => Err("extension exited".into()),
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err("timed out".into()),
         }
+    }
+}
+
+/// Removes a pending-map entry when its request ends by any path, including
+/// the caller dropping the request future.
+struct PendingGuard {
+    pending: PendingMap,
+    id: u64,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().remove(&self.id);
     }
 }
 
@@ -581,6 +625,10 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .current_dir(std::env::current_dir().unwrap_or_default())
+        // A failed handshake drops the child below; without this, a process
+        // that ignores stdin EOF would outlive every `?` early return as an
+        // untracked orphan.
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("failed to start: {e}"))?;
 

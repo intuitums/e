@@ -1,0 +1,10 @@
+{
+	"name": "ollama",
+	"display": "Ollama",
+	"base_url": "http://localhost:11434/v1",
+	"api": "openai-completions",
+	"auth": {
+		"none": true
+	},
+	"models": []
+}

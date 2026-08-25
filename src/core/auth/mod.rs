@@ -52,7 +52,7 @@ pub fn load() -> AuthFile {
             out.insert("opencode-zen".into(), cred);
         }
     }
-    for provider in crate::core::provider::registry::all() {
+    for provider in crate::core::providers::registry::all() {
         if out.contains_key(&provider.name) {
             continue;
         }
@@ -65,6 +65,16 @@ pub fn load() -> AuthFile {
         }
     }
     out
+}
+
+/// Whether a provider counts as signed in: a stored or environment
+/// credential, or a keyless local backend (auth `none`), which needs none.
+/// Deliberately not a phantom `load()` entry — the credential file staying
+/// truthful keeps first-run onboarding ("nothing signed in") and `e auth`
+/// honest.
+pub fn signed_in(auth: &AuthFile, provider: &str) -> bool {
+    auth.contains_key(provider)
+        || crate::core::providers::registry::find(provider).is_some_and(|p| p.auth.none)
 }
 
 /// Store one provider's credential, merging into the file so every other

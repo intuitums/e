@@ -1,7 +1,7 @@
 //! Activity row and status line — pure projections of app state.
 
 use crate::core::output::{compact_model_label, format_tokens};
-use crate::core::provider::FailureCause;
+use crate::core::providers::FailureCause;
 use crate::tui::markdown::visible_width;
 use crate::tui::theme::Theme;
 
@@ -150,7 +150,9 @@ impl Turn {
 }
 
 pub struct StatusData {
-    pub model: String,
+    /// `None` when no provider is signed in — nothing to show as "the"
+    /// model, since none was actually chosen by the user.
+    pub model: Option<String>,
     pub effort: Option<String>,
     pub session_name: Option<String>,
     /// Context used, as a percent. Hidden until it rounds to at least 1.
@@ -175,10 +177,12 @@ pub fn statusline(
     if data.queued > 0 {
         segments.push(format!("queued {}", data.queued));
     }
-    segments.push(compact_model_label(&data.model));
-    if let Some(e) = &data.effort {
-        if e != "off" {
-            segments.push(e.clone());
+    if let Some(model) = &data.model {
+        segments.push(compact_model_label(model));
+        if let Some(e) = &data.effort {
+            if e != "off" {
+                segments.push(e.clone());
+            }
         }
     }
     if let Some(n) = &data.session_name {
@@ -190,10 +194,12 @@ pub fn statusline(
         }
     }
 
-    let (head, rest) = segments.split_first().unwrap();
-    let mut line = theme.fg("accent", head);
-    if !rest.is_empty() {
-        line.push_str(&theme.fg("muted", &format!(" · {}", rest.join(" · "))));
+    let mut line = String::new();
+    if let Some((head, rest)) = segments.split_first() {
+        line = theme.fg("accent", head);
+        if !rest.is_empty() {
+            line.push_str(&theme.fg("muted", &format!(" · {}", rest.join(" · "))));
+        }
     }
     if let Some(overlay) = overlay {
         let used = visible_width(&line);
@@ -211,7 +217,7 @@ pub fn statusline(
 #[cfg(test)]
 mod tests {
     use super::{RecoveredStatus, RetryStatus, Turn, TurnPhase};
-    use crate::core::provider::FailureCause;
+    use crate::core::providers::FailureCause;
 
     #[test]
     fn activity_has_one_owner_per_phase() {

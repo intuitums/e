@@ -52,7 +52,7 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 
 /// The latest release tag ("v0.4.1"), from the GitHub API.
 pub async fn latest_tag() -> Result<String, String> {
-    let response = crate::core::provider::http()
+    let response = crate::core::providers::http()
         .get(API_LATEST)
         .header("accept", "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(10))
@@ -130,7 +130,7 @@ pub async fn install_from(base: &str, tag: &str, dest: &Path) -> Result<String, 
 }
 
 async fn fetch(url: &str) -> Result<Vec<u8>, String> {
-    let response = crate::core::provider::http()
+    let response = crate::core::providers::http()
         .get(url)
         .timeout(std::time::Duration::from_secs(60))
         .send()

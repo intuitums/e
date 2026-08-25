@@ -2,20 +2,18 @@
 //!
 //! Everything above this module sees `Event`s; everything below is a wire
 //! dialect. Three dialects ship: chat-completions, Responses-API, and
-//! Anthropic Messages (see `completions.rs` / `responses.rs` / `anthropic.rs`).
-//! Providers are data (`providers/*.json`); OAuth refresh lives in `auth::login`.
-//! SSE framing is handled here — one small splitter, tested, shared.
+//! Anthropic Messages (see `api/`). Providers are data (`data/*.json`);
+//! OAuth refresh lives in `auth::login`. SSE framing is handled here — one
+//! small splitter, tested, shared.
 
-pub mod anthropic;
+pub mod api;
 pub mod catalog;
-pub mod completions;
 pub mod registry;
-pub mod responses;
 
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use crate::core::provider::catalog::{Api, Model};
+use crate::core::providers::catalog::{Api, Model};
 
 /// One requested tool invocation, as the model asked for it.
 #[derive(Clone, Debug, serde::Deserialize, Serialize)]
@@ -24,6 +22,11 @@ pub struct ToolCall {
     pub name: String,
     /// Raw JSON argument string, exactly as streamed.
     pub arguments: String,
+    /// An opaque provider signature attached to the call (Gemini thought
+    /// signatures); must be replayed verbatim on the next request of a tool
+    /// loop when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// Presentation metadata persisted beside a tool result, ignored by provider
@@ -104,10 +107,10 @@ pub enum FailureCause {
     /// Connection/DNS/TLS/setup failure — the request never left. Safe to
     /// retry.
     Network,
-    /// Written but never confirmed received (a header-wait or idle-body
-    /// timeout), with nothing produced yet. May have been billed, but
-    /// nothing else can have been double-run — a retry is a calculated risk,
-    /// not a certainty.
+    /// Written but never confirmed complete: a header-wait or idle-body
+    /// timeout, or the body transport broke mid-stream. May have been
+    /// billed; the agent only retries when nothing has streamed yet, so a
+    /// retry is a calculated risk, not a certainty.
     Stalled,
     /// HTTP 429, or a provider error frame naming a rate limit. Retry,
     /// honoring `Retry-After` when the provider sent one.
@@ -250,13 +253,54 @@ impl ProviderError {
     }
 }
 
+/// How a completed stream said it ended. Anything but `Normal`/`ToolCalls`
+/// means the reply is not the full answer — the agent surfaces it instead of
+/// accepting a truncated or refused turn as a blank success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinishReason {
+    /// A normal end of turn (`stop` / `completed` / `end_turn`), or the
+    /// dialect saw no explicit reason.
+    Normal,
+    /// Ended to run the tool calls the stream requested.
+    ToolCalls,
+    /// The provider cut the reply at a token or length limit.
+    Length,
+    /// The model refused to answer.
+    Refusal,
+    /// The provider's content filter blocked or removed output.
+    ContentFilter,
+    /// A reason e doesn't classify; carried verbatim.
+    Other(String),
+}
+
+/// A successfully completed stream: how the provider declared it ended, plus
+/// stream-hygiene counters the agent surfaces as warnings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamEnd {
+    pub finish: FinishReason,
+    /// SSE data payloads that failed to parse as JSON and were skipped.
+    pub malformed: u32,
+}
+
+impl StreamEnd {
+    pub fn normal() -> Self {
+        StreamEnd {
+            finish: FinishReason::Normal,
+            malformed: 0,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Event {
     TextDelta(String),
     ReasoningDelta(String),
     /// A completed tool request (dialects accumulate the argument deltas).
     ToolCall(ToolCall),
-    /// input, output, cache_read tokens from the terminal usage frame.
+    /// Token usage from the terminal usage frame. `input` is the TOTAL
+    /// prompt-side count — cached tokens included — so it alone measures
+    /// context size; `cache_read` is the informational cached subset.
+    /// Dialects whose wire fields are disjoint sum them into `input`.
     Usage {
         input: u64,
         output: u64,
@@ -266,7 +310,7 @@ pub enum Event {
     /// it be resent ahead of the function calls it produced, so the agent
     /// stores it in history and the dialect replays it.
     ReasoningItem(String),
-    Done,
+    Done(StreamEnd),
     /// The provider call failed; `err.cause` decides whether the agent may
     /// retry it — see FailureCause.
     Error(ProviderError),
@@ -288,13 +332,14 @@ pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHand
     let (tx, rx) = mpsc::channel(64);
     let handle = tokio::spawn(async move {
         let result = match request.model.api {
-            Api::Completions => crate::core::provider::completions::run(&request, &tx).await,
-            Api::Responses => crate::core::provider::responses::run(&request, &tx).await,
-            Api::Anthropic => crate::core::provider::anthropic::run(&request, &tx).await,
+            Api::Completions => api::completions::run(&request, &tx).await,
+            Api::Responses => api::responses::run(&request, &tx).await,
+            Api::Anthropic => api::anthropic::run(&request, &tx).await,
+            Api::Google => api::google::run(&request, &tx).await,
         };
         match result {
-            Ok(()) => {
-                let _ = tx.send(Event::Done).await;
+            Ok(end) => {
+                let _ = tx.send(Event::Done(end)).await;
             }
             Err(err) => {
                 let _ = tx.send(Event::Error(err)).await;
@@ -302,6 +347,20 @@ pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHand
         }
     });
     (rx, handle)
+}
+
+/// Turn a non-2xx response into the typed error every dialect reports the
+/// same way; 2xx passes through untouched.
+pub async fn require_success(
+    response: reqwest::Response,
+) -> Result<reqwest::Response, ProviderError> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let retry_after = retry_after_seconds(&response);
+    let text = response.text().await.unwrap_or_default();
+    Err(ProviderError::from_status(status, &text).with_retry_after(retry_after))
 }
 
 /// Incremental SSE splitter: feed raw bytes, get complete `data:` payloads.
@@ -353,6 +412,60 @@ impl SseSplitter {
             }
         }
         events
+    }
+}
+
+/// Drives a streaming response body as SSE. `next()` yields complete `data:`
+/// payloads with idle time bounded; the body ending before the dialect saw
+/// its terminal frame is a broken stream, not a successful empty reply, so
+/// EOF is an error by contract. Payloads that fail the dialect's JSON parse
+/// are reported to `malformed()` and counted rather than silently vanishing.
+pub struct SseStream<S> {
+    stream: S,
+    splitter: SseSplitter,
+    queue: std::collections::VecDeque<String>,
+    malformed: u32,
+}
+
+impl<S, T, E> SseStream<S>
+where
+    S: futures::Stream<Item = Result<T, E>> + Unpin,
+    T: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    pub fn new(stream: S) -> Self {
+        SseStream {
+            stream,
+            splitter: SseSplitter::new(),
+            queue: std::collections::VecDeque::new(),
+            malformed: 0,
+        }
+    }
+
+    /// The next complete payload; EOF fails as a stall (see the type docs).
+    pub async fn next(&mut self) -> Result<String, ProviderError> {
+        loop {
+            if let Some(payload) = self.queue.pop_front() {
+                return Ok(payload);
+            }
+            match next_sse_chunk(&mut self.stream).await? {
+                Some(chunk) => self.queue.extend(self.splitter.feed_bytes(chunk.as_ref())),
+                None => return Err(ProviderError::stalled("stream ended unexpectedly")),
+            }
+        }
+    }
+
+    /// Record one payload the dialect could not parse.
+    pub fn malformed(&mut self) {
+        self.malformed += 1;
+    }
+
+    /// Finish successfully: fold the hygiene counters into the turn result.
+    pub fn end(&self, finish: FinishReason) -> StreamEnd {
+        StreamEnd {
+            finish,
+            malformed: self.malformed,
+        }
     }
 }
 
@@ -441,7 +554,9 @@ where
     {
         Ok(None) => Ok(None),
         Ok(Some(Ok(chunk))) => Ok(Some(chunk)),
-        Ok(Some(Err(e))) => Err(ProviderError::rejected(format!("stream error: {e}"))),
+        // A broken body transport (reset, truncated chunking) is retryable
+        // by cause; the agent still refuses to retry once content streamed.
+        Ok(Some(Err(e))) => Err(ProviderError::stalled(format!("stream error: {e}"))),
         Err(_) => Err(ProviderError::stalled(format!(
             "stream stalled — no data for {STREAM_IDLE_SECS}s"
         ))),

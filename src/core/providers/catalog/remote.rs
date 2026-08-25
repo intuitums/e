@@ -20,10 +20,17 @@ fn store_path() -> std::path::PathBuf {
 pub(super) fn remote_overlay(models: &mut Vec<Model>) {
     let object = crate::core::config::store::read_object(&store_path()).unwrap_or_default();
     for (provider, entry) in object {
+        // Transport from an existing model of the provider (models.json
+        // overrides included), else from the registry — a keyless local's
+        // whole catalog is this overlay, so it has no model to copy from.
         let Some((base, api)) = models
             .iter()
             .find(|m| m.provider == provider)
             .map(|m| (m.base_url.clone(), m.api))
+            .or_else(|| {
+                crate::core::providers::registry::find(&provider)
+                    .map(|p| (p.base_url.clone(), p.api()))
+            })
         else {
             continue; // only providers e knows how to speak to
         };
@@ -82,11 +89,23 @@ pub async fn refresh_remote_within(max_age_ms: u64) {
     let auth = crate::core::auth::load();
     let now = crate::core::auth::now_ms();
     let stored = crate::core::config::store::read_object(&store_path()).unwrap_or_default();
-    // One representative model per signed-in provider gives base + auth kind.
+    // One representative model per signed-in provider gives base + auth
+    // kind; catalog entries first so models.json base_url overrides win.
+    // Registry providers follow so a keyless local with an empty seed list
+    // (its models come only from this refresh) still gets polled.
     let mut providers: Vec<(String, String)> = Vec::new();
     for m in catalog() {
-        if auth.contains_key(&m.provider) && !providers.iter().any(|(p, _)| *p == m.provider) {
+        if crate::core::auth::signed_in(&auth, &m.provider)
+            && !providers.iter().any(|(p, _)| *p == m.provider)
+        {
             providers.push((m.provider.clone(), m.base_url.clone()));
+        }
+    }
+    for p in crate::core::providers::registry::all() {
+        if crate::core::auth::signed_in(&auth, &p.name)
+            && !providers.iter().any(|(name, _)| *name == p.name)
+        {
+            providers.push((p.name.clone(), p.base_url.clone()));
         }
     }
     for (provider, base) in providers {
@@ -155,54 +174,86 @@ fn dated_alias_of(id: &str) -> Option<&str> {
 }
 
 /// `GET {base}/models` with the provider's credential — (id, window?) per
-/// listed model; None on any failure.
+/// listed model; None on any failure. Google lists at the same path but with
+/// its own auth header and payload shape (`models[].name`, not `data[].id`).
 async fn fetch_models(provider: &str, base: &str) -> Option<Vec<(String, Option<u64>)>> {
     let auth = crate::core::auth::load();
-    let credential = auth.get(provider)?;
-    let key = match credential {
-        crate::core::auth::Credential::ApiKey { key } => key.clone(),
-        crate::core::auth::Credential::OAuth { access, .. } => access.clone(),
+    let key = match auth.get(provider) {
+        Some(crate::core::auth::Credential::ApiKey { key }) => Some(key.clone()),
+        Some(crate::core::auth::Credential::OAuth { access, .. }) => Some(access.clone()),
+        // Keyless local backends list their models with no header at all.
+        None if crate::core::providers::registry::find(provider).is_some_and(|p| p.auth.none) => {
+            None
+        }
+        None => return None,
     };
-    let mut request = crate::core::provider::http()
+    let mut request = crate::core::providers::http()
         .get(format!("{base}/models"))
         .timeout(std::time::Duration::from_secs(15));
-    request = if provider == "anthropic" {
-        request
-            .header("x-api-key", &key)
-            .header("anthropic-version", "2023-06-01")
-    } else {
-        request.bearer_auth(&key)
+    request = match &key {
+        Some(key) if provider == "anthropic" => request
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01"),
+        Some(key) if provider == "google" => request.header("x-goog-api-key", key),
+        Some(key) => request.bearer_auth(key),
+        None => request,
     };
     let body: serde_json::Value = request.send().await.ok()?.json().await.ok()?;
-    let entries = body["data"].as_array()?;
-    let all_ids: Vec<&str> = entries.iter().filter_map(|m| m["id"].as_str()).collect();
+    let google = provider == "google";
+    let entries = if google {
+        body["models"].as_array()
+    } else {
+        body["data"].as_array()
+    }?;
+    // The wire id: Gemini reports `models/gemini-…` and wants the bare id back.
+    let id_of = |entry: &serde_json::Value| -> Option<String> {
+        if google {
+            entry["name"]
+                .as_str()
+                .map(|n| n.strip_prefix("models/").unwrap_or(n).to_string())
+        } else {
+            entry["id"].as_str().map(String::from)
+        }
+    };
+    let all_ids: Vec<String> = entries.iter().filter_map(id_of).collect();
     let mut out = Vec::new();
     for entry in entries {
-        let Some(id) = entry["id"].as_str() else {
+        let Some(id) = id_of(entry) else {
             continue;
         };
-        // Providers that report a type list embeddings, images, video, and
-        // speech beside chat models. Keep the picker for language models;
-        // fall back to the id heuristic when the provider doesn't say.
-        if let Some(kind) = entry["type"].as_str() {
+        // Providers that report a type or capability list embeddings, images,
+        // video, and speech beside chat models. Keep the picker for language
+        // models: Gemini says so via supportedGenerationMethods, OpenAI-style
+        // gateways via a `type` field, falling back to the id heuristic when
+        // the provider doesn't say.
+        if google {
+            let serves_chat = entry["supportedGenerationMethods"]
+                .as_array()
+                .is_some_and(|ms| ms.iter().any(|m| m.as_str() == Some("generateContent")));
+            if !serves_chat {
+                continue;
+            }
+        } else if let Some(kind) = entry["type"].as_str() {
             if kind != "language" {
                 continue;
             }
         }
-        if !looks_like_chat_model(id) {
+        if !looks_like_chat_model(&id) {
             continue;
         }
-        if let Some(base_id) = dated_alias_of(id) {
-            if all_ids.contains(&base_id) {
+        if let Some(base_id) = dated_alias_of(&id) {
+            if all_ids.iter().any(|a| a == base_id) {
                 continue;
             }
         }
-        // Some gateways report the window; keep it when they do.
+        // Some gateways report the window; keep it when they do. Gemini's
+        // inputTokenLimit is its context window as far as the picker cares.
         let window = entry["context_length"]
             .as_u64()
             .or(entry["context_window"].as_u64())
-            .or(entry["max_context_length"].as_u64());
-        out.push((id.to_string(), window));
+            .or(entry["max_context_length"].as_u64())
+            .or(entry["inputTokenLimit"].as_u64());
+        out.push((id, window));
     }
     if out.is_empty() {
         None

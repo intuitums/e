@@ -12,7 +12,7 @@ release notes are that section verbatim), open a fresh empty
   paint diffs the visible window row-by-row against a shadow of what each
   screen row currently shows, and rewrites only the rows that changed, each
   starting from a `\r` plus an absolute position. No motion depends on where
-  the cursor was left, so the pending-wrap rewind class (#123 / PR #140) is
+  the cursor was left, so the pending-wrap rewind class (#123) is
   structurally gone rather than patched around. When the frame grows past
   the bottom of the screen, the display scrolls up just enough for the
   window to sit at the top rows and only the newly blank rows are painted —
@@ -22,22 +22,87 @@ release notes are that section verbatim), open a fresh empty
   below a short frame.
 
 - Theme detection is stdin-free: it reads only `COLORFGBG` (the
-  rxvt/iTerm-style report) and falls back to dark. The previous OSC 11
-  probe read its reply off stdin, racing whatever reader owns the terminal
-  and swallowing keystrokes typed during startup (audit #93).
+  rxvt/iTerm-style report) and falls back to dark, replacing the OSC 11
+  probe entirely — reading its reply off stdin races whatever reader owns
+  the terminal (audit #93), so there are no probe-window keystrokes to
+  salvage in the first place.
 
 - The tab title now tracks the session lifecycle: it launches as
-  `𝑒 · <workspace path>`, switches to `𝑒 · <session name>` when a session is
+  `𝑒 · <short path>`, switches to `𝑒 · <session name>` when a session is
   named (a rename command or tool), returns to the path on `/new`, and is
-  cleared on exit so the terminal is left pristine.
+  cleared on exit so the terminal is left pristine. Title writes are
+  guarded by a tty check so escape codes never land in a redirected pipe.
+- The TUI draws a turn's reasoning live and keeps it on screen until the turn
+  ends: thinking dims with the committed turn instead of vanishing while the
+  reply streams, gated by a file-backed `show_thinking` setting (default on;)
+  the ↓ token estimate always counts it either way. Every thinking segment of
+  the turn dims at that moment — including pre-tool reasoning that a tool
+  batch, retry, or steered message replaced with a fresh block. The tab title
+  now shows a short path showcase — `~`-relative under `$HOME`, the last two
+  components elsewhere — instead of the full absolute working directory.
 
-- `/new` drops the session name (`Agent::clear_session_name()`), so a fresh
-  session starts unnamed instead of inheriting the previous one — which is
-  also what lets the tab title fall back to the workspace path.
+- Bugbot review fixes: a failed session-name write at log creation no longer
+  discards the freshly created session (the next commit would open a
+  different file and strand in-memory history); compaction's keep-cut no
+  longer separates an Anthropic signed thinking block from the assistant
+  turn it precedes; and Google's live model refresh speaks the Gemini
+  dialect (`x-goog-api-key`, `models[].name`) instead of an OpenAI-shaped
+  `/models`, so signed-in Google users see more than the seed ids. A failed
+  compaction-seed write now keeps the old session log attached instead of
+  detaching first, so a crash resumes into the complete pre-compaction
+  conversation rather than a fresh file holding only an unanchored tail.
 
-- The statusline shows real data where it previously showed hardcoded
-  placeholders: the current session's name and the number of prompts held in
-  the queue.
+- The audit backlog's five remaining epics are fixed:
+  - *Sessions* — persistence failures (unwritable home, full disk) surface
+    as a visible warning instead of silently losing history; /new and
+    /resume are refused while a turn is running; a `-r` launch prompt
+    waits for the session pick; the session name travels with session
+    identity (cleared on /new, restored on resume); and the status line
+    shows the live session name and queued prompt count.
+  - *Providers* — Anthropic signed thinking blocks replay on tool loops;
+    a body transport failure before output retries like a 503; usage
+    reports the inclusive prompt total, ending premature auto-compaction
+    on cached turns.
+  - *Tools* — parallel edits to one file can no longer erase each other
+    while both claim success; FIFOs and other non-regular files fail fast
+    instead of hanging the turn with Esc inert; live bash output survives
+    UTF-8 split across pipe reads; grep searches an explicitly requested
+    dotfile.
+  - *Extensions* — a child that stops reading stdin can't wedge hooks or
+    quit; failed handshakes can't leave orphans; one-shot CLI paths send
+    shutdown; duplicate tool names are rejected visibly; late command and
+    shell results are discarded when the session changed under them;
+    prompts queue behind a running `!` command and survive the TurnEnd
+    race in order.
+  - *TUI* — model output and extension notices render inert (no terminal
+    control injection); one guard restores every terminal mode on every
+    exit path; width math is display columns end to end (CJK, emoji);
+    overlong tokens wrap instead of vanishing; the composer draws exactly
+    one cursor; paste placeholders retire on submit; and keystrokes typed
+    during the startup background probe reach the composer.
+
+- Streaming no longer lags or hangs the TUI. The blink tick stops
+  invalidating finished blocks' render caches (only a running tool row
+  actually blinks), the statusline's sign-in and effort state is cached
+  instead of read from disk every frame, painting moved to a dedicated
+  thread with latest-wins coalescing so a slow terminal can't stall input
+  handling, session events are drained in batches under a 33ms frame
+  budget, and the OSC-11 background probe runs once at startup instead of
+  blocking the loop on every theme change.
+
+- Truncated, refused, or filtered replies are no longer silent successes:
+  every dialect maps its stop/finish reason, the agent surfaces abnormal
+  endings as visible warnings, and malformed SSE payloads are counted and
+  reported instead of being dropped.
+
+- Provider coverage: a native Gemini dialect (thought-signature replay on
+  tool loops, thinking levels, safety/limit finishes), eight new API-key
+  providers as data — Google, Groq, Mistral, DeepSeek, Cerebras,
+  OpenRouter, Together, Fireworks — and keyless local backends (Ollama,
+  LM Studio) whose models appear whenever the local server is running.
+
+- The provider module is reorganized as `providers/{api,data}`: wire
+  dialects under `api/`, provider definitions under `data/`.
 
 - Audit fixes: session directories now use collision-resistant workspace keys
   while safely discovering legacy logs; provider SSE parsing preserves UTF-8

@@ -32,6 +32,7 @@ pub struct Screen {
     clear_unpainted: bool,
     pub cols: u16,
     pub rows: u16,
+    debug_frames: bool,
 }
 
 /// What one screen row of the next paint must do.
@@ -105,6 +106,7 @@ impl Screen {
             clear_unpainted: false,
             cols,
             rows,
+            debug_frames: std::env::var("E_DEBUG_FRAMES").is_ok(),
         }
     }
 
@@ -123,7 +125,7 @@ impl Screen {
         if lines == self.prev.as_slice() {
             return Ok(());
         }
-        if std::env::var("E_DEBUG_FRAMES").is_ok() {
+        if self.debug_frames {
             use std::io::Write as _;
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
@@ -273,5 +275,84 @@ mod tests {
         // Shrinking never scrolls — the window repaints in place.
         assert_eq!(scroll_rows(13, 10, 10), 0);
         assert_eq!(scroll_rows(23, 20, 10), 0);
+    }
+}
+
+/// The paint thread's single-slot mailbox: a newer frame replaces the
+/// undelivered one, so a terminal blocked mid-write bounds the backlog to
+/// exactly one pending frame — an unbounded queue would grow by a full
+/// transcript copy per tick for as long as the write stalls.
+#[derive(Default)]
+struct PaintMailbox {
+    frame: Option<Vec<String>>,
+    /// Latest wins here too; the resize clears the screen, so painting the
+    /// pre-resize frame once at the new size is a one-frame blip at most.
+    resize: Option<(u16, u16)>,
+    shutdown: bool,
+}
+
+/// The paint thread: owns the `Screen` and its blocking stdout writes so a
+/// slow terminal can never stall the event loop.
+pub struct Painter {
+    mailbox: std::sync::Arc<(std::sync::Mutex<PaintMailbox>, std::sync::Condvar)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Painter {
+    pub fn spawn(cols: u16, rows: u16) -> Self {
+        let mailbox = std::sync::Arc::new((
+            std::sync::Mutex::new(PaintMailbox::default()),
+            std::sync::Condvar::new(),
+        ));
+        let shared = mailbox.clone();
+        let thread = std::thread::spawn(move || {
+            let mut screen = Screen::new(cols, rows);
+            let (lock, wake) = &*shared;
+            loop {
+                let (frame, resize, shutdown) = {
+                    let mut box_ = lock.lock().unwrap();
+                    while box_.frame.is_none() && box_.resize.is_none() && !box_.shutdown {
+                        box_ = wake.wait(box_).unwrap();
+                    }
+                    (box_.frame.take(), box_.resize.take(), box_.shutdown)
+                };
+                if let Some((cols, rows)) = resize {
+                    screen.resize(cols, rows);
+                }
+                if let Some(frame) = frame {
+                    let _ = screen.paint(&frame);
+                }
+                if shutdown {
+                    // The final frame (taken above) has landed; done.
+                    break;
+                }
+            }
+        });
+        Painter {
+            mailbox,
+            thread: Some(thread),
+        }
+    }
+
+    fn post(&self, update: impl FnOnce(&mut PaintMailbox)) {
+        let (lock, wake) = &*self.mailbox;
+        update(&mut lock.lock().unwrap());
+        wake.notify_one();
+    }
+
+    pub fn frame(&self, lines: Vec<String>) {
+        self.post(|mailbox| mailbox.frame = Some(lines));
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) {
+        self.post(|mailbox| mailbox.resize = Some((cols, rows)));
+    }
+
+    /// Flush and stop: the pending frame lands before terminal teardown.
+    pub fn shutdown(&mut self) {
+        self.post(|mailbox| mailbox.shutdown = true);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }

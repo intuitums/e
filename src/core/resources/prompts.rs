@@ -167,25 +167,32 @@ fn expand_braced(inner: &str, words: &[String], all: &str) -> String {
     }
 }
 
-/// Whitespace split with single- and double-quote grouping.
+/// Whitespace split with single- and double-quote grouping. A quoted empty
+/// (`""`) is still one word — dropping it would shift every later
+/// positional argument left.
 fn split_args(args: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
+    let mut quoted = false;
     let mut quote: Option<char> = None;
     for c in args.chars() {
         match (quote, c) {
             (Some(q), c) if c == q => quote = None,
             (Some(_), c) => current.push(c),
-            (None, '\'' | '"') => quote = Some(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                quoted = true;
+            }
             (None, c) if c.is_whitespace() => {
-                if !current.is_empty() {
+                if !current.is_empty() || quoted {
                     words.push(std::mem::take(&mut current));
                 }
+                quoted = false;
             }
             (None, c) => current.push(c),
         }
     }
-    if !current.is_empty() {
+    if !current.is_empty() || quoted {
         words.push(current);
     }
     words

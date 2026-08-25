@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::core::config::home;
-use crate::core::provider::ChatMessage;
+use crate::core::providers::ChatMessage;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -181,28 +181,28 @@ impl Session {
     }
 
     /// One serialized record per write call, newline included — even under
-    /// an unexpected second writer, records never share a line.
-    pub fn append(&mut self, message: &ChatMessage) {
-        if let Ok(mut line) = serde_json::to_string(&Entry::Message {
+    /// an unexpected second writer, records never share a line. A failed
+    /// write is lost history: callers must surface the error, not shrug.
+    pub fn append(&mut self, message: &ChatMessage) -> std::io::Result<()> {
+        let mut line = serde_json::to_string(&Entry::Message {
             message: message.clone(),
-        }) {
-            line.push('\n');
-            let _ = self.file.write_all(line.as_bytes());
-        }
+        })?;
+        line.push('\n');
+        self.file.write_all(line.as_bytes())
     }
 
     /// Set the display name e shows for this session. Idempotent; appends a
     /// name entry, so the most recent name wins on resume.
-    pub fn set_name(&mut self, name: &str) {
+    pub fn set_name(&mut self, name: &str) -> std::io::Result<()> {
         let name = name.trim();
         if name.is_empty() {
-            return;
+            return Ok(());
         }
-        if let Ok(line) = serde_json::to_string(&Entry::Name {
+        let mut line = serde_json::to_string(&Entry::Name {
             name: name.to_string(),
-        }) {
-            let _ = writeln!(self.file, "{line}");
-        }
+        })?;
+        line.push('\n');
+        self.file.write_all(line.as_bytes())
     }
 
     pub fn path(&self) -> &Path {
@@ -245,6 +245,19 @@ impl Session {
             _lock: lock,
         })
     }
+}
+
+/// The latest persisted display name in a session file, if any — the name a
+/// resume must adopt so the session doesn't drift from its log.
+pub fn name_of(path: &Path) -> Option<String> {
+    let reader = BufReader::new(File::open(path).ok()?);
+    let mut name = None;
+    for line in reader.lines() {
+        if let Ok(Entry::Name { name: n }) = serde_json::from_str(&line.ok()?) {
+            name = Some(n);
+        }
+    }
+    name
 }
 
 #[derive(Debug, Clone, Default)]

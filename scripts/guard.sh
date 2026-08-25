@@ -14,7 +14,7 @@ bad() { fail=1; say "FAIL: $*"; }
 #    else — in the shipped binary (src/) or its dev tooling (scripts/). A new
 #    host means a new place user data can go — add it here deliberately or
 #    the build fails.
-allowed_hosts="localhost models.dev auth.openai.com api.openai.com chatgpt.com opencode.ai auth.x.ai api.x.ai api.anthropic.com api.github.com github.com ai-gateway.vercel.sh"
+allowed_hosts="localhost models.dev auth.openai.com api.openai.com chatgpt.com opencode.ai auth.x.ai api.x.ai api.anthropic.com api.github.com github.com ai-gateway.vercel.sh generativelanguage.googleapis.com api.groq.com api.mistral.ai api.deepseek.com api.cerebras.ai openrouter.ai api.together.xyz api.fireworks.ai"
 found_hosts=$(grep -rhoE 'https?://[A-Za-z0-9.-]+' src/ scripts/ 2>/dev/null | sed -E 's#https?://##' | sort -u)
 for host in $found_hosts; do
   case " $allowed_hosts " in

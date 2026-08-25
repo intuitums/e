@@ -60,10 +60,11 @@ pub fn visible_width(styled: &str) -> usize {
     width
 }
 
-/// Word-wrap a styled string; ANSI runs travel with the word they precede.
 /// Clip a styled line to `max` visible columns, passing escape sequences
-/// through untouched. A clipped line gets a reset so an unclosed SGR run
-/// cannot bleed into whatever the terminal paints next.
+/// through untouched. Width is display columns (CJK is two, combining
+/// zero), and OSC sequences copy through their BEL/ST terminator — cutting
+/// an OSC 8 link mid-URL would leak the rest as visible text. A clipped
+/// line closes any hyperlink and SGR run so nothing bleeds past it.
 pub fn clip_styled(styled: &str, max: usize) -> String {
     if visible_width(styled) <= max {
         return styled.to_string();
@@ -74,24 +75,46 @@ pub fn clip_styled(styled: &str, max: usize) -> String {
     while let Some(c) = chars.next() {
         if c == '\x1b' {
             out.push(c);
-            for e in chars.by_ref() {
-                out.push(e);
-                if e.is_ascii_alphabetic() || e == '\\' {
-                    break;
+            if chars.peek() == Some(&']') {
+                // OSC: runs to BEL or ST (ESC \).
+                while let Some(n) = chars.next() {
+                    out.push(n);
+                    if n == '\x07' {
+                        break;
+                    }
+                    if n == '\x1b' {
+                        if let Some(t) = chars.next() {
+                            out.push(t);
+                        }
+                        break;
+                    }
+                }
+            } else {
+                // CSI and friends: runs to the alphabetic final byte.
+                for e in chars.by_ref() {
+                    out.push(e);
+                    if e.is_ascii_alphabetic() || e == '\\' {
+                        break;
+                    }
                 }
             }
             continue;
         }
-        if visible >= max {
+        let w = c.width().unwrap_or(0);
+        if visible + w > max {
             break;
         }
         out.push(c);
-        visible += 1;
+        visible += w;
     }
+    out.push_str(OSC8_CLOSE);
     out.push_str("\x1b[m");
     out
 }
 
+/// Word-wrap a styled string; ANSI runs travel with the word they precede.
+/// A single token wider than the line (URL, hash, path) hard-wraps across
+/// rows — the screen's clip guard would otherwise hide its tail forever.
 pub fn wrap_styled(styled: &str, width: usize) -> Vec<String> {
     let mut rows = Vec::new();
     for hard in styled.split('\n') {
@@ -104,8 +127,16 @@ pub fn wrap_styled(styled: &str, width: usize) -> Vec<String> {
                 row_width = 0;
             }
             if row.is_empty() {
-                row.push_str(word);
-                row_width = w;
+                if w > width && width > 0 {
+                    let mut pieces = hard_wrap(word, width);
+                    let last = pieces.pop().unwrap_or_default();
+                    rows.extend(pieces);
+                    row_width = visible_width(&last);
+                    row = last;
+                } else {
+                    row.push_str(word);
+                    row_width = w;
+                }
             } else {
                 row.push(' ');
                 row.push_str(word);
@@ -147,6 +178,26 @@ fn hard_wrap(line: &str, width: usize) -> Vec<String> {
             } else {
                 Some(seq.clone())
             };
+            row.push_str(&seq);
+            continue;
+        }
+        if c == '\x1b' && chars.peek() == Some(&']') {
+            // OSC (hyperlinks): zero width and copied whole — a split
+            // mid-sequence would count the payload as visible columns and
+            // leave the terminal parsing rows as OSC data.
+            let mut seq = String::from("\x1b");
+            while let Some(n) = chars.next() {
+                seq.push(n);
+                if n == '\x07' {
+                    break;
+                }
+                if n == '\x1b' {
+                    if let Some(t) = chars.next() {
+                        seq.push(t);
+                    }
+                    break;
+                }
+            }
             row.push_str(&seq);
             continue;
         }

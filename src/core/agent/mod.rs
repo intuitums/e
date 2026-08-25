@@ -11,21 +11,23 @@ pub mod context;
 pub mod retry;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::core::provider::catalog::{slug, Model};
-use crate::core::provider::{
-    self, ChatMessage, Event as ProviderEvent, FailureCause, Request, ToolCall,
+use crate::core::providers::catalog::{slug, Model};
+use crate::core::providers::{
+    self, ChatMessage, Event as ProviderEvent, FailureCause, FinishReason, Request, ToolCall,
 };
 use crate::core::session::Session;
 use crate::core::tools;
 
 /// Append a message to history and to the session log, creating the log on
-/// the first message.
+/// the first message. The in-memory turn always proceeds; a persistence
+/// failure comes back as the error so the caller can surface it — silently
+/// losing history is the one thing this must never do.
 fn commit(
     history: &Arc<Mutex<Vec<ChatMessage>>>,
     session: &Arc<Mutex<Option<Session>>>,
@@ -33,19 +35,48 @@ fn commit(
     model: &Model,
     message: ChatMessage,
     session_name: &Arc<Mutex<Option<String>>>,
-) {
+) -> std::io::Result<()> {
     history.lock().unwrap().push(message.clone());
     let mut guard = session.lock().unwrap();
     if guard.is_none() {
-        *guard = Session::create(cwd, &slug(model)).ok();
-        if let Some(s) = guard.as_mut() {
-            if let Some(name) = session_name.lock().unwrap().clone() {
-                s.set_name(&name);
+        let mut created = Session::create(cwd, &slug(model))?;
+        // A pending name applies before the first record. It is best-effort:
+        // failing here must not discard the freshly created log — dropping it
+        // would make the next commit open a different file and strand every
+        // message already in memory outside any session.
+        if let Some(name) = session_name.lock().unwrap().clone() {
+            let _ = created.set_name(&name);
+        }
+        *guard = Some(created);
+    }
+    match guard.as_mut() {
+        Some(s) => s.append(&message),
+        None => Ok(()),
+    }
+}
+
+/// Turn a commit result into at most one warning per failure episode: the
+/// first failure warns, later ones stay quiet until a commit succeeds again.
+/// The latch sets only when the warning was actually delivered — a full
+/// channel at the first failure must not silently swallow the episode.
+fn note_persist(
+    warned: &AtomicBool,
+    result: std::io::Result<()>,
+    events: &mpsc::Sender<SessionEvent>,
+) {
+    match result {
+        Ok(()) => warned.store(false, Ordering::SeqCst),
+        Err(e) => {
+            if !warned.load(Ordering::SeqCst)
+                && events
+                    .try_send(SessionEvent::Warning(format!(
+                        "session not saved: {e} — the conversation continues in memory only"
+                    )))
+                    .is_ok()
+            {
+                warned.store(true, Ordering::SeqCst);
             }
         }
-    }
-    if let Some(s) = guard.as_mut() {
-        s.append(&message);
     }
 }
 
@@ -123,6 +154,10 @@ pub enum SessionEvent {
         cache_read: u64,
     },
     Error(String),
+    /// A non-fatal turn problem worth showing: a truncated or refused reply
+    /// the provider delivered as success, or malformed stream frames that
+    /// were skipped.
+    Warning(String),
     /// A retryable failure is being backed off before another attempt.
     Retry {
         attempt: u32,
@@ -184,6 +219,13 @@ pub struct Agent {
     /// An extension-set display name, applied when the log exists or when it
     /// is created on the first message.
     session_name: Arc<Mutex<Option<String>>>,
+    /// Latch for the persistence-failure warning (see `note_persist`).
+    persist_warned: Arc<AtomicBool>,
+    /// Display ids for tool lifecycle events, unique across the whole
+    /// session: an Esc-detached task from an earlier turn keeps a live
+    /// events sender, and a per-turn counter would let its stale ToolEnd
+    /// collide with (and corrupt) a later turn's row.
+    tool_seq: Arc<AtomicU64>,
 }
 
 impl Agent {
@@ -200,6 +242,8 @@ impl Agent {
             running: false,
             session: Arc::new(Mutex::new(None)),
             session_name: Arc::new(Mutex::new(None)),
+            persist_warned: Arc::new(AtomicBool::new(false)),
+            tool_seq: Arc::new(AtomicU64::new(0)),
         };
         (agent, rx)
     }
@@ -255,7 +299,7 @@ impl Agent {
     /// starting a turn — the `!` shell passthrough records its output this way
     /// so the model sees what the user ran.
     pub fn record_user(&self, text: String) {
-        commit(
+        let result = commit(
             &self.history,
             &self.session,
             &self.cwd,
@@ -263,33 +307,45 @@ impl Agent {
             ChatMessage::user(text),
             &self.session_name,
         );
+        note_persist(&self.persist_warned, result, &self.events);
     }
 
     /// Replace the history with the compaction seed plus the kept recent
-    /// messages, detaching from the old session log — everything commits into
-    /// a fresh session file, so the compacted state is itself resumable. The
-    /// old file is untouched.
+    /// messages, committing everything into a fresh session file so the
+    /// compacted state is itself resumable; the old file stays untouched.
+    /// The fresh log is created before the old one is detached: if creation
+    /// fails, the old log stays attached and later turns append to it, so a
+    /// crash resumes into the complete pre-compaction conversation instead
+    /// of a new file holding only an unanchored tail.
     pub fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) {
-        self.history.lock().unwrap().clear();
-        *self.session.lock().unwrap() = None;
-        commit(
-            &self.history,
-            &self.session,
-            &self.cwd,
-            &self.model,
-            ChatMessage::user(crate::core::agent::compact::seed(summary)),
-            &self.session_name,
-        );
-        for message in kept {
-            commit(
-                &self.history,
-                &self.session,
-                &self.cwd,
-                &self.model,
-                message,
-                &self.session_name,
-            );
-        }
+        let seed_message = ChatMessage::user(crate::core::agent::compact::seed(summary));
+        let mut fresh_history = Vec::with_capacity(kept.len() + 1);
+        fresh_history.push(seed_message.clone());
+        fresh_history.extend(kept);
+
+        // Same lock order as `commit`: history before session.
+        let mut history_guard = self.history.lock().unwrap();
+        let mut guard = self.session.lock().unwrap();
+        let result = match Session::create(&self.cwd, &slug(&self.model)) {
+            Ok(mut created) => {
+                // Same best-effort pending-name application as `commit`.
+                if let Some(name) = self.session_name.lock().unwrap().clone() {
+                    let _ = created.set_name(&name);
+                }
+                let mut result = Ok(());
+                for message in &fresh_history {
+                    result = created.append(message);
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                *guard = Some(created);
+                result
+            }
+            Err(e) => Err(e),
+        };
+        *history_guard = fresh_history;
+        note_persist(&self.persist_warned, result, &self.events);
     }
 
     /// Attach a session log; created lazily on the first message when None.
@@ -302,11 +358,25 @@ impl Agent {
     /// idempotent — the last one wins.
     pub fn set_session_name(&self, name: String) {
         *self.session_name.lock().unwrap() = Some(name);
-        if let Some(s) = self.session.lock().unwrap().as_mut() {
+        let mut guard = self.session.lock().unwrap();
+        if let Some(s) = guard.as_mut() {
             if let Some(name) = self.session_name.lock().unwrap().clone() {
-                s.set_name(&name);
+                let result = s.set_name(&name);
+                drop(guard);
+                note_persist(&self.persist_warned, result, &self.events);
             }
         }
+    }
+
+    /// Adopt the name a resumed session carries (or clear it for a fresh
+    /// one). In-memory only — the log already holds its own name entries.
+    pub fn adopt_session_name(&self, name: Option<String>) {
+        *self.session_name.lock().unwrap() = name;
+    }
+
+    /// Prompts waiting on the running turn (steering not yet drained).
+    pub fn queued_count(&self) -> usize {
+        self.pending.lock().unwrap().len()
     }
 
     /// The extension-set session name, if any (the derived title still
@@ -334,7 +404,7 @@ impl Agent {
             self.pending.lock().unwrap().push(text);
             return true;
         }
-        commit(
+        let result = commit(
             &self.history,
             &self.session,
             &self.cwd,
@@ -342,6 +412,7 @@ impl Agent {
             ChatMessage::user(text),
             &self.session_name,
         );
+        note_persist(&self.persist_warned, result, &self.events);
         self.start(system);
         false
     }
@@ -360,10 +431,11 @@ impl Agent {
         let pending = self.pending.clone();
         let host = self.host.clone();
         let session_name = self.session_name.clone();
+        let persist_warned = self.persist_warned.clone();
+        let tool_seq = self.tool_seq.clone();
 
         tokio::spawn(async move {
             let _ = events.send(SessionEvent::TurnStart).await;
-            let mut tool_seq = 0u64;
             let aborted = 'turn: loop {
                 if cancel.load(Ordering::SeqCst) {
                     break true;
@@ -372,7 +444,7 @@ impl Agent {
                 let steered: Vec<String> = { pending.lock().unwrap().drain(..).collect() };
                 for message in steered {
                     let _ = events.send(SessionEvent::Steered(message.clone())).await;
-                    commit(
+                    let result = commit(
                         &history,
                         &session,
                         &cwd,
@@ -380,6 +452,7 @@ impl Agent {
                         ChatMessage::user(message),
                         &session_name,
                     );
+                    note_persist(&persist_warned, result, &events);
                 }
 
                 let messages = { history.lock().unwrap().clone() };
@@ -398,7 +471,7 @@ impl Agent {
                 // initial request. MAX_ATTEMPTS is a request budget, not a
                 // retry budget.
                 let mut attempt = 1u32;
-                let (mut rx, mut handle) = provider::stream(clone_request(&request));
+                let (mut rx, mut handle) = providers::stream(clone_request(&request));
 
                 let mut text = String::new();
                 let mut calls: Vec<ToolCall> = Vec::new();
@@ -427,8 +500,9 @@ impl Agent {
                     // produced its first non-error event — the retry
                     // worked. An immediate second failure is not a recovery,
                     // so this excludes Error and lets that arm decide
-                    // whether to retry again instead.
-                    if attempt > 0
+                    // whether to retry again instead. `attempt` is 1-based:
+                    // 1 is the first try, so only attempt 2+ ever recovered.
+                    if attempt > 1
                         && !recovered_notified
                         && !matches!(event, ProviderEvent::Error(_))
                     {
@@ -492,7 +566,7 @@ impl Agent {
                                     handle.abort();
                                     break 'turn true;
                                 }
-                                let (nrx, nhandle) = provider::stream(clone_request(&request));
+                                let (nrx, nhandle) = providers::stream(clone_request(&request));
                                 rx = nrx;
                                 handle = nhandle;
                                 continue 'stream;
@@ -518,7 +592,39 @@ impl Agent {
                             let _ = events.send(SessionEvent::Error(message)).await;
                             errored = true;
                         }
-                        ProviderEvent::Done => {}
+                        ProviderEvent::Done(end) => {
+                            // The stream completed, but not necessarily with
+                            // the full answer — a truncated, refused, or
+                            // filtered reply arrives as an HTTP success and
+                            // must not pass silently.
+                            let finish_warning = match &end.finish {
+                                FinishReason::Normal | FinishReason::ToolCalls => None,
+                                FinishReason::Length => Some(
+                                    "reply truncated: the provider hit its output limit".into(),
+                                ),
+                                FinishReason::Refusal => {
+                                    Some("the model refused to answer".to_string())
+                                }
+                                FinishReason::ContentFilter => Some(
+                                    "output blocked by the provider's content filter".to_string(),
+                                ),
+                                FinishReason::Other(reason) => {
+                                    Some(format!("turn ended abnormally: {reason}"))
+                                }
+                            };
+                            if let Some(warning) = finish_warning {
+                                let _ = events.send(SessionEvent::Warning(warning)).await;
+                            }
+                            if end.malformed > 0 {
+                                let _ = events
+                                    .send(SessionEvent::Warning(format!(
+                                        "{} malformed stream event{} skipped",
+                                        end.malformed,
+                                        if end.malformed == 1 { "" } else { "s" }
+                                    )))
+                                    .await;
+                            }
+                        }
                     }
                 }
                 if errored {
@@ -527,10 +633,9 @@ impl Agent {
 
                 // A stream that ends with no text, no calls, no reasoning,
                 // and no error is a blank success — committing it would strand
-                // the turn in silence. The dialect-level causes (dropped
-                // malformed frames, ignored refusal/truncation finish reasons)
-                // are tracked separately; here we guarantee the user at least
-                // sees that something went wrong.
+                // the turn in silence. Abnormal finishes and skipped frames
+                // were already surfaced as warnings above; here we guarantee
+                // the user at least sees that something went wrong.
                 if text.is_empty()
                     && calls.is_empty()
                     && reasoning_items.is_empty()
@@ -547,7 +652,7 @@ impl Agent {
                 // Reasoning items commit first — the dialect that produced
                 // them must replay them ahead of the assistant turn.
                 for item in reasoning_items.drain(..) {
-                    commit(
+                    let result = commit(
                         &history,
                         &session,
                         &cwd,
@@ -561,9 +666,10 @@ impl Agent {
                         },
                         &session_name,
                     );
+                    note_persist(&persist_warned, result, &events);
                 }
                 // Commit the assistant turn (text + any calls).
-                commit(
+                let result = commit(
                     &history,
                     &session,
                     &cwd,
@@ -571,6 +677,7 @@ impl Agent {
                     ChatMessage::assistant(text, calls.clone()),
                     &session_name,
                 );
+                note_persist(&persist_warned, result, &events);
 
                 if calls.is_empty() {
                     // A plain reply would end the turn — but a message that
@@ -589,12 +696,12 @@ impl Agent {
                     let args: serde_json::Value =
                         serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
                     let presentation = tools::present(&call.name, &args);
-                    tool_seq += 1;
+                    let id = tool_seq.fetch_add(1, Ordering::SeqCst) + 1;
                     batch.push((
-                        tool_seq,
+                        id,
                         call.clone(),
                         ToolCallPresentation {
-                            id: tool_seq,
+                            id,
                             category: presentation.category,
                             running: presentation.running,
                             completed: presentation.completed,
@@ -645,15 +752,31 @@ impl Agent {
                 }
 
                 for (call, handle) in handles {
-                    let output = match handle.await {
-                        Ok(output) => output,
-                        Err(_) => tools::ToolOutput {
-                            content: "tool panicked".into(),
-                            outcome: tools::ToolOutcome::Failed,
-                            summary: "error".into(),
+                    // A blocked filesystem operation cannot be interrupted in
+                    // place; on Esc, stop waiting, record the call as
+                    // cancelled, and detach the task — the turn must end
+                    // promptly even over a stalled FIFO or NFS mount.
+                    let output = tokio::select! {
+                        biased;
+                        joined = handle => match joined {
+                            Ok(output) => output,
+                            Err(_) => tools::ToolOutput {
+                                content: "tool panicked".into(),
+                                outcome: tools::ToolOutcome::Failed,
+                                summary: "error".into(),
+                            },
+                        },
+                        _ = wait_cancelled(&cancel) => tools::ToolOutput {
+                            // Honest record: the blocked operation is only
+                            // detached, so it may still complete after this.
+                            content: "tool cancelled — the underlying operation \
+                                      may still complete in the background"
+                                .into(),
+                            outcome: tools::ToolOutcome::Cancelled,
+                            summary: "cancelled".into(),
                         },
                     };
-                    commit(
+                    let result = commit(
                         &history,
                         &session,
                         &cwd,
@@ -666,6 +789,7 @@ impl Agent {
                         ),
                         &session_name,
                     );
+                    note_persist(&persist_warned, result, &events);
                 }
                 if cancel.load(Ordering::SeqCst) {
                     break 'turn true;
@@ -680,8 +804,12 @@ impl Agent {
     }
 
     /// Called by the frontend after each TurnEnd so a new turn may start.
-    pub fn on_turn_end(&mut self) {
+    /// Returns any prompts stranded by the shutdown race: submitted after
+    /// the worker's final empty-queue check but before this call, with no
+    /// worker left to drain them. The frontend must resubmit them in order.
+    pub fn on_turn_end(&mut self) -> Vec<String> {
         self.running = false;
+        self.pending.lock().unwrap().drain(..).collect()
     }
 
     pub fn interrupt(&mut self) {
@@ -706,7 +834,22 @@ async fn run_tool(
     events: mpsc::Sender<SessionEvent>,
 ) -> tools::ToolOutput {
     if let Some(h) = host {
-        if let Some(reason) = h.hook_tool_call(name, arguments).await {
+        // The hook chain is bounded per extension, but Esc must not wait out
+        // even one silent hook's timeout: race it against the cancel flag.
+        // Dropping the hook future also drops its pending-map entry.
+        let hook = h.hook_tool_call(name, arguments);
+        tokio::pin!(hook);
+        let blocked = tokio::select! {
+            verdict = &mut hook => verdict,
+            _ = wait_cancelled(&cancel) => {
+                return tools::ToolOutput {
+                    content: "tool cancelled".into(),
+                    outcome: tools::ToolOutcome::Cancelled,
+                    summary: "cancelled".into(),
+                };
+            }
+        };
+        if let Some(reason) = blocked {
             return tools::ToolOutput {
                 content: format!("Tool call blocked by extension: {reason}"),
                 outcome: tools::ToolOutcome::Blocked,
@@ -757,6 +900,9 @@ async fn run_tool(
         tools::run_streaming(&name, &arguments, &cwd, &cancel, |stream, chunk| {
             let chunk = tools::sanitize_display(chunk);
             if !chunk.is_empty() {
+                // Blocks this pump thread when the channel is full, so the
+                // SessionEvent receiver must never block on I/O — a stalled
+                // consumer here stalls the tool it is reporting on.
                 let _ = events.blocking_send(SessionEvent::ToolOutput { id, stream, chunk });
             }
         })

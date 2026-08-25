@@ -21,6 +21,8 @@ pub enum Api {
     Responses,
     /// The Anthropic Messages dialect (`/v1/messages`, x-api-key).
     Anthropic,
+    /// The Gemini dialect (`:streamGenerateContent?alt=sse`, x-goog-api-key).
+    Google,
 }
 
 impl Api {
@@ -32,6 +34,7 @@ impl Api {
             "openai-completions" | "completions" => Some(Self::Completions),
             "codex-responses" | "openai-responses" | "responses" => Some(Self::Responses),
             "anthropic-messages" | "anthropic" => Some(Self::Anthropic),
+            "google-generative-ai" | "google" => Some(Self::Google),
             _ => None,
         }
     }
@@ -80,9 +83,9 @@ pub fn slug(model: &Model) -> String {
 }
 
 pub fn builtin_catalog() -> Vec<Model> {
-    // Providers are data (provider/providers/*.json); this just projects the
+    // Providers are data (providers/data/*.json); this just projects the
     // registry into models.
-    crate::core::provider::registry::all()
+    crate::core::providers::registry::all()
         .iter()
         .flat_map(|provider| {
             provider.models.iter().map(|decl| Model {
@@ -153,8 +156,9 @@ pub fn config_warnings() -> Vec<String> {
     file.providers
         .into_iter()
         .filter_map(|(provider, entry)| {
-            (entry.base_url.is_none() && crate::core::provider::registry::find(&provider).is_none())
-                .then(|| format!("models.json: provider {provider} requires an explicit base_url"))
+            (entry.base_url.is_none()
+                && crate::core::providers::registry::find(&provider).is_none())
+            .then(|| format!("models.json: provider {provider} requires an explicit base_url"))
         })
         .collect()
 }
@@ -172,7 +176,7 @@ pub fn catalog() -> Vec<Model> {
                 // a context window on an Anthropic model would send that
                 // model's requests (and its credential) to an unrelated
                 // gateway's Chat Completions endpoint.
-                let builtin = crate::core::provider::registry::find(&provider);
+                let builtin = crate::core::providers::registry::find(&provider);
                 let api = match entry.api.as_deref() {
                     Some(name) => Api::parse(name).unwrap_or_else(|| {
                         panic!("models.json: provider {provider}: unknown api dialect `{name}`")
@@ -258,7 +262,7 @@ pub fn available() -> Vec<Model> {
     let auth = crate::core::auth::load();
     catalog()
         .into_iter()
-        .filter(|m| auth.contains_key(&m.provider))
+        .filter(|m| crate::core::auth::signed_in(&auth, &m.provider))
         .collect()
 }
 
@@ -313,7 +317,7 @@ pub fn clear_scope() {
 /// providers after, alphabetically), original order within a provider.
 pub fn provider_grouped(mut models: Vec<Model>) -> Vec<Model> {
     let registry_pos = |provider: &str| {
-        crate::core::provider::registry::all()
+        crate::core::providers::registry::all()
             .iter()
             .position(|p| p.name == provider)
             .unwrap_or(usize::MAX)
@@ -345,7 +349,7 @@ pub fn cycle_pool() -> Vec<Model> {
 
 /// Human name for a provider, for panels: capitalized, no dashes.
 pub fn display_name(provider: &str) -> String {
-    crate::core::provider::registry::find(provider)
+    crate::core::providers::registry::find(provider)
         .map(|p| p.display.clone())
         .unwrap_or_else(|| provider.to_string())
 }

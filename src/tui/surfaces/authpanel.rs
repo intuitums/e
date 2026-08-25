@@ -79,7 +79,7 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
                 dim("   Sign in with an account"),
                 String::new(),
             ];
-            for (i, provider) in crate::core::provider::registry::oauth_providers()
+            for (i, provider) in crate::core::providers::registry::oauth_providers()
                 .iter()
                 .enumerate()
             {
@@ -101,7 +101,7 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
                 dim("   Sign in with an API key"),
                 String::new(),
             ];
-            for (i, provider) in crate::core::provider::registry::key_providers()
+            for (i, provider) in crate::core::providers::registry::key_providers()
                 .iter()
                 .enumerate()
             {
@@ -137,11 +137,10 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
                 String::new(),
                 dim(&format!(
                     "   Paste your {} API key",
-                    crate::core::provider::catalog::display_name(provider)
+                    crate::core::providers::catalog::display_name(provider)
                 )),
                 entry,
                 dim("   Enter saves · Esc cancels"),
-                dim("   Saves to ~/.e/auth.json"),
             ]
         }
         AuthStage::Waiting => vec![
