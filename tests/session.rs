@@ -54,6 +54,27 @@ fn session_round_trips_and_lists() {
 }
 
 #[test]
+fn session_name_sets_reads_and_clears() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let model = Model {
+        provider: "test".into(),
+        id: "model".into(),
+        base_url: "http://127.0.0.1:1".into(),
+        api: Api::Completions,
+        efforts: Vec::new(),
+        thinking: e::core::provider::catalog::Thinking::Manual,
+        context_window: 1_000,
+    };
+    let (agent, _events) = Agent::new(model);
+
+    assert_eq!(agent.session_name(), None);
+    agent.set_session_name("my-session".into());
+    assert_eq!(agent.session_name().as_deref(), Some("my-session"));
+    agent.clear_session_name();
+    assert_eq!(agent.session_name(), None);
+}
+
+#[test]
 fn opening_e_does_not_count_as_a_session() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = std::env::temp_dir().join(format!(

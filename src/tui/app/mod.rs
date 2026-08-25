@@ -17,6 +17,7 @@ use crate::core::agent::{Agent, SessionEvent};
 use crate::core::output::{format_duration, format_tokens};
 use crate::core::provider::catalog::{self as model, Model};
 use crate::tui::authpanel::{self, AuthStage};
+use crate::tui::background::stdout_is_tty;
 use crate::tui::composer::{Editor, EditorResult, Key};
 use crate::tui::menu::{Menu, MenuItem, MenuKind, HINT_SCOPED, HINT_USE};
 use crate::tui::screen::Screen;
@@ -309,9 +310,9 @@ impl App {
         let data = StatusData {
             model: self.agent.model_slug(),
             effort: self.agent.effort(),
-            session_name: None,
+            session_name: self.agent.session_name(),
             context_percent: Some(percent),
-            queued: 0,
+            queued: self.held_prompts.len(),
         };
         let hint = self
             .settings
@@ -1047,10 +1048,12 @@ impl App {
                 self.reload_block = None;
                 self.context_tokens = 0;
                 self.agent.clear();
+                self.agent.clear_session_name();
                 self.agent.set_session(None);
                 self.transcript.clear();
                 self.transcript
                     .push(Block::new(Kind::Banner, crate::VERSION));
+                set_tab_title(&tab_title(&title_path(), None));
             }
             "/resume" => self.open_resume_menu(),
             "/settings" => self.open_settings(),
@@ -1253,6 +1256,7 @@ impl App {
             SessionEvent::Named(name) => {
                 self.agent.set_session_name(name.clone());
                 self.notice(format!("session: {name}"));
+                set_tab_title(&tab_title(&title_path(), Some(&name)));
             }
             SessionEvent::ToolEnd {
                 id,
@@ -1591,6 +1595,27 @@ fn finish_reload_notice(transcript: &mut Transcript, reload_block: Option<usize>
     }
 }
 
+/// The terminal tab title: the custom glyph, a dot, then the session name
+/// or the working directory (the reference prefers the session name and
+/// falls back to the workspace path).
+fn tab_title(path: &str, session_name: Option<&str>) -> String {
+    let label = session_name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or(path);
+    format!("𝑒 · {label}")
+}
+
+fn set_tab_title(title: &str) {
+    // Escape codes into a pipe are garbage in the pipe; titles only make
+    // sense on a terminal.
+    if !stdout_is_tty() {
+        return;
+    }
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]0;{title}\x07");
+    let _ = out.flush();
+}
+
 /// The tab title's path: the working directory, home-relative.
 fn title_path() -> String {
     let cwd = std::env::current_dir()
@@ -1745,7 +1770,9 @@ pub async fn run(
         }));
     }
 
-    // Raw mode first: background detection needs the reply un-line-buffered.
+    // Raw mode first so the frame loop can take the terminal over. Theme
+    // detection reads COLORFGBG only — no OSC 11 stdin probe, which would
+    // swallow startup keystrokes (audit #93).
     terminal::enable_raw_mode()?;
     let _guard = RawGuard;
     execute!(
@@ -1850,12 +1877,13 @@ pub async fn run(
         app.resume_recent();
     }
 
-    // Terminal tab title: the custom glyph, a dot, the path.
-    {
-        let mut out = std::io::stdout();
-        write!(out, "]0;𝑒 · {}", title_path())?;
-        out.flush()?;
-    }
+    // Terminal tab title: the custom glyph, a dot, the path — a named
+    // session takes over the title when one lands (fx also prefers the
+    // session name over the workspace).
+    set_tab_title(&tab_title(
+        &title_path(),
+        app.agent.session_name().as_deref(),
+    ));
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     // SIGTERM/SIGHUP (a kill, a closed tab) exit through the same cleanup as
@@ -2107,6 +2135,7 @@ pub async fn run(
                     Some(AppJob::Rename(name)) => {
                         app.agent.set_session_name(name.clone());
                         app.notice(format!("session: {name}"));
+                        set_tab_title(&tab_title(&title_path(), Some(&name)));
                     }
                     Some(AppJob::Compacted { summary, kept }) => {
                         // Ignore a result that outlived its session (/new won).
@@ -2275,6 +2304,9 @@ pub async fn run(
     drop(_guard);
     let mut out = std::io::stdout();
     write!(out, "\r\n\x1b[?25h")?;
+    // The tab title we set at launch (or from a session name) is ours to
+    // clear — the reference leaves the terminal pristine on exit.
+    let _ = write!(out, "\x1b]0;\x07");
     out.flush()?;
     if app.relaunch {
         // The terminal is restored and the host is down: replace this
@@ -2342,6 +2374,17 @@ mod tests {
         assert_eq!(input_route(true, false), InputRoute::ApiKey);
         assert_eq!(input_route(false, true), InputRoute::Hook);
         assert_eq!(input_route(false, false), InputRoute::Direct);
+    }
+
+    #[test]
+    fn tab_title_prefers_the_session_name_over_the_path() {
+        assert_eq!(tab_title("~/work", None), "𝑒 · ~/work");
+        assert_eq!(
+            tab_title("~/work", Some("fix the renderer")),
+            "𝑒 · fix the renderer"
+        );
+        // A blank name falls back to the path, never an empty title.
+        assert_eq!(tab_title("~/work", Some("   ")), "𝑒 · ~/work");
     }
 
     #[test]

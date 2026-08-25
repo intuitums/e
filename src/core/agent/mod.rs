@@ -315,6 +315,11 @@ impl Agent {
         self.session_name.lock().unwrap().clone()
     }
 
+    /// Drop the session name — a fresh session starts unnamed.
+    pub fn clear_session_name(&self) {
+        *self.session_name.lock().unwrap() = None;
+    }
+
     pub fn cwd(&self) -> PathBuf {
         self.cwd.clone()
     }
