@@ -295,6 +295,45 @@ async fn a_blank_successful_stream_surfaces_an_error_not_silence() {
     assert!(saw_error, "a blank success must surface an error");
 }
 
+/// Gemini sends thought text only as ReasoningDelta — never a committed
+/// ReasoningItem — so a thinking-only stream that ends without text (here
+/// MAX_TOKENS mid-thought) is a live model being truncated, not a blank
+/// response. The turn must end with the truncation warning and no error.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn thinking_only_stream_is_not_an_empty_response() {
+    let _lock = env_lock();
+    let body = concat!(
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"planning\",\"thought\":true}]}}]}\n\n",
+        "data: {\"candidates\":[{\"finishReason\":\"MAX_TOKENS\"}]}\n\n",
+    );
+    let (port, _server) = serve_sse(&[body]);
+    let home = Home::new("google-thinking");
+    home.auth(r#"{"google":{"key":"g"}}"#);
+
+    let (mut agent, mut rx) = Agent::new(test_model("google", port, Api::Google));
+    agent.submit("hi".into(), "sys".into());
+
+    let mut saw_reasoning = false;
+    let mut saw_warning = false;
+    let mut saw_error = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            SessionEvent::ReasoningDelta(_) => saw_reasoning = true,
+            SessionEvent::Warning(_) => saw_warning = true,
+            SessionEvent::Error(_) => saw_error = true,
+            SessionEvent::TurnEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(saw_reasoning, "thought deltas must stream");
+    assert!(saw_warning, "truncation must surface as a warning");
+    assert!(
+        !saw_error,
+        "a thinking-only stream is not an empty response"
+    );
+}
+
 /// A 200 stream the provider cut at its output limit must not read as a
 /// finished turn: the finish reason is mapped, and skipped malformed
 /// payloads are counted instead of vanishing.
