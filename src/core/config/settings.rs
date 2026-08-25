@@ -120,6 +120,13 @@ pub fn all(effort_levels: Vec<String>) -> Vec<Setting> {
             default: "auto".into(),
         },
         Setting {
+            key: "show_thinking".into(),
+            label: "Show thinking".into(),
+            category: "Interface",
+            options: vec!["on".into(), "off".into()],
+            default: "on".into(),
+        },
+        Setting {
             key: "auto_update".into(),
             label: "Auto-update".into(),
             category: "Updates",
