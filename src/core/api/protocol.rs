@@ -83,6 +83,14 @@ pub struct FlagDecl {
     /// "boolean" (default) or "string" — whether e parses this flag.
     #[serde(default = "default_flag_type", rename = "type")]
     pub flag_type: String,
+    /// The manifest's optional `"default"` — the value to use when the
+    /// flag is absent. e keeps it so the declaration contract is honored
+    /// end to end, but never fabricates it into the parsed `flags` a
+    /// receiver gets: absent stays absent, so a handler can tell "passed
+    /// false" from "not passed". The extension applies the default itself
+    /// (the scaffold's `flag()` does exactly that).
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
 }
 
 fn default_flag_type() -> String {
@@ -217,4 +225,23 @@ pub fn parse_incoming(line: &str) -> Option<Incoming> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flag_decl_keeps_the_declared_default() {
+        let typed: FlagDecl = serde_json::from_str(
+            r#"{"name":"tag","type":"string","default":"default-tag","description":"a tag"}"#,
+        )
+        .unwrap();
+        assert_eq!(typed.default, Some(serde_json::json!("default-tag")));
+
+        // Absent stays absent — and untyped flags stay boolean.
+        let bare: FlagDecl = serde_json::from_str(r#"{"name":"dry"}"#).unwrap();
+        assert_eq!(bare.default, None);
+        assert_eq!(bare.flag_type, "boolean");
+    }
 }
