@@ -476,6 +476,13 @@ impl Agent {
                 let mut text = String::new();
                 let mut calls: Vec<ToolCall> = Vec::new();
                 let mut reasoning_items: Vec<String> = Vec::new();
+                // Gemini streams thought text only as ReasoningDelta — never
+                // as a committed ReasoningItem — so a thinking-only stream
+                // must still count as produced: otherwise a retryable error
+                // after a long thinking phase would retry (replaying the
+                // thoughts on screen) and a thinking-only stream ending
+                // without text would be called an empty response.
+                let mut reasoning_streamed = false;
                 let mut errored = false;
                 // True once this attempt has streamed anything at all — the
                 // signal both for "recovered" (first content after a retry)
@@ -520,6 +527,7 @@ impl Agent {
                             let _ = events.send(SessionEvent::TextDelta(d)).await;
                         }
                         ProviderEvent::ReasoningDelta(d) => {
+                            reasoning_streamed = true;
                             let _ = events.send(SessionEvent::ReasoningDelta(d)).await;
                         }
                         ProviderEvent::ToolCall(call) => calls.push(call),
@@ -544,8 +552,10 @@ impl Agent {
                             // request that already produced output or ran
                             // tools cannot be replayed without risking a
                             // duplicate.
-                            let nothing_produced =
-                                text.is_empty() && calls.is_empty() && reasoning_items.is_empty();
+                            let nothing_produced = text.is_empty()
+                                && calls.is_empty()
+                                && reasoning_items.is_empty()
+                                && !reasoning_streamed;
                             if err.cause.is_retryable()
                                 && nothing_produced
                                 && attempt < retry::MAX_ATTEMPTS
@@ -639,6 +649,7 @@ impl Agent {
                 if text.is_empty()
                     && calls.is_empty()
                     && reasoning_items.is_empty()
+                    && !reasoning_streamed
                     && pending.lock().unwrap().is_empty()
                 {
                     let _ = events
