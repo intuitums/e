@@ -187,8 +187,16 @@ async fn fetch_models(provider: &str, base: &str) -> Option<Vec<(String, Option<
         }
         None => return None,
     };
+    // Anthropic declares the bare host as its base (the dialect appends
+    // /v1 for /v1/messages); the list endpoint lives under /v1 too, so
+    // fetching `{base}/models` would 404 silently on every refresh.
+    let url = if provider == "anthropic" {
+        format!("{base}/v1/models")
+    } else {
+        format!("{base}/models")
+    };
     let mut request = crate::core::providers::http()
-        .get(format!("{base}/models"))
+        .get(url)
         .timeout(std::time::Duration::from_secs(15));
     request = match &key {
         Some(key) if provider == "anthropic" => request

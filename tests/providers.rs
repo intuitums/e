@@ -1214,3 +1214,71 @@ async fn google_model_refresh_speaks_the_gemini_dialect() {
         .iter()
         .any(|m| m.provider == "google" && (m.id.contains("embedding") || m.id.contains("veo"))));
 }
+
+// Anthropic declares the bare host as its base — `/v1` lives in the dialect's
+// paths, so its list endpoint is `{base}/v1/models`, not `{base}/models`. The
+// overlay must speak that path — otherwise every refresh 404s silently and
+// Anthropic never goes live.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn anthropic_model_refresh_speaks_the_messages_dialect() {
+    use std::io::{Read, Write};
+    let _lock = env_lock();
+    clear_env_keys();
+    let home = Home::new("anthropic-live");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut a, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let n = a.read(&mut buf).unwrap();
+        let sent = String::from_utf8_lossy(&buf[..n]).to_string();
+        let body = r#"{"data":[
+            {"id":"claude-fresh-large","type":"language","context_length":1000000},
+            {"id":"claude-fresh","type":"language","context_length":200000},
+            {"id":"claude-embed-fresh","type":"embedding","context_length":1000}
+        ]}"#;
+        let _ = a.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        sent
+    });
+
+    home.auth(r#"{"anthropic":{"key":"sk-ant-test"}}"#);
+    // Every anthropic id rides the mock: refresh_remote probes the first
+    // catalog entry per provider, so any builtin left on the real endpoint
+    // would send the request to api.anthropic.com instead of here.
+    home.write(
+        "models.json",
+        format!(
+            r#"{{"providers":{{"anthropic":{{"base_url":"http://127.0.0.1:{port}","api":"anthropic-messages","models":["claude-fable-5","claude-opus-5","claude-sonnet-5","claude-opus-4-8","claude-haiku-4-5"]}}}}}}"#
+        ),
+    );
+
+    catalog::refresh_remote().await;
+    let sent = server.join().unwrap();
+    assert!(
+        sent.contains("GET /v1/models"),
+        "anthropic lists under /v1, not /models: {sent}"
+    );
+    assert!(
+        sent.contains("x-api-key: sk-ant-test"),
+        "anthropic's list endpoint takes the key header, not a bearer token"
+    );
+
+    let catalog = catalog::catalog();
+    let fresh = catalog
+        .iter()
+        .find(|m| m.provider == "anthropic" && m.id == "claude-fresh")
+        .expect("the `data[].id` payload applies to the catalog");
+    assert_eq!(fresh.context_window, 200_000);
+    assert_eq!(fresh.api, Api::Anthropic);
+    assert!(!catalog
+        .iter()
+        .any(|m| m.provider == "anthropic" && m.id.contains("embed")));
+}
