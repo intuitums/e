@@ -530,7 +530,7 @@ impl App {
         // Seed the context gauge from the restored history so the statusline
         // and the auto-compact check don't see an empty context until the
         // first real usage report lands.
-        let seeded: usize = messages.iter().map(|m| m.content.len()).sum();
+        let seeded: usize = messages.iter().map(|m| m.content.chars().count()).sum();
         self.context_tokens = (seeded / 4) as u64;
         self.agent.load_history(messages);
         self.agent.set_session(Some(session));

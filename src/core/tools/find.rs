@@ -8,7 +8,7 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
-use super::{resolve, schema_object, truncate, ToolOutcome, ToolOutput};
+use super::{resolve, schema_object, truncate, truncate_with_notice, ToolOutcome, ToolOutput};
 
 /// Results after which the walk stops rather than flooding the context.
 const RESULT_CAP: usize = 500;
@@ -60,17 +60,20 @@ pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
     });
     hits.sort();
     let count = hits.len();
-    let mut body = hits.join("\n");
-    let summary = if count >= RESULT_CAP {
-        body.push_str(&format!(
+    let body = hits.join("\n");
+    let (content, summary) = if count >= RESULT_CAP {
+        let notice = format!(
             "\n… [stopped at {RESULT_CAP} results — narrow the pattern or path to see the rest]"
-        ));
-        format!("{count}+ files")
+        );
+        (
+            truncate_with_notice(body, &notice),
+            format!("{count}+ files"),
+        )
     } else {
-        format!("{count} files")
+        (truncate(body), format!("{count} files"))
     };
     ToolOutput {
-        content: truncate(body),
+        content,
         outcome: ToolOutcome::Completed,
         summary,
         display: None,

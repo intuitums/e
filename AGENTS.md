@@ -68,9 +68,12 @@ isolated `E_HOME`, `env_lock()` around anything env-global, `serve_sse` +
 
 Every colour comes from the theme (`theme.fg("token", text)`), never a raw SGR
 literal — the palette is the single source of truth, and it is the reference
-design's, audited value-for-value. Dividers are the `border` token
-(divider_style, 240/250), not `dim`. Selection is brightness alone — bold
-bright ink for the current row, `dim` for the rest, no caret.
+design's, audited value-for-value. Panel dividers (`tui/surfaces/panel.rs`)
+use the `border` token (divider_style, 240/250), not `dim` — markdown's own
+thematic-break rule and blockquote rail are a different, dimmer reference
+element and are pinned as `dim` in `tests/parity.rs`; don't conflate the two.
+Selection is brightness alone — bold bright ink for the current row, `dim`
+for the rest, no caret.
 
 Every footer surface (the `/@$` pickers, `/settings`) frames through
 `tui/surfaces/panel.rs`: top divider, header, blank, body, bottom divider, with

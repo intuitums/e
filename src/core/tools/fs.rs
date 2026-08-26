@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
-use super::{resolve, schema_object, truncate, ToolOutcome, ToolOutput};
+use super::{resolve, schema_object, truncate, truncate_with_notice, ToolOutcome, ToolOutput};
 
 fn ok(content: String, summary: String) -> ToolOutput {
     ToolOutput {
@@ -211,16 +211,19 @@ pub fn grep(args: &Value, cwd: &Path) -> ToolOutput {
     }
     // A capped search must say so: "200 matches" alone reads as an exact
     // count, and the model can't tell a complete result from a stopped one.
-    let mut body = hits.join("\n");
-    let summary = if count >= MATCH_CAP {
-        body.push_str(&format!(
+    let body = hits.join("\n");
+    let (content, summary) = if count >= MATCH_CAP {
+        let notice = format!(
             "\n… [stopped at {MATCH_CAP} matches — narrow the pattern or path to see the rest]"
-        ));
-        format!("{count}+ matches")
+        );
+        (
+            truncate_with_notice(body, &notice),
+            format!("{count}+ matches"),
+        )
     } else {
-        format!("{count} matches")
+        (truncate(body), format!("{count} matches"))
     };
-    ok(truncate(body), summary)
+    ok(content, summary)
 }
 
 /// Matches after which a search stops rather than flooding the context.

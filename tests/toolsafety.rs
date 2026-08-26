@@ -176,3 +176,49 @@ fn grep_searches_an_explicitly_requested_dotfile() {
     assert_eq!(walked.summary, "0 matches");
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// When the hit list alone is big enough to hit the 32KB output cap, the
+/// "stopped at N results" explanation must still survive — not get
+/// overwritten by the generic byte-truncation marker.
+#[test]
+fn find_cap_notice_survives_the_output_truncation() {
+    let ws = workspace("find-cap");
+    let pad = "p".repeat(60);
+    for i in 0..600 {
+        std::fs::write(ws.join(format!("{pad}_{i:04}.txt")), "x").unwrap();
+    }
+    let out = tools::run("find", r#"{"pattern":"*.txt"}"#, &ws);
+    assert!(!out.is_error(), "{}", out.content);
+    assert_eq!(out.summary, "500+ files");
+    assert!(
+        out.content
+            .ends_with("… [stopped at 500 results — narrow the pattern or path to see the rest]"),
+        "cap notice missing or swallowed by truncation, tail was: {:?}",
+        &out.content[out.content.len().saturating_sub(120)..]
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// Same guarantee for grep: a big matched-line list must not swallow the
+/// "stopped at N matches" notice under the byte cap.
+#[test]
+fn grep_cap_notice_survives_the_output_truncation() {
+    let ws = workspace("grep-cap");
+    let filler = "x".repeat(200);
+    let mut content = String::new();
+    for _ in 0..250 {
+        content.push_str(&format!("MATCHME {filler}\n"));
+    }
+    std::fs::write(ws.join("big.txt"), content).unwrap();
+
+    let out = tools::run("grep", r#"{"pattern":"MATCHME"}"#, &ws);
+    assert!(!out.is_error(), "{}", out.content);
+    assert_eq!(out.summary, "200+ matches");
+    assert!(
+        out.content
+            .ends_with("… [stopped at 200 matches — narrow the pattern or path to see the rest]"),
+        "cap notice missing or swallowed by truncation, tail was: {:?}",
+        &out.content[out.content.len().saturating_sub(120)..]
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}

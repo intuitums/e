@@ -143,12 +143,18 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                 body["output_config"] = json!({"effort": effort});
             }
             Thinking::Manual => {
-                // The budget must stay under max_tokens or the request is
-                // rejected; the clamp only bites on small declared windows.
-                body["thinking"] = json!({
-                    "type": "enabled",
-                    "budget_tokens": thinking_budget(effort).min(max_tokens.saturating_sub(1024).max(1024)),
-                });
+                // The budget must stay strictly under max_tokens with real
+                // headroom or the request is rejected. On a small declared
+                // window, max_tokens itself can be too small to leave that
+                // headroom above a sane minimum budget — there enabling
+                // thinking at all would only produce an invalid request, so
+                // skip it and let the reply generate without it.
+                if max_tokens >= 2048 {
+                    body["thinking"] = json!({
+                        "type": "enabled",
+                        "budget_tokens": thinking_budget(effort).min(max_tokens - 1024),
+                    });
+                }
             }
         }
     }

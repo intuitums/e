@@ -80,6 +80,25 @@ pub fn truncate(text: String) -> String {
     )
 }
 
+/// Append a fixed `notice` to `body`, trimming `body` first if the two
+/// together would blow the byte cap. A cap-specific explanation (e.g. "find"
+/// or "grep" stopping early) must survive to the model — appending it before
+/// a generic `truncate()` risked the generic "[truncated: N bytes]" marker
+/// landing on top of it instead, once the hit list alone neared the cap.
+pub fn truncate_with_notice(mut body: String, notice: &str) -> String {
+    if body.len() + notice.len() <= MAX_BYTES {
+        body.push_str(notice);
+        return body;
+    }
+    let mut cut = MAX_BYTES.saturating_sub(notice.len());
+    while cut > 0 && !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    body.truncate(cut);
+    body.push_str(notice);
+    body
+}
+
 /// The schemas advertised to the model (chat-completions `tools` shape;
 /// the Responses dialect reshapes them at send time).
 pub fn schemas() -> Vec<Value> {

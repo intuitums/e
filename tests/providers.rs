@@ -591,6 +591,44 @@ async fn signed_thinking_blocks_are_captured_and_replayed() {
     assert_eq!(content[1]["type"], "tool_use");
 }
 
+/// A small declared context window (a user-defined custom model, or a
+/// mistyped override) can shrink `max_tokens` below the room a manual
+/// thinking budget needs — the request must degrade by dropping the
+/// `thinking` block, not by emitting `budget_tokens >= max_tokens`, which
+/// the API rejects outright.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn small_context_window_drops_thinking_instead_of_an_invalid_budget() {
+    let _lock = env_lock();
+    let body = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9}}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let (port, server) = serve_sse(&[body]);
+    let home = Home::new("small-window");
+    home.auth(r#"{"anthropic":{"key":"sk-ant-test"}}"#);
+
+    let mut model = test_model("anthropic", port, Api::Anthropic);
+    model.thinking = Thinking::Manual;
+    model.context_window = 2_000; // max_tokens clamps to 1_000, under the 2_048 floor
+    let request = Request {
+        model,
+        system: "be helpful".into(),
+        messages: vec![ChatMessage::user("hi")],
+        effort: Some("high".into()),
+        tools: Vec::new(),
+    };
+    let (_text, _reasoning, _calls, _usage, _finish) = collect_stream(request).await;
+
+    let sent = server.join().unwrap().remove(0);
+    assert!(
+        !sent.contains("\"thinking\""),
+        "a max_tokens too small for any valid budget must drop thinking entirely: {sent}"
+    );
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn responses_replays_reasoning_items_ahead_of_their_calls() {
