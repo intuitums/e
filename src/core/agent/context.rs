@@ -43,10 +43,10 @@ In addition to the tools above, you may have access to other custom tools \
 depending on the project.\n\n\
 Guidelines:\n{guidelines}\n\n\
 e documentation (read only when the user asks about e itself — its \
-extensions, themes, skills, prompt templates, or models):\n\
+extensions, themes, skills, prompt templates, keybindings, or models):\n\
 - Run `e docs` to list the built-in guides, `e docs <topic>` to print one\n\
 - Topics: extensions (the protocol and a worked example), themes, models, \
-prompt-templates, skills\n\
+prompt-templates, skills, keybindings\n\
 - When working on an e topic, print and follow the guide before implementing \
 — the formats are exact"
     )

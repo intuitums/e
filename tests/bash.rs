@@ -186,3 +186,112 @@ fn run_shell_reaches_the_tool() {
     assert!(!out.is_error());
     assert_eq!(out.content, "typed-entry-ok");
 }
+
+fn run_bg(args: serde_json::Value) -> tools::ToolOutput {
+    tools::run("bash", &args.to_string(), std::path::Path::new("."))
+}
+
+fn extract_handle(started: &tools::ToolOutput) -> String {
+    started
+        .summary
+        .strip_prefix("background ")
+        .expect("summary carries the handle")
+        .to_string()
+}
+
+/// Poll a background handle until its status line stops saying "running",
+/// or fail the test rather than hang forever on a regression.
+fn wait_until_finished(handle: &str) -> tools::ToolOutput {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let out = run_bg(serde_json::json!({ "handle": handle }));
+        if !out.content.contains("still running") {
+            return out;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background process never finished"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn background_start_returns_immediately_and_is_checkable_later() {
+    let started_at = Instant::now();
+    let started = run_bg(serde_json::json!({
+        "command": "sleep 0.2; echo background-done",
+        "background": true
+    }));
+    assert!(!started.is_error());
+    assert!(
+        started_at.elapsed() < Duration::from_millis(150),
+        "background start must not block"
+    );
+    assert!(started.content.starts_with("started background process"));
+
+    let handle = extract_handle(&started);
+    let finished = wait_until_finished(&handle);
+    assert!(!finished.is_error(), "{}", finished.content);
+    assert_eq!(finished.summary, "exited 0");
+    assert!(finished.content.contains("background-done"));
+    assert!(finished.content.contains("[exited 0]"));
+}
+
+#[test]
+fn background_output_accumulates_across_checks() {
+    let started = run_bg(serde_json::json!({
+        "command": "echo one; sleep 0.3; echo two",
+        "background": true
+    }));
+    let handle = extract_handle(&started);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let out = run_bg(serde_json::json!({ "handle": handle }));
+        if out.content.contains("one") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "first line never appeared");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let finished = wait_until_finished(&handle);
+    assert!(finished.content.contains("one"));
+    assert!(finished.content.contains("two"));
+}
+
+#[test]
+fn background_process_can_be_killed() {
+    let started = run_bg(serde_json::json!({
+        "command": "sleep 30",
+        "background": true
+    }));
+    let handle = extract_handle(&started);
+
+    let killed = run_bg(serde_json::json!({ "handle": handle, "signal": "kill" }));
+    assert_eq!(killed.summary, "killed");
+    assert_eq!(killed.outcome, ToolOutcome::Cancelled);
+
+    // The kill is durable: checking again still reports killed, not running.
+    let after = run_bg(serde_json::json!({ "handle": handle }));
+    assert_eq!(after.summary, "killed");
+}
+
+#[test]
+fn unknown_background_handle_is_an_error_not_a_panic() {
+    let out = run_bg(serde_json::json!({ "handle": "no-such-handle" }));
+    assert!(out.is_error());
+    assert!(out.content.contains("no background process"));
+}
+
+#[test]
+fn background_process_exit_code_is_reported_as_failed() {
+    let started = run_bg(serde_json::json!({
+        "command": "exit 7",
+        "background": true
+    }));
+    let handle = extract_handle(&started);
+    let finished = wait_until_finished(&handle);
+    assert!(finished.is_error());
+    assert_eq!(finished.summary, "exited 7");
+}

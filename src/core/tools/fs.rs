@@ -1,4 +1,4 @@
-//! Filesystem tools: read, write, ls, grep.
+//! Filesystem tools: read, write, grep.
 
 use serde_json::{json, Value};
 use std::path::Path;
@@ -156,47 +156,14 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
     }
 }
 
-pub fn ls_schema() -> Value {
-    schema_object(
-        "ls",
-        "List a directory's entries.",
-        json!({"path": {"type": "string", "description": "Directory (default: workspace root)"}}),
-        &[],
-    )
-}
-
-pub fn ls(args: &Value, cwd: &Path) -> ToolOutput {
-    let path = args["path"].as_str().unwrap_or(".");
-    let full = resolve(cwd, path);
-    let entries = match std::fs::read_dir(&full) {
-        Ok(e) => e,
-        Err(e) => return err(format!("ls {path}: {e}")),
-    };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if e.path().is_dir() {
-                format!("{name}/")
-            } else {
-                name
-            }
-        })
-        .collect();
-    names.sort();
-    let count = names.len();
-    // Bounded like every other tool: one giant vendored directory must not
-    // flood the context past the cap the rest of the tools respect.
-    ok(truncate(names.join("\n")), format!("{count} entries"))
-}
-
 pub fn grep_schema() -> Value {
     schema_object(
         "grep",
         "Search file contents for a regular expression, workspace-wide. Traversal skips dotfiles and .git/target/node_modules/dist/.cache (an explicitly named file is always searched), and stops at 200 matches — the result says so when capped.",
         json!({
             "pattern": {"type": "string"},
-            "path": {"type": "string", "description": "Directory or file to search (default: workspace root)"}
+            "path": {"type": "string", "description": "Directory or file to search (default: workspace root)"},
+            "glob": {"type": "string", "description": "Restrict the search to files matching this glob (`*`, `?`, `**`), e.g. `*.rs` or `src/**/*.json`. Matched against the file name alone when it has no slash, otherwise the workspace-relative path — same rule the old `find` tool used."}
         }),
         &["pattern"],
     )
@@ -210,17 +177,29 @@ pub fn grep(args: &Value, cwd: &Path) -> ToolOutput {
         Ok(r) => r,
         Err(e) => return err(format!("grep: bad pattern: {e}")),
     };
+    // A glob with no slash matches the bare file name anywhere in the tree;
+    // one with a slash addresses the workspace-relative path itself.
+    let glob = match args["glob"].as_str() {
+        Some(g) => match glob_regex(g) {
+            Ok(r) => Some((r, !g.contains('/'))),
+            Err(e) => return err(format!("grep: bad glob: {e}")),
+        },
+        None => None,
+    };
     let root = resolve(cwd, args["path"].as_str().unwrap_or("."));
     let mut hits = Vec::new();
     let mut count = 0usize;
     if root.is_dir() {
         super::walk_files(&root, &mut |path| {
-            search_file(path, cwd, &re, &mut hits, &mut count);
+            if glob_allows(glob.as_ref(), path, cwd) {
+                search_file(path, cwd, &re, &mut hits, &mut count);
+            }
             count < MATCH_CAP
         });
     } else {
         // An explicitly requested file is searched as asked — the dotfile
-        // skip rule is a traversal heuristic, not a veto over `.env`.
+        // skip rule is a traversal heuristic, not a veto over `.env`, and
+        // `glob` narrows a directory walk, not an explicit single-file ask.
         search_file(&root, cwd, &re, &mut hits, &mut count);
     }
     if hits.is_empty() {
@@ -245,6 +224,53 @@ pub fn grep(args: &Value, cwd: &Path) -> ToolOutput {
 
 /// Matches after which a search stops rather than flooding the context.
 const MATCH_CAP: usize = 200;
+
+/// Whether a walked file passes grep's optional `glob` filter — no filter
+/// always passes. `by_name` mirrors the old `find` tool's rule: a pattern
+/// with no slash matches the bare file name, one with a slash matches the
+/// workspace-relative path.
+fn glob_allows(glob: Option<&(regex::Regex, bool)>, path: &Path, cwd: &Path) -> bool {
+    let Some((re, by_name)) = glob else {
+        return true;
+    };
+    let candidate = if *by_name {
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        path.strip_prefix(cwd).unwrap_or(path).display().to_string()
+    };
+    re.is_match(&candidate)
+}
+
+/// Compile a glob into an anchored regex: `*` matches within one path
+/// segment, `?` one character, `**` across segments (`**/` also matches the
+/// empty prefix so `**/x` finds a root-level `x`).
+fn glob_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    let mut re = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' => {
+                if chars.peek() == Some(&'*') {
+                    chars.next();
+                    if chars.peek() == Some(&'/') {
+                        chars.next();
+                        re.push_str("(?:.*/)?");
+                    } else {
+                        re.push_str(".*");
+                    }
+                } else {
+                    re.push_str("[^/]*");
+                }
+            }
+            '?' => re.push_str("[^/]"),
+            c => re.push_str(&regex::escape(&c.to_string())),
+        }
+    }
+    re.push('$');
+    regex::Regex::new(&re)
+}
 
 fn search_file(
     path: &Path,
@@ -272,5 +298,22 @@ fn search_file(
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_regex;
+
+    #[test]
+    fn glob_semantics() {
+        let m = |p: &str, s: &str| glob_regex(p).unwrap().is_match(s);
+        assert!(m("*.rs", "main.rs"));
+        assert!(!m("*.rs", "src/main.rs"), "* must not cross a separator");
+        assert!(m("src/**/*.json", "src/a/b/c.json"));
+        assert!(m("**/Cargo.toml", "Cargo.toml"), "**/ matches empty prefix");
+        assert!(m("a?c.txt", "abc.txt"));
+        assert!(!m("a?c.txt", "a/c.txt"));
+        assert!(m("**", "any/depth/at/all"));
     }
 }

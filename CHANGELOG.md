@@ -8,9 +8,44 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- Sessions are a tree, not just a line: every message carries an id and its
+  parent, in the same file — `/tree` lists this session's earlier user
+  turns, and rewinding to one points the next message's parent at it instead
+  of the file's last line, growing a second branch beside the abandoned tail
+  rather than overwriting it. A plain, never-rewound session still reads
+  exactly like the straight line it always was, and a session written before
+  this existed resumes correctly — its untagged records get an id and
+  parent synthesized from their position on load.
+- `bash` can start something long-lived without blocking the turn: pass
+  `background: true` to get a handle back immediately instead of waiting for
+  the command to exit. A later call with that `handle` (no `command`) reads
+  its status and output so far; add `signal: "kill"` to stop it. The process
+  outlives the call that started it but not the e process itself.
+- `grep` takes an optional `glob` to restrict which files it searches (e.g.
+  `*.rs`, `src/**/*.json`) — the filtering half of the old `find` tool,
+  recovered as a parameter instead of a second tool.
+- The composer's editing keys are file-backed: `~/.e/keybindings.json`
+  overrides any chord (`ctrl+w`, `alt+enter`, …) to a named action, or to
+  `"none"` to unbind it, the same override-a-default pattern as themes.
+  e's application-level shortcuts (ctrl+c, ctrl+p, tab, menu navigation) are
+  claimed earlier in the key dispatch and are not affected.
+
+- The built-in tool surface is the reference design's four plus grep: read ·
+  write · edit · grep · bash. `ls` and `find` are gone — bash covers both
+  without a schema riding along in every request — and the dedicated `skill`
+  tool is gone with them: the system-prompt catalog now advertises each
+  skill's name, description, and SKILL.md path, and the model pages a body
+  in with the ordinary `read` tool (the reference's progressive disclosure).
+  Fixes riding along: the `$` picker's injected skill now carries the same
+  skill-directory hint the tool path had, so a body that says "see
+  reference.md" no longer strands the model only when a human invoked it;
+  and a frontmatter `description:` may span lines (block scalars, indented
+  continuations) instead of silently truncating at the first newline.
+
 - Internal simplification, no behavior change: message commits go through
-  one `TurnLog` handle instead of six threaded parameters; grep and find
-  share one traversal (same skip rules, same cap semantics); each tool's
+  one `TurnLog` handle instead of six threaded parameters; every
+  file-scanning tool shares one traversal (same skip rules, same cap
+  semantics); each tool's
   schema, runner, system-prompt snippet, and transcript labels live in one
   table so they cannot drift apart; tool cancellation uses one shared
   helper; the TUI's session-event handling, menus, and login flows moved

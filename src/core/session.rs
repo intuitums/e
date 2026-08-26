@@ -7,6 +7,19 @@
 //! files, so opening and closing e never counts as a session. Resume replays
 //! messages back into the agent. The title is derived from the first user
 //! message (first line, eight words), never model-generated.
+//!
+//! Every message entry also carries an `id` and its `parent` id: an
+//! in-place tree, not just a line. Normal use never notices — each append
+//! chains onto whatever was last written, so a plain session reads exactly
+//! like the linear log it looks like. `/tree` is what makes the shape
+//! visible: pick an earlier point and continue, and the new messages chain
+//! onto that point's id instead of the file's last line, growing a second
+//! branch in the same file. The abandoned tail is never touched — `nodes`
+//! reads every branch a file holds, `Session::load` (plain resume) still
+//! walks the file top to bottom, which for an un-branched session is the
+//! same thing. Records written before branching existed carry neither
+//! field; `nodes` synthesizes both positionally so an old session still
+//! resumes onto its real tail instead of quietly starting a second root.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -28,7 +41,15 @@ enum Entry {
         model: String,
     },
     #[serde(rename = "message")]
-    Message { message: ChatMessage },
+    Message {
+        /// Empty on a record written before branching existed; `nodes`
+        /// synthesizes a stable id for those positionally.
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        parent: Option<String>,
+        message: ChatMessage,
+    },
     /// A display name an extension set via session_name — shown in /resume,
     /// overriding the title derived from the first user message.
     #[serde(rename = "name")]
@@ -45,6 +66,18 @@ pub struct Session {
     /// Held for as long as this Session exists; its sidecar file marks
     /// ownership so a second e cannot append to the same log.
     _lock: LockGuard,
+    /// The node the next appended message attaches to as parent — the tip of
+    /// whichever branch is active. None only before this file holds any
+    /// message yet; `/tree` moves it to rewind without touching the file.
+    current: Option<String>,
+}
+
+/// One message as an explicit tree node.
+#[derive(Clone)]
+pub struct Node {
+    pub id: String,
+    pub parent: Option<String>,
+    pub message: ChatMessage,
 }
 
 /// A sidecar `<session>.lock` holding the owner's PID. Exclusive creation
@@ -182,18 +215,34 @@ impl Session {
             file,
             healthy: true,
             _lock: lock,
+            current: None,
         })
     }
 
     /// One serialized record per write call, newline included — even under
     /// an unexpected second writer, records never share a line. A failed
     /// write is lost history: callers must surface the error, not shrug.
+    /// The new record's parent is wherever `current` points — the file's
+    /// last line on an un-rewound session, or an earlier node right after
+    /// `/tree` moved it, which is exactly how a second branch is grown.
     pub fn append(&mut self, message: &ChatMessage) -> std::io::Result<()> {
+        let id = uuid::Uuid::now_v7().to_string();
         let mut line = serde_json::to_string(&Entry::Message {
+            id: id.clone(),
+            parent: self.current.clone(),
             message: message.clone(),
         })?;
         line.push('\n');
-        self.append_record(line.as_bytes())
+        self.append_record(line.as_bytes())?;
+        self.current = Some(id);
+        Ok(())
+    }
+
+    /// Move the node subsequent appends attach to. `/tree` calls this with
+    /// an earlier node's id to rewind: the file is untouched, the next
+    /// append grows a new branch instead of extending the old tail.
+    pub fn set_head(&mut self, id: Option<String>) {
+        self.current = id;
     }
 
     /// Set the display name e shows for this session. Idempotent; appends a
@@ -253,7 +302,7 @@ impl Session {
                 continue;
             }
             match serde_json::from_str::<Entry>(line) {
-                Ok(Entry::Message { message }) => messages.push(message),
+                Ok(Entry::Message { message, .. }) => messages.push(message),
                 Ok(_) => {}
                 Err(_) if Some(index) == last_nonempty => break,
                 Err(e) => {
@@ -268,16 +317,69 @@ impl Session {
         Ok(messages)
     }
 
+    /// Every message in the file as an explicit tree node — every branch a
+    /// session ever grew, not just the one `load` walks. A record from
+    /// before branching existed (empty `id`) gets an id and parent
+    /// synthesized from its position, chained onto whatever came before it,
+    /// so an old session reads as the same straight line it always was.
+    pub fn nodes(path: &Path) -> std::io::Result<Vec<Node>> {
+        let reader = BufReader::new(File::open(path)?);
+        let lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>()?;
+        let last_nonempty = lines.iter().rposition(|l| !l.trim().is_empty());
+        let mut out: Vec<Node> = Vec::new();
+        let mut previous: Option<String> = None;
+        for (index, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Entry>(line) {
+                Ok(Entry::Message {
+                    id,
+                    parent,
+                    message,
+                }) => {
+                    let (id, parent) = if id.is_empty() {
+                        (format!("legacy-{}", out.len()), previous.clone())
+                    } else {
+                        (id, parent)
+                    };
+                    previous = Some(id.clone());
+                    out.push(Node {
+                        id,
+                        parent,
+                        message,
+                    });
+                }
+                Ok(_) => {}
+                Err(_) if Some(index) == last_nonempty => break,
+                Err(e) => {
+                    return Err(std::io::Error::other(format!(
+                        "corrupt session record at line {}: {e}",
+                        index + 1
+                    )))
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Re-open an existing session for appending. Fails while another
-    /// process owns the session's lock.
+    /// process owns the session's lock. The reopened handle picks up
+    /// exactly where the file's last branch left off — reading the file
+    /// once here is what lets a resumed session keep growing that branch
+    /// instead of quietly starting a second root next to it.
     pub fn reopen(path: &Path) -> std::io::Result<Session> {
         let lock = LockGuard::acquire(path)?;
         let file = OpenOptions::new().append(true).open(path)?;
+        let current = Session::nodes(path)
+            .ok()
+            .and_then(|nodes| nodes.last().map(|n| n.id.clone()));
         Ok(Session {
             path: path.to_path_buf(),
             file,
             healthy: true,
             _lock: lock,
+            current,
         })
     }
 }
@@ -375,7 +477,7 @@ fn info(path: &Path, expected_cwd: Option<&Path>) -> Option<SessionInfo> {
         let line = line.ok()?;
         match serde_json::from_str(&line) {
             Ok(Entry::Header { cwd, .. }) => session_cwd = Some(PathBuf::from(cwd)),
-            Ok(Entry::Message { message }) => messages.push(message),
+            Ok(Entry::Message { message, .. }) => messages.push(message),
             Ok(Entry::Name { name: n }) => name = Some(n),
             Err(_) => {}
         }
@@ -437,6 +539,7 @@ mod tests {
             file,
             healthy: true,
             _lock: LockGuard { path: lock_path },
+            current: None,
         };
 
         let first = session.append(&ChatMessage::user("lost")).unwrap_err();

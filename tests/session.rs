@@ -478,6 +478,170 @@ async fn persistence_failure_warns_once_not_silently() {
     let _ = std::fs::remove_file(&blocked);
 }
 
+/// Every message becomes its own tree node, chained by id/parent onto
+/// whatever was last written — a plain session with no rewind is a straight
+/// line, exactly what `load` still sees.
+#[test]
+fn nodes_chain_linearly_when_nothing_rewound() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("e-tree-linear-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+    let cwd = std::env::temp_dir().join("e-tree-linear-proj");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut s = Session::create(&cwd, "test/model").unwrap();
+    s.append(&ChatMessage::user("first")).unwrap();
+    s.append(&ChatMessage::assistant("reply", Vec::new()))
+        .unwrap();
+    let path = s.path().to_path_buf();
+    drop(s);
+
+    let nodes = Session::nodes(&path).unwrap();
+    assert_eq!(nodes.len(), 2);
+    assert!(nodes[0].parent.is_none(), "the first message is a root");
+    assert_eq!(nodes[1].parent.as_deref(), Some(nodes[0].id.as_str()));
+    // Every id is distinct and non-empty.
+    assert_ne!(nodes[0].id, nodes[1].id);
+    assert!(!nodes[0].id.is_empty() && !nodes[1].id.is_empty());
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// `set_head` is the whole rewind mechanism: point the next append at an
+/// earlier node and the file grows a second branch instead of extending the
+/// abandoned tail — which survives untouched, still reachable through
+/// `nodes`.
+#[test]
+fn set_head_grows_a_branch_without_touching_the_old_tail() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("e-tree-branch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+    let cwd = std::env::temp_dir().join("e-tree-branch-proj");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut s = Session::create(&cwd, "test/model").unwrap();
+    s.append(&ChatMessage::user("root")).unwrap();
+    s.append(&ChatMessage::assistant("branch A reply", Vec::new()))
+        .unwrap();
+    let path = s.path().to_path_buf();
+
+    let root_id = Session::nodes(&path).unwrap()[0].id.clone();
+    s.set_head(Some(root_id.clone()));
+    s.append(&ChatMessage::user("branch B")).unwrap();
+    s.append(&ChatMessage::assistant("branch B reply", Vec::new()))
+        .unwrap();
+    drop(s);
+
+    let nodes = Session::nodes(&path).unwrap();
+    assert_eq!(nodes.len(), 4, "both branches persist in the one file");
+    let children_of_root = nodes
+        .iter()
+        .filter(|n| n.parent.as_deref() == Some(root_id.as_str()))
+        .count();
+    assert_eq!(
+        children_of_root, 2,
+        "root now has two children — a branch point"
+    );
+    // Plain load() still walks the file top to bottom: both branches, in
+    // append order, exactly as an append-only reader always saw it.
+    let loaded = Session::load(&path).unwrap();
+    assert_eq!(loaded.len(), 4);
+    assert_eq!(loaded[2].content, "branch B");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Reopening a session must pick up the true tip of whatever branch was
+/// active when it was last closed — not the file's root — so a resumed
+/// session keeps growing that branch instead of starting a second root
+/// beside it.
+#[test]
+fn reopen_continues_the_branch_that_was_active() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("e-tree-reopen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+    let cwd = std::env::temp_dir().join("e-tree-reopen-proj");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut s = Session::create(&cwd, "test/model").unwrap();
+    s.append(&ChatMessage::user("root")).unwrap();
+    let root_id = Session::nodes(s.path()).unwrap()[0].id.clone();
+    s.set_head(Some(root_id.clone()));
+    s.append(&ChatMessage::user("chosen branch")).unwrap();
+    let path = s.path().to_path_buf();
+    drop(s);
+
+    let mut resumed = Session::reopen(&path).unwrap();
+    resumed
+        .append(&ChatMessage::assistant("continues here", Vec::new()))
+        .unwrap();
+    drop(resumed);
+
+    let nodes = Session::nodes(&path).unwrap();
+    let tail = nodes.last().unwrap();
+    assert_eq!(tail.message.content, "continues here");
+    let parent = nodes
+        .iter()
+        .find(|n| n.id == tail.parent.clone().unwrap())
+        .unwrap();
+    assert_eq!(
+        parent.message.content, "chosen branch",
+        "reopen must resume onto the branch that was active, not the root"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A record written before branching existed carries no id or parent.
+/// `nodes` must still produce a usable, linearly-chained tree for it so an
+/// old session resumes onto its real tail instead of silently starting a
+/// second root.
+#[test]
+fn legacy_records_synthesize_a_linear_chain() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("e-tree-legacy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+    let cwd = std::env::temp_dir().join("e-tree-legacy-proj");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    // Hand-write a pre-branching-format log: no id/parent on the records.
+    let s = Session::create(&cwd, "test/model").unwrap();
+    let path = s.path().to_path_buf();
+    drop(s);
+    let legacy = format!(
+        "{}\n{}\n{}\n",
+        serde_json::json!({"type":"session","id":"x","cwd":cwd.to_string_lossy(),"created":1,"model":"test/model"}),
+        serde_json::json!({"type":"message","message":ChatMessage::user("legacy first")}),
+        serde_json::json!({"type":"message","message":ChatMessage::assistant("legacy reply", Vec::<e::core::providers::ToolCall>::new())}),
+    );
+    std::fs::write(&path, legacy).unwrap();
+
+    let nodes = Session::nodes(&path).unwrap();
+    assert_eq!(nodes.len(), 2);
+    assert!(nodes[0].parent.is_none());
+    assert_eq!(nodes[1].parent.as_deref(), Some(nodes[0].id.as_str()));
+
+    // A session reopened from a legacy tail keeps growing that same line.
+    let mut resumed = Session::reopen(&path).unwrap();
+    resumed
+        .append(&ChatMessage::user("new turn after legacy tail"))
+        .unwrap();
+    drop(resumed);
+    let nodes = Session::nodes(&path).unwrap();
+    assert_eq!(nodes.len(), 3);
+    assert_eq!(nodes[2].parent.as_deref(), Some(nodes[1].id.as_str()));
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// The persisted name is part of session identity: it must be readable back
 /// for resume, and the latest entry wins.
 #[test]

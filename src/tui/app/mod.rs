@@ -163,6 +163,10 @@ impl Drop for ActiveLogin {
 
 struct App {
     theme: Theme,
+    /// The composer's chord overrides from `~/.e/keybindings.json`. Reread
+    /// alongside the theme — startup, /settings close, /reload — never
+    /// mid-keystroke.
+    keymap: crate::core::config::keybindings::Keymap,
     transcript: Transcript,
     editor: Editor,
     agent: Agent,
@@ -433,47 +437,18 @@ impl App {
         }
     }
 
-    fn resume_path(&mut self, path: std::path::PathBuf) {
-        // The picker can already be open when a turn starts (queued prompt);
-        // re-check here so a selection can never splice a running turn's
-        // output into the resumed session. `is_streaming` also covers the
-        // gap between a submit and its TurnStart event.
-        if self.active.is_some() || self.agent.is_streaming() {
-            self.notice("a turn is running — press Esc to stop it, then resume".into());
-            return;
-        }
-        let messages = match crate::core::session::Session::load(&path) {
-            Ok(m) => m,
-            Err(e) => {
-                self.notice(format!("could not open session: {e}"));
-                self.release_initial_prompt();
-                return;
-            }
-        };
-        // Ownership first: a session another e is appending to must not be
-        // replayed into a second, diverging history.
-        let session = match crate::core::session::Session::reopen(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                self.notice(format!("could not resume session: {e}"));
-                self.release_initial_prompt();
-                return;
-            }
-        };
+    /// Rebuild the transcript from a linear message history: clear what's
+    /// showing and replay `messages` as banner-then-blocks, reconstructing
+    /// tool-call groups from their recorded outcomes. Shared by /resume (the
+    /// whole file) and /tree (the path from root to a rewind point) — both
+    /// end up wanting exactly the same replay, just fed a different list.
+    fn rebuild_transcript(&mut self, messages: &[crate::core::providers::ChatMessage]) {
         self.transcript.clear();
         self.transcript
             .push(Block::new(Kind::Banner, crate::VERSION));
-        // The old transcript's shell block index and held prompts die with
-        // it; a still-running `!` command's result is epoch-discarded, and a
-        // /compact still summarizing the old session must not land its swap
-        // on the resumed one.
-        self.shell_block = None;
-        self.held_prompts.clear();
-        self.compacting = false;
-        self.compact_requested = false;
         let mut restored_calls = std::collections::HashMap::<String, (usize, u64)>::new();
         let mut restored_id = 0u64;
-        for m in &messages {
+        for m in messages {
             match m.role.as_str() {
                 "user" => {
                     self.transcript
@@ -531,7 +506,45 @@ impl App {
         // and the auto-compact check don't see an empty context until the
         // first real usage report lands.
         self.context_tokens =
-            crate::core::agent::compact::estimate_request_tokens(&system_prompt(), &messages);
+            crate::core::agent::compact::estimate_request_tokens(&system_prompt(), messages);
+    }
+
+    fn resume_path(&mut self, path: std::path::PathBuf) {
+        // The picker can already be open when a turn starts (queued prompt);
+        // re-check here so a selection can never splice a running turn's
+        // output into the resumed session. `is_streaming` also covers the
+        // gap between a submit and its TurnStart event.
+        if self.active.is_some() || self.agent.is_streaming() {
+            self.notice("a turn is running — press Esc to stop it, then resume".into());
+            return;
+        }
+        let messages = match crate::core::session::Session::load(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                self.notice(format!("could not open session: {e}"));
+                self.release_initial_prompt();
+                return;
+            }
+        };
+        // Ownership first: a session another e is appending to must not be
+        // replayed into a second, diverging history.
+        let session = match crate::core::session::Session::reopen(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                self.notice(format!("could not resume session: {e}"));
+                self.release_initial_prompt();
+                return;
+            }
+        };
+        // The old transcript's shell block index and held prompts die with
+        // it; a still-running `!` command's result is epoch-discarded, and a
+        // /compact still summarizing the old session must not land its swap
+        // on the resumed one.
+        self.shell_block = None;
+        self.held_prompts.clear();
+        self.compacting = false;
+        self.compact_requested = false;
+        self.rebuild_transcript(&messages);
         self.agent.load_history(messages);
         self.agent.set_session(Some(session));
         // Identity travels together: the resumed log's persisted name
@@ -550,6 +563,84 @@ impl App {
         if let Some(initial) = self.pending_initial.take() {
             self.submit(initial);
         }
+    }
+
+    /// /tree: list every earlier user turn in the active session as a
+    /// rewind point. Picking one means "go back to just before this and try
+    /// something different" — the new branch replaces it, not extends it.
+    fn open_tree_menu(&mut self) {
+        if self.active.is_some() || self.agent.is_streaming() {
+            self.notice("a turn is running — press Esc to stop it, then /tree".into());
+            return;
+        }
+        let Some(path) = self.agent.session_path() else {
+            self.notice("nothing to rewind yet — send a message first".into());
+            return;
+        };
+        let nodes = match crate::core::session::Session::nodes(&path) {
+            Ok(n) => n,
+            Err(e) => {
+                self.notice(format!("could not read session: {e}"));
+                return;
+            }
+        };
+        let items: Vec<MenuItem> = tree_items(&nodes)
+            .into_iter()
+            .map(|(id, preview, branched)| {
+                let mut item = MenuItem::new(
+                    if preview.is_empty() {
+                        "(empty)"
+                    } else {
+                        &preview
+                    },
+                    "",
+                    &id,
+                );
+                if branched {
+                    item.meta = "⑂ branch point".into();
+                }
+                item
+            })
+            .collect();
+        if items.is_empty() {
+            self.notice("nothing to rewind to yet".into());
+            return;
+        }
+        self.menu = Some(Menu::new(MenuKind::Tree, "Rewind to", HINT_USE, items));
+    }
+
+    /// Apply a /tree choice: rewind to just before the chosen user message
+    /// and replay everything up to that point into the transcript and the
+    /// agent's history. The file is untouched — the next message committed
+    /// attaches after the rewind point, growing a sibling branch next to
+    /// the one being left behind rather than overwriting it.
+    fn rewind_to_node(&mut self, node_id: &str) {
+        if self.active.is_some() || self.agent.is_streaming() {
+            self.notice("a turn is running — press Esc to stop it, then /tree".into());
+            return;
+        }
+        let Some(path) = self.agent.session_path() else {
+            return;
+        };
+        let nodes = match crate::core::session::Session::nodes(&path) {
+            Ok(n) => n,
+            Err(e) => {
+                self.notice(format!("could not read session: {e}"));
+                return;
+            }
+        };
+        let Some((head, messages)) = rewind_target(&nodes, node_id) else {
+            self.notice("that point no longer exists".into());
+            return;
+        };
+        self.shell_block = None;
+        self.held_prompts.clear();
+        self.compacting = false;
+        self.compact_requested = false;
+        self.rebuild_transcript(&messages);
+        self.agent.rewind_to(head, messages);
+        self.session_epoch += 1;
+        self.notice("rewound — your next message branches from here".into());
     }
 
     fn open_settings(&mut self) {
@@ -678,7 +769,7 @@ impl App {
             "/quit" | "/exit" => self.should_quit = true,
             "/version" => self.notice(format!("e {}", crate::VERSION)),
             "/help" => {
-                let mut help = "commands:\n  /login [provider]   sign in (API key or account)\n  /models [name]      list or switch models\n  /scoped-models      choose which models ctrl+p cycles\n  /reload             reload extensions, themes, and config\n  /new                fresh session\n  /compact            summarize into a fresh session\n  /trust              trust this directory (loads its AGENTS.md, .e skills and prompts)\n  ! <cmd>              run a shell command; the model sees the output\n  shift+tab           cycle reasoning effort (per model)\n  /version            show the version\n  /quit               exit".to_string();
+                let mut help = "commands:\n  /login [provider]   sign in (API key or account)\n  /models [name]      list or switch models\n  /scoped-models      choose which models ctrl+p cycles\n  /reload             reload extensions, themes, and config\n  /new                fresh session\n  /resume             resume a saved session\n  /tree               rewind to an earlier point and branch\n  /compact            summarize into a fresh session\n  /trust              trust this directory (loads its AGENTS.md, .e skills and prompts)\n  ! <cmd>              run a shell command; the model sees the output\n  shift+tab           cycle reasoning effort (per model)\n  /version            show the version\n  /quit               exit".to_string();
                 let ext_commands = self.host.commands();
                 if !ext_commands.is_empty() {
                     help.push_str("\n\nextension commands:");
@@ -716,6 +807,7 @@ impl App {
                 set_tab_title(&tab_title(&title_path(), None));
             }
             "/resume" => self.open_resume_menu(),
+            "/tree" => self.open_tree_menu(),
             "/settings" => self.open_settings(),
             "/copy" => self.copy_last(),
             "/compact" => self.compact_now(),
@@ -952,6 +1044,12 @@ impl App {
         self.transcript.invalidate();
     }
 
+    /// Re-read `~/.e/keybindings.json`. A malformed or missing file fails
+    /// open to no overrides — never an error that blocks typing.
+    fn apply_keymap(&mut self) {
+        self.keymap = crate::core::config::keybindings::load();
+    }
+
     /// Re-derive the cached sign-in and effort state from disk. Call after
     /// anything that can change them: sign-in, model switch, effort cycle,
     /// settings changes, /reload.
@@ -1164,10 +1262,85 @@ pub fn relaunch_self(
     Err(command.exec())
 }
 
-fn key_of(event: &KeyEvent) -> Option<Key> {
+/// /tree's rewind points: every user-turn node's id, one-line preview, and
+/// whether its parent already has more than one child — a branch point,
+/// meaning /tree was used at that spot before.
+fn tree_items(nodes: &[crate::core::session::Node]) -> Vec<(String, String, bool)> {
+    let mut children_of = std::collections::HashMap::<&str, usize>::new();
+    for n in nodes {
+        if let Some(p) = n.parent.as_deref() {
+            *children_of.entry(p).or_insert(0) += 1;
+        }
+    }
+    nodes
+        .iter()
+        .filter(|n| n.message.role == "user")
+        .map(|n| {
+            let preview: String = n
+                .message
+                .content
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(60)
+                .collect();
+            let branched = n
+                .parent
+                .as_deref()
+                .map(|p| children_of.get(p).copied().unwrap_or(0) > 1)
+                .unwrap_or(false);
+            (n.id.clone(), preview, branched)
+        })
+        .collect()
+}
+
+/// The rewind target for a chosen node: its parent (the new head) and the
+/// linear message history from root up to but not including the node
+/// itself — what gets replayed. None only when the id no longer resolves (a
+/// stale picker selection against a session that changed underneath it). A
+/// broken ancestor link mid-walk just truncates the replayed path there
+/// rather than failing the whole rewind.
+fn rewind_target(
+    nodes: &[crate::core::session::Node],
+    node_id: &str,
+) -> Option<(Option<String>, Vec<crate::core::providers::ChatMessage>)> {
+    let by_id: std::collections::HashMap<&str, &crate::core::session::Node> =
+        nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let target = *by_id.get(node_id)?;
+    let head = target.parent.clone();
+    let mut path_ids = Vec::new();
+    let mut cursor = head.clone();
+    while let Some(id) = cursor {
+        let Some(node) = by_id.get(id.as_str()).copied() else {
+            break;
+        };
+        path_ids.push(id.clone());
+        cursor = node.parent.clone();
+    }
+    path_ids.reverse();
+    let messages = path_ids
+        .iter()
+        .filter_map(|id| by_id.get(id.as_str()).map(|n| n.message.clone()))
+        .collect();
+    Some((head, messages))
+}
+
+/// The composer's editing keymap: a user's `~/.e/keybindings.json` chord
+/// override is consulted first (`Some(action)` overrides, `Some(None)`
+/// swallows the chord, `None` means "not mentioned"); anything left
+/// unmentioned falls through to e's built-in bindings below, so an empty or
+/// missing file reproduces this function's behavior exactly.
+fn key_of(event: &KeyEvent, keymap: &crate::core::config::keybindings::Keymap) -> Option<Key> {
     let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
     let alt = event.modifiers.contains(KeyModifiers::ALT);
     let shift = event.modifiers.contains(KeyModifiers::SHIFT);
+    if let Some(base) = crate::core::config::keybindings::base_name(event.code) {
+        let chord = crate::core::config::keybindings::chord_string(ctrl, alt, shift, &base);
+        if let Some(bound) = keymap.lookup(&chord) {
+            return bound;
+        }
+    }
     Some(match (event.code, ctrl, alt) {
         (KeyCode::Enter, ..) if shift || alt => Key::Newline,
         (KeyCode::Enter, ..) => Key::Enter,
@@ -1236,6 +1409,7 @@ pub async fn run(
     let detected = crate::tui::background::detect_light();
     let detected = detected.unwrap_or(false);
     let theme = crate::tui::theme::resolve(&crate::core::config::settings::theme(), detected);
+    let keymap = crate::core::config::keybindings::load();
 
     let (mut cols, mut rows) = terminal::size()?;
     let mut painter = Painter::spawn(cols, rows);
@@ -1246,6 +1420,7 @@ pub async fn run(
     agent.set_host(host.clone());
     let mut app = App {
         theme,
+        keymap,
         transcript: Transcript::default(),
         editor: Editor::new(),
         agent,
@@ -1490,9 +1665,11 @@ pub async fn run(
                             }
                             // A theme change applies immediately; settings can
                             // also change what the statusline derives from disk.
-                            // The thinking toggle is file-backed too — re-read
-                            // it so a mid-session change lands this frame.
+                            // The thinking toggle and keymap are file-backed
+                            // too — re-read them so a mid-session change
+                            // lands this frame.
                             app.apply_theme();
+                            app.apply_keymap();
                             app.show_thinking = crate::core::config::settings::get_string(
                                 "show_thinking",
                             )
@@ -1540,7 +1717,7 @@ pub async fn run(
                                     }
                                 }
                                 (AuthStage::ApiKey { .. }, _) => {
-                                    if let Some(key) = key_of(&k) {
+                                    if let Some(key) = key_of(&k, &app.keymap) {
                                         if let EditorResult::Submit(text) = app.editor.key(key) {
                                             app.submit(text);
                                         }
@@ -1618,7 +1795,7 @@ pub async fn run(
                                 Some(_) => app.refresh_status_cache(),
                                 None => app.notice("this model has no reasoning effort control".into()),
                             }
-                        } else if let Some(key) = key_of(&k) {
+                        } else if let Some(key) = key_of(&k, &app.keymap) {
                             if let EditorResult::Submit(text) = app.editor.key(key) {
                                 app.submit(text);
                             }
@@ -1726,6 +1903,7 @@ pub async fn run(
                         app.host = host.clone();
                         app.agent.set_host(host);
                         app.apply_theme();
+                        app.apply_keymap();
                         app.refresh_status_cache();
                         finish_reload_notice(&mut app.transcript, app.reload_block.take());
                         for text in std::mem::take(&mut app.held_prompts) {
@@ -1941,6 +2119,130 @@ mod tests {
         );
     }
 
+    fn node(
+        id: &str,
+        parent: Option<&str>,
+        message: crate::core::providers::ChatMessage,
+    ) -> crate::core::session::Node {
+        crate::core::session::Node {
+            id: id.into(),
+            parent: parent.map(String::from),
+            message,
+        }
+    }
+
+    #[test]
+    fn tree_items_lists_user_turns_and_flags_branch_points() {
+        use crate::core::providers::ChatMessage;
+        let nodes = vec![
+            node("1", None, ChatMessage::user("root question")),
+            node(
+                "2",
+                Some("1"),
+                ChatMessage::assistant("reply A", Vec::new()),
+            ),
+            // A second child of "1": root was rewound and branched from once.
+            node("3", Some("1"), ChatMessage::user("second try")),
+        ];
+        let items = tree_items(&nodes);
+        // Only user-role nodes are offered as rewind points.
+        assert_eq!(items.len(), 2);
+        let (id, preview, branched) = &items[0];
+        assert_eq!(id, "1");
+        assert_eq!(preview, "root question");
+        assert!(!branched, "the root itself has no parent to branch under");
+        let (id, preview, branched) = &items[1];
+        assert_eq!(id, "3");
+        assert_eq!(preview, "second try");
+        assert!(*branched, "\"1\" now has two children — a branch point");
+    }
+
+    #[test]
+    fn rewind_target_replays_the_path_to_but_not_including_the_chosen_node() {
+        use crate::core::providers::ChatMessage;
+        let nodes = vec![
+            node("1", None, ChatMessage::user("first")),
+            node("2", Some("1"), ChatMessage::assistant("reply", Vec::new())),
+            node("3", Some("2"), ChatMessage::user("second")),
+        ];
+        let (head, messages) = rewind_target(&nodes, "3").expect("node 3 exists");
+        assert_eq!(head.as_deref(), Some("2"), "rewinds to just before node 3");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "first");
+        assert_eq!(messages[1].content, "reply");
+    }
+
+    #[test]
+    fn rewind_target_to_the_root_yields_an_empty_history_and_no_head() {
+        use crate::core::providers::ChatMessage;
+        let nodes = vec![node("1", None, ChatMessage::user("only message"))];
+        let (head, messages) = rewind_target(&nodes, "1").expect("node 1 exists");
+        assert!(head.is_none());
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn rewind_target_is_none_for_an_unknown_id() {
+        use crate::core::providers::ChatMessage;
+        let nodes = vec![node("1", None, ChatMessage::user("only message"))];
+        assert!(rewind_target(&nodes, "missing").is_none());
+    }
+
+    // E_HOME is process-global; serialize the tests below that set it.
+    static KEY_OF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn key_of_matches_the_built_in_bindings_when_the_keymap_is_empty() {
+        let keymap = crate::core::config::keybindings::Keymap::empty();
+        let ctrl_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert!(matches!(key_of(&ctrl_w, &keymap), Some(Key::KillWord)));
+        let plain_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(matches!(key_of(&plain_x, &keymap), Some(Key::Char('x'))));
+    }
+
+    #[test]
+    fn key_of_consults_an_override_before_the_built_in_binding() {
+        let _guard = KEY_OF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "e-key-of-override-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("E_HOME", &dir);
+        std::fs::write(dir.join("keybindings.json"), r#"{"ctrl+w": "home"}"#).unwrap();
+
+        let keymap = crate::core::config::keybindings::load();
+        let ctrl_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert!(
+            matches!(key_of(&ctrl_w, &keymap), Some(Key::Home)),
+            "an override replaces the built-in action for that chord"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn key_of_none_override_swallows_a_built_in_chord() {
+        let _guard = KEY_OF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "e-key-of-none-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("E_HOME", &dir);
+        // ctrl+j is a built-in binding for Newline; "none" must swallow it
+        // rather than falling through to the default.
+        std::fs::write(dir.join("keybindings.json"), r#"{"ctrl+j": "none"}"#).unwrap();
+
+        let keymap = crate::core::config::keybindings::load();
+        let ctrl_j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert!(key_of(&ctrl_j, &keymap).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn reload_result_replaces_the_in_progress_notice() {
         let mut transcript = Transcript::default();
@@ -2048,6 +2350,7 @@ mod tests {
         let (results, _) = tokio::sync::mpsc::channel(1);
         App {
             theme: crate::tui::theme::load_bundled(false).unwrap(),
+            keymap: crate::core::config::keybindings::Keymap::empty(),
             transcript: Transcript::default(),
             editor: Editor::new(),
             agent,

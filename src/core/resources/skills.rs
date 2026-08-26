@@ -3,10 +3,12 @@
 //!
 //! Each skill is a folder with a `SKILL.md`: YAML-ish frontmatter (name,
 //! description, optional `disable-model-invocation`) then a markdown body.
-//! Auto-invocable skills are advertised in the system prompt as a
-//! name+description catalog; the model pages a body in with the `skill` tool.
-//! `$` in the composer opens a picker over all of them. A repo skill shadows
-//! a global skill of the same name — the closer context wins.
+//! Progressive disclosure, the reference design's way: auto-invocable skills
+//! are advertised in the system prompt as a catalog of name, description, and
+//! the SKILL.md path; the model pages a body in with the ordinary `read` tool
+//! — no dedicated skill tool. `$` in the composer opens a picker over all of
+//! them. A repo skill shadows a global skill of the same name — the closer
+//! context wins.
 
 use std::path::Path;
 
@@ -16,7 +18,8 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub body: String,
-    /// When true, only the user may invoke it (`$name`), never the model.
+    /// When true, the skill stays out of the system-prompt catalog — only
+    /// the user reaches it, through the `$name` picker.
     pub disable_model_invocation: bool,
     /// The skill's own folder: a body that references bundled files
     /// (references, templates, scripts) is useless without it.
@@ -56,14 +59,10 @@ fn load(path: &Path) -> Option<Skill> {
     let mut name = path.parent()?.file_name()?.to_string_lossy().into_owned();
     let mut description = String::new();
     let mut disable = false;
-    for line in frontmatter.lines() {
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim().trim_matches('"');
-        match key.trim() {
-            "name" => name = value.to_string(),
-            "description" => description = value.to_string(),
+    for (key, value) in parse_frontmatter(&frontmatter) {
+        match key.as_str() {
+            "name" => name = value,
+            "description" => description = value,
             "disable-model-invocation" => disable = value == "true",
             _ => {}
         }
@@ -77,6 +76,39 @@ fn load(path: &Path) -> Option<Skill> {
     })
 }
 
+/// YAML-ish field parsing that survives the multi-line descriptions the
+/// SKILL.md convention encourages: block scalars (`description: >` / `|`,
+/// with an optional chomp sign) and indented plain-scalar continuations both
+/// fold into the value, single-spaced. Descriptions render on one-line
+/// surfaces (the catalog, the `$` picker rows), so folding loses nothing.
+fn parse_frontmatter(frontmatter: &str) -> Vec<(String, String)> {
+    let mut fields: Vec<(String, String)> = Vec::new();
+    for line in frontmatter.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            let text = line.trim();
+            if let Some((_, value)) = fields.last_mut() {
+                if !text.is_empty() {
+                    if !value.is_empty() {
+                        value.push(' ');
+                    }
+                    value.push_str(text);
+                }
+            }
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"');
+        let value = match value {
+            "|" | ">" | "|-" | ">-" | "|+" | ">+" => "",
+            v => v,
+        };
+        fields.push((key.trim().to_string(), value.to_string()));
+    }
+    fields
+}
+
 fn split_frontmatter(text: &str) -> (String, String) {
     let trimmed = text.trim_start();
     if let Some(rest) = trimmed.strip_prefix("---") {
@@ -87,7 +119,11 @@ fn split_frontmatter(text: &str) -> (String, String) {
     (String::new(), text.to_string())
 }
 
-/// The catalog line for the system prompt (auto-invocable skills only).
+/// The catalog for the system prompt (auto-invocable skills only): name,
+/// description, and where the full instructions live. Only this much stays
+/// in context; the model reads a SKILL.md when its skill matches the task —
+/// and because it loads by path, the skill's own directory (references,
+/// templates, scripts riding along) is never a mystery.
 pub fn catalog(cwd: &Path) -> Option<String> {
     let auto: Vec<Skill> = list(cwd)
         .into_iter()
@@ -97,10 +133,17 @@ pub fn catalog(cwd: &Path) -> Option<String> {
         return None;
     }
     let mut out = String::from(
-        "<skills>\nAvailable skills — call the `skill` tool with the name to load one:\n",
+        "<skills>\nAvailable skills. When one matches the task, read its SKILL.md \
+with the `read` tool and follow it; files a skill references live beside its \
+SKILL.md:\n",
     );
     for s in auto {
-        out.push_str(&format!("- {}: {}\n", s.name, s.description));
+        out.push_str(&format!(
+            "- {}: {} ({})\n",
+            s.name,
+            s.description,
+            s.dir.join("SKILL.md").display()
+        ));
     }
     out.push_str("</skills>");
     Some(out)

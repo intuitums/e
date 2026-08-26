@@ -23,6 +23,11 @@ impl App {
                 "/reload",
             ),
             MenuItem::new("/resume", "resume a saved session", "/resume"),
+            MenuItem::new(
+                "/tree",
+                "rewind to an earlier point in this session and branch",
+                "/tree",
+            ),
             MenuItem::new("/new", "start a fresh session", "/new"),
             MenuItem::new("/copy", "copy the last reply", "/copy"),
             MenuItem::new("/compact", "summarize into a fresh session", "/compact"),
@@ -290,10 +295,18 @@ impl App {
                 if let Some(skill) =
                     crate::core::resources::skills::get(&item.value, &self.agent.cwd())
                 {
+                    // The directory rides along, exactly as the system-prompt
+                    // catalog carries it: a body that says "see reference.md"
+                    // strands the model without the path it lives at.
+                    let body = format!(
+                        "{}\n\n[skill directory: {} — files this skill references live there]",
+                        skill.body,
+                        skill.dir.display()
+                    );
                     let combined = if rest.is_empty() {
-                        skill.body
+                        body
                     } else {
-                        format!("{}\n\n{rest}", skill.body)
+                        format!("{body}\n\n{rest}")
                     };
                     self.prompt(combined);
                 }
@@ -305,6 +318,9 @@ impl App {
                     self.agent.model = found;
                     self.refresh_status_cache();
                 }
+            }
+            MenuKind::Tree => {
+                self.rewind_to_node(&item.value);
             }
         }
         true

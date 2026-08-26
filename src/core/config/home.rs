@@ -38,6 +38,9 @@ pub fn prompts_dir() -> PathBuf {
 pub fn themes_dir() -> PathBuf {
     home().join("themes")
 }
+pub fn keybindings_path() -> PathBuf {
+    home().join("keybindings.json")
+}
 
 /// Make sure the home directory exists before a write lands in it, seeding
 /// one bare `AGENTS.md` — the signpost for global instructions, which unlike

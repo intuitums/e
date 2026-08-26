@@ -391,6 +391,31 @@ impl Agent {
         *self.session.lock().unwrap() = session;
     }
 
+    /// The active session's file, if a log exists yet — None before the
+    /// first message is committed. `/tree` reads this file directly rather
+    /// than tracking the graph in memory.
+    pub fn session_path(&self) -> Option<PathBuf> {
+        self.session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.path().to_path_buf())
+    }
+
+    /// Rewind: point the session at an earlier node (`/tree`'s choice) and
+    /// mirror the path from root to that node into in-memory history. The
+    /// file itself is untouched — the next commit attaches after `head`, so
+    /// the abandoned tail survives as a sibling branch, not an overwrite.
+    /// Same lock order as `commit`: history before session.
+    pub fn rewind_to(&self, head: Option<String>, messages: Vec<ChatMessage>) {
+        let mut history_guard = self.history.lock().unwrap();
+        let mut session_guard = self.session.lock().unwrap();
+        if let Some(session) = session_guard.as_mut() {
+            session.set_head(head);
+        }
+        *history_guard = messages;
+    }
+
     /// Name this session: applies immediately when a log exists, otherwise
     /// when the log is created on the first message. Either way the name is
     /// idempotent — the last one wins.

@@ -99,10 +99,13 @@ fn trusted_repo_adds_its_own_and_shadows_on_name_clash() {
     let review = e::core::resources::prompts::find("review", &f.repo).unwrap();
     assert_eq!(review.content, "review repo");
 
-    // The skill tool resolves through the same merge.
-    let out = e::core::tools::run("skill", r#"{"name":"release"}"#, &f.repo);
-    assert!(!out.is_error());
-    assert_eq!(out.summary, "release");
+    // Loading by name resolves through the same merge.
+    let release = e::core::resources::skills::get("release", &f.repo).unwrap();
+    assert_eq!(release.body, "body of release");
+    assert!(
+        release.dir.starts_with(&f.repo),
+        "repo skill wins the clash"
+    );
 }
 
 #[test]
@@ -113,7 +116,42 @@ fn catalog_reflects_the_merge() {
     e::core::config::trust::set(&f.repo, true).unwrap();
 
     let catalog = e::core::agent::context::system_prompt(&f.repo);
-    assert!(catalog.contains("- only-local: described"));
+    // Progressive disclosure: the catalog names the skill, describes it, and
+    // says where the full SKILL.md lives — the model loads it with `read`.
+    assert!(catalog.contains("read its SKILL.md"));
+    let path = repo_e(&f)
+        .join("skills")
+        .join("only-local")
+        .join("SKILL.md");
+    assert!(catalog.contains(&format!("- only-local: described ({})", path.display())));
+}
+
+#[test]
+fn multi_line_frontmatter_descriptions_fold_into_the_catalog() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let f = fixtures();
+    let dir = f.home.join("skills").join("wrapped");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: wrapped\ndescription: >\n  spans two\n  source lines\n---\nthe body",
+    )
+    .unwrap();
+    let dir = f.home.join("skills").join("plain-continued");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: plain-continued\ndescription: starts here\n  and keeps going\n---\nthe body",
+    )
+    .unwrap();
+
+    let skills = e::core::resources::skills::list(&f.repo);
+    let by_name = |n: &str| skills.iter().find(|s| s.name == n).unwrap();
+    assert_eq!(by_name("wrapped").description, "spans two source lines");
+    assert_eq!(
+        by_name("plain-continued").description,
+        "starts here and keeps going"
+    );
 }
 
 /// The repo's resource root: `<repo>/.e`.

@@ -31,13 +31,19 @@ src/core/    the harness, terminal-free
                   remote.rs = the live /models sync)
   auth/           credentials (mod.rs) · login.rs (OAuth, device-code, API keys)
   config/         the ~/.e surface: home.rs (paths) · store.rs (merge-write)
-                  · settings.rs · trust.rs (per-directory trust)
+                  · settings.rs · trust.rs (per-directory trust) ·
+                  keybindings.rs (composer chord overrides)
   resources/      skills.rs · prompts.rs (/name templates) · docs.rs (the
                   embedded guides behind `e docs`)
   api/            the extension host: subprocesses over a JSONL line
                   protocol (docs/extensions.md) — tools, commands, hooks
-  tools/          read · write · edit · ls · grep · find · bash · skill
-  session.rs · output.rs · workspace.rs
+  tools/          read · write · edit · grep (optional `glob` filter) · bash
+                  (optional `background`/`handle` for long-lived processes)
+                  — the whole surface; directory listing and file-finding go
+                  through bash, and skills load through read (the catalog
+                  carries their paths)
+  session.rs · output.rs · workspace.rs — session.rs is a tree, not just a
+                  line: id/parent per message, `/tree` branches in place
 src/tui/     the frontend (short paths re-export from the groups)
   paint/          render · screen · theme · background · highlight
   content/        markdown · transcript · composer · statusline

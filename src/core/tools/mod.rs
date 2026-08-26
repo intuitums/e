@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 
 mod bash;
 mod edit;
-mod find;
 mod fs;
-mod skill;
 
 /// Terminal state of one tool execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -81,8 +79,8 @@ pub fn truncate(text: String) -> String {
 }
 
 /// Append a fixed `notice` to `body`, trimming `body` first if the two
-/// together would blow the byte cap. A cap-specific explanation (e.g. "find"
-/// or "grep" stopping early) must survive to the model — appending it before
+/// together would blow the byte cap. A cap-specific explanation (e.g. "grep"
+/// stopping early) must survive to the model — appending it before
 /// a generic `truncate()` risked the generic "[truncated: N bytes]" marker
 /// landing on top of it instead, once the hit list alone neared the cap.
 pub fn truncate_with_notice(mut body: String, notice: &str) -> String {
@@ -140,17 +138,17 @@ pub fn snippets() -> impl Iterator<Item = (&'static str, &'static str)> {
 fn target_path(args: &Value) -> String {
     sanitize_inline(args["path"].as_str().unwrap_or(""))
 }
-fn target_dir(args: &Value) -> String {
-    sanitize_inline(args["path"].as_str().unwrap_or("."))
-}
 fn target_command(args: &Value) -> String {
-    sanitize_inline(args["command"].as_str().unwrap_or(""))
+    // A background check/kill call carries no `command` — fall back to the
+    // handle so the transcript still shows what the call is about.
+    let value = args["command"]
+        .as_str()
+        .or_else(|| args["handle"].as_str())
+        .unwrap_or("");
+    sanitize_inline(value)
 }
 fn target_pattern(args: &Value) -> String {
     sanitize_inline(args["pattern"].as_str().unwrap_or(""))
-}
-fn target_name(args: &Value) -> String {
-    sanitize_inline(args["name"].as_str().unwrap_or(""))
 }
 
 /// Everything a built-in tool is, in one row: schema and runner, the
@@ -202,16 +200,6 @@ static SPECS: &[Spec] = &[
         run: edit::run,
     },
     Spec {
-        name: "ls",
-        snippet: "List the entries of a directory.",
-        category: "list",
-        running: "Listing",
-        completed: "Listed",
-        target: target_dir,
-        schema: fs::ls_schema,
-        run: fs::ls,
-    },
-    Spec {
         name: "grep",
         snippet: "Search file contents by regular expression across the workspace.",
         category: "search",
@@ -222,34 +210,14 @@ static SPECS: &[Spec] = &[
         run: fs::grep,
     },
     Spec {
-        name: "find",
-        snippet: "Find files by name with a glob pattern (`*`, `?`, `**`).",
-        category: "search",
-        running: "Finding",
-        completed: "Found",
-        target: target_pattern,
-        schema: find::schema,
-        run: find::run,
-    },
-    Spec {
         name: "bash",
-        snippet: "Execute a bash command in the workspace root. Each call is a fresh shell — cd and variables don't persist.",
+        snippet: "Execute a bash command in the workspace root. Each call is a fresh shell — cd and variables don't persist. Use it for anything without a dedicated tool: listing directories, finding files by name, git, builds, tests. Pass background: true to start something long-lived (a server, a watcher) without blocking; check or kill it later with handle.",
         category: "command",
         running: "Running",
         completed: "Ran",
         target: target_command,
         schema: bash::schema,
         run: bash::run,
-    },
-    Spec {
-        name: "skill",
-        snippet: "Load a skill's instructions by name when a listed skill fits the task.",
-        category: "skill",
-        running: "Loading",
-        completed: "Loaded",
-        target: target_name,
-        schema: skill::schema,
-        run: skill::run,
     },
 ];
 
@@ -534,8 +502,8 @@ fn check_fresh(path: &Path, tool: &str, shown: &str) -> Result<(), ToolOutput> {
 /// and the build/vendor directories are skipped, only regular files are
 /// visited (a FIFO in the tree would hang the walk). `visit` returns false
 /// to stop early (a result cap); the walk then unwinds immediately.
-/// The one traversal for every file-scanning tool: grep and find diverging
-/// on skip rules would make "no matches" mean different things per tool.
+/// The one traversal for any file-scanning tool — a second walker with its
+/// own skip rules would make "no matches" mean different things per tool.
 fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path) -> bool) -> bool {
     const SKIP: &[&str] = &[".git", "target", "node_modules", "dist", ".cache"];
     let entries = match std::fs::read_dir(root) {

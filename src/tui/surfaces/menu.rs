@@ -49,6 +49,8 @@ pub enum MenuKind {
     Skills,
     /// The scoped-models multi-select: Space toggles, Enter closes.
     Scoped,
+    /// /tree: pick an earlier point in this session to rewind to.
+    Tree,
 }
 
 pub struct Menu {

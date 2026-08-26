@@ -25,6 +25,10 @@ pub const TOPICS: &[(&str, &str)] = &[
         "SKILL.md directories and how the model pages them in",
     ),
     (
+        "keybindings",
+        "keybindings.json: override the composer's editing keys",
+    ),
+    (
         "theme-dark",
         "the built-in dark theme, verbatim (a starting point)",
     ),
@@ -38,6 +42,7 @@ pub fn body(topic: &str) -> Option<&'static str> {
         "models" => include_str!("../../../docs/models.md"),
         "prompt-templates" => include_str!("../../../docs/prompt-templates.md"),
         "skills" => include_str!("../../../docs/skills.md"),
+        "keybindings" => include_str!("../../../docs/keybindings.md"),
         "theme-dark" => crate::tui::theme::DARK_JSON,
         "theme-light" => crate::tui::theme::LIGHT_JSON,
         _ => return None,

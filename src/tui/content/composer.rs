@@ -421,6 +421,7 @@ struct VisualRow {
     end: usize,
 }
 
+#[derive(Clone, Copy)]
 pub enum Key {
     Char(char),
     Enter,
