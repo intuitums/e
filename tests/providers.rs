@@ -240,6 +240,10 @@ fn assert_wire(name: &str, sent: &str) {
             );
             assert!(!sent.contains("chatgpt-account-id"));
             assert!(
+                !sent.contains("prompt_cache_key"),
+                "the codex-only cache key must not ride a plain-key request"
+            );
+            assert!(
                 sent.contains("authorization: Bearer sk-test")
                     || sent.contains("Authorization: Bearer sk-test")
             );
@@ -396,6 +400,50 @@ async fn each_dialect_streams_text_tools_and_usage() {
         assert_eq!(sent.len(), 1, "{}", case.name);
         assert_wire(case.name, &sent[0]);
     }
+}
+
+// The plain-key mount must never see `prompt_cache_key` (pinned in
+// `assert_wire` above); the codex OAuth mount must always send it — pin
+// both ends so a refactor can't silently drop it from the OAuth branch.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn responses_codex_oauth_mount_sends_prompt_cache_key() {
+    let _lock = env_lock();
+    let case = dialects()
+        .into_iter()
+        .find(|c| c.name == "responses")
+        .unwrap();
+    let (port, server) = serve_sse(&[case.sse]);
+    let home = Home::new("responses-oauth");
+    home.auth(
+        r#"{"openai":{"access":"acc-test","refresh":"ref-test","expires":9999999999999,"account_id":"acct-1"}}"#,
+    );
+
+    let mut model = test_model(case.provider, port, case.api);
+    model.thinking = case.thinking;
+    let request = Request {
+        model,
+        system: "sys".into(),
+        messages: history_messages(&case.history),
+        effort: case.effort.map(str::to_string),
+        tools: vec![read_tool()],
+    };
+
+    collect_stream(request).await;
+
+    let sent = server.join().unwrap();
+    assert_eq!(sent.len(), 1);
+    let request_line = sent[0].lines().next().unwrap();
+    assert!(
+        request_line.starts_with("POST /codex/responses "),
+        "wrong mount: {request_line}"
+    );
+    assert!(sent[0].contains("chatgpt-account-id: acct-1"));
+    let body = request_json(&sent[0]);
+    assert!(
+        body["prompt_cache_key"].is_string(),
+        "the codex OAuth mount must send the cache key: {body}"
+    );
 }
 
 #[allow(clippy::await_holding_lock)]

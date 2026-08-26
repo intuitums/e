@@ -28,7 +28,6 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
             (access, Some(account))
         }
     };
-    let session_id = uuid::Uuid::new_v4().to_string();
 
     // Responses-API items: messages, function calls, and their outputs.
     let mut input: Vec<serde_json::Value> = Vec::new();
@@ -79,7 +78,6 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
         "input": input,
         "text": {"verbosity": "low"},
         "include": ["reasoning.encrypted_content"],
-        "prompt_cache_key": session_id,
         "tool_choice": "auto",
         "parallel_tool_calls": true,
     });
@@ -107,13 +105,21 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
     }
 
     let mut builder = match &account {
-        Some(account) => http()
-            .post(format!("{}/codex/responses", request.model.base_url))
-            .header("chatgpt-account-id", account)
-            .header("originator", "e")
-            .header("OpenAI-Beta", "responses=experimental")
-            .header("session-id", &session_id)
-            .header("x-client-request-id", &session_id),
+        // `prompt_cache_key` and the session headers are ChatGPT-backend
+        // (codex) idioms: plain-key providers on `{base}/responses` neither
+        // need the account-dependent body field nor accept an unknown
+        // parameter from a strict upstream.
+        Some(account) => {
+            let session_id = uuid::Uuid::new_v4().to_string();
+            body["prompt_cache_key"] = json!(session_id);
+            http()
+                .post(format!("{}/codex/responses", request.model.base_url))
+                .header("chatgpt-account-id", account)
+                .header("originator", "e")
+                .header("OpenAI-Beta", "responses=experimental")
+                .header("session-id", &session_id)
+                .header("x-client-request-id", &session_id)
+        }
         None => http().post(format!("{}/responses", request.model.base_url)),
     };
     builder = builder
