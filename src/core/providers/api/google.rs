@@ -15,14 +15,11 @@ use crate::core::providers::{
     StreamEnd, ToolCall,
 };
 
-/// Gemini function calls carry no wire ids; e synthesizes session-unique
-/// ones (`{name}-{n}` off a process-wide counter) so a multi-step tool loop
-/// never writes duplicate ids into shared history — another dialect taking
-/// over the session replays them verbatim and rejects duplicates.
+/// Older Gemini responses carried no wire id. A UUID fallback stays unique
+/// across resumed processes and later model switches; Gemini 3's own id wins
+/// whenever present and is returned verbatim with the function result.
 fn synthesize_call_id(name: &str) -> String {
-    static CALL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let n = CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{name}-{n}")
+    format!("{name}-{}", uuid::Uuid::new_v4())
 }
 
 pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEnd, ProviderError> {
@@ -49,7 +46,9 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                     call_names.insert(call.id.clone(), call.name.clone());
                     let args: serde_json::Value =
                         serde_json::from_str(&call.arguments).unwrap_or(json!({}));
-                    let mut part = json!({"functionCall": {"name": call.name, "args": args}});
+                    let mut part = json!({"functionCall": {
+                        "id": call.id, "name": call.name, "args": args
+                    }});
                     if let Some(signature) = &call.signature {
                         part["thoughtSignature"] = json!(signature);
                     }
@@ -67,6 +66,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                     .cloned()
                     .unwrap_or_default();
                 let part = json!({"functionResponse": {
+                    "id": m.tool_call_id.clone().unwrap_or_default(),
                     "name": name,
                     "response": {"output": m.content},
                 }});
@@ -165,7 +165,11 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                         .unwrap_or("")
                         .to_string();
                     let call = ToolCall {
-                        id: synthesize_call_id(&name),
+                        id: part["functionCall"]["id"]
+                            .as_str()
+                            .filter(|id| !id.is_empty())
+                            .map(String::from)
+                            .unwrap_or_else(|| synthesize_call_id(&name)),
                         name,
                         arguments: part["functionCall"]["args"].to_string(),
                         signature: part["thoughtSignature"].as_str().map(String::from),

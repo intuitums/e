@@ -153,6 +153,34 @@ fn long_output_keeps_the_tail_where_the_verdict_lives() {
 }
 
 #[test]
+fn retained_tail_never_starts_inside_a_utf8_code_point() {
+    // 32,769 bytes makes the raw 32 KiB suffix start on the continuation
+    // byte of the opening é. The retained text should drop that orphan byte,
+    // not manufacture U+FFFD at the truncation boundary.
+    let out = run_cmd(
+        "printf '\\303\\251'; head -c 32767 /dev/zero | tr '\\000' x",
+        10,
+    );
+    assert!(out.content.starts_with("… [truncated"));
+    assert!(!out.content.contains('\u{FFFD}'));
+    assert!(out.content.ends_with("xxxxxxxx"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_background_child_holding_the_pipe_does_not_hold_the_tool_open() {
+    let started = Instant::now();
+    let out = run_cmd("sleep 30 & echo hi", 10);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "background pipe owner delayed return for {:?}",
+        started.elapsed()
+    );
+    assert_eq!(out.outcome, ToolOutcome::Completed);
+    assert_eq!(out.content, "hi");
+}
+
+#[test]
 fn run_shell_reaches_the_tool() {
     let out = tools::run_shell("printf typed-entry-ok", std::path::Path::new("."));
     assert!(!out.is_error());

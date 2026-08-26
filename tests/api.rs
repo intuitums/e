@@ -240,6 +240,75 @@ exit 0
     host.shutdown().await;
 }
 
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_full_notice_channel_does_not_block_responses() {
+    const NOISY: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"id":%s,"result":{"name":"noisy","tools":[{"name":"noisy_tool","parameters":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tool_call"'*)
+      i=0
+      while [ "$i" -lt 10 ]; do
+        printf '{"method":"notify","params":{"message":"noise"}}\n'
+        i=$((i + 1))
+      done
+      printf '{"id":%s,"result":{"content":"answered"}}\n' "$id" ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+done
+"#;
+    let _lock = env_lock();
+    let _home = tempdir::TempHome::with_extension("noisy.sh", NOISY);
+    // Leave the single slot undrained. Only the first notification fits.
+    let (notices, _rx) = tokio::sync::mpsc::channel(1);
+    let host = ExtensionHost::start(notices).await;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        host.call_tool("noisy_tool", "{}"),
+    )
+    .await
+    .expect("notifications must not stall response routing");
+    assert!(!result.is_error);
+    assert_eq!(result.content, "answered");
+    host.shutdown().await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn oversized_extension_lines_fail_pending_requests_without_growing_forever() {
+    const OVERSIZED: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"id":%s,"result":{"name":"oversized","tools":[{"name":"oversized_tool","parameters":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tool_call"'*)
+      head -c 1048577 /dev/zero | tr '\000' x
+      sleep 10 ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+done
+"#;
+    let _lock = env_lock();
+    let _home = tempdir::TempHome::with_extension("oversized.sh", OVERSIZED);
+    let (notices, _rx) = tokio::sync::mpsc::channel(4);
+    let host = ExtensionHost::start(notices).await;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        host.call_tool("oversized_tool", "{}"),
+    )
+    .await
+    .expect("an oversized line should retire the extension promptly");
+    assert!(result.is_error);
+    assert!(result.content.contains("extension exited"));
+    host.shutdown().await;
+}
+
 /// The initialize handshake carries namespaced extension config from
 /// settings.json (`extensions.<name>`), so extensions never squat on a
 /// top-level settings key. The fake answers with its manifest only when it
@@ -519,11 +588,10 @@ rl.on("line", (line) => {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn dead_extension_fails_fast_instead_of_stalling() {
-    // A valid script with no stdin reader: node drains its event loop and
-    // exits immediately, before e's initialize can be answered.
-    const DIES_INSTANTLY: &str = r#"#!/usr/bin/env node
-// no readline, no handlers — the process exits at once
-"#;
+    // A valid script with no stdin reader exits before initialize can be
+    // answered. Use the platform shell: cold-starting Node under a loaded CI
+    // runner can consume most of the timeout this test is trying to measure.
+    const DIES_INSTANTLY: &str = "#!/bin/sh\nexit 0\n";
     let _lock = env_lock();
     let _home = tempdir::TempHome::with_extension("dies.sh", DIES_INSTANTLY);
     let (notices, _rx) = tokio::sync::mpsc::channel(16);

@@ -90,6 +90,46 @@ async fn agent_runs_a_tool_then_replies() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
+async fn large_tool_result_is_counted_before_the_next_request() {
+    let _lock = env_lock();
+    let first = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",",
+        "\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"large.txt\\\"}\"}}]}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":25000,\"completion_tokens\":10}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, server) = serve_sse(&[first]);
+    let home = Home::new("tool-context-guard");
+    home.auth(r#"{"mock":{"key":"k"}}"#);
+    let ws = std::env::temp_dir().join(format!("e-ws-context-{port}"));
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("large.txt"), "wide result line\n".repeat(8_000)).unwrap();
+    std::env::set_current_dir(&ws).unwrap();
+    let mut model = test_model("mock", port, Api::Completions);
+    model.context_window = 32_000;
+    let (mut agent, mut rx) = Agent::new(model);
+    agent.submit("read it".into(), "sys".into());
+
+    let mut guarded = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            SessionEvent::Warning(message) if message.contains("context nearly full") => {
+                guarded = true;
+            }
+            SessionEvent::TurnEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(
+        guarded,
+        "large result did not trip the mid-turn context guard"
+    );
+    assert_eq!(server.join().unwrap().len(), 1, "a second request escaped");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
 async fn tool_batches_run_concurrently_and_commit_in_source_order() {
     let _lock = env_lock();
     // First request → two calls: a slow command and a fast read; second → a

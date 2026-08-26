@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{env_lock, serve_sse, test_model, Home};
+use common::{env_lock, request_json, serve_sse, test_model, Home};
 use e::core::agent::Agent;
 use e::core::providers::catalog::Api;
 use e::core::providers::{ChatMessage, ToolCall};
@@ -66,7 +66,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
 
     // The seed lands as the first message of a fresh session file.
     let (agent, _rx) = Agent::new(model);
-    agent.load_compacted(&summary, history[3..].to_vec());
+    assert!(agent.load_compacted(&summary, history[3..].to_vec()));
     let seeded = agent.history_snapshot();
     assert_eq!(seeded.len(), 2, "seed plus the kept tail");
     assert!(seeded[0].content.contains("Goal: fix the parser."));
@@ -200,7 +200,7 @@ fn failed_fresh_log_keeps_the_old_session_attached() {
     // When the compaction seed's fresh log cannot be created (read-only
     // sessions dir), the old log must stay attached: later turns append to
     // the complete pre-compaction file instead of a new file holding only an
-    // unanchored tail, and memory still moves to the compacted state.
+    // unanchored tail; memory stays on that same complete history.
     use std::os::unix::fs::PermissionsExt;
     let _env = env_lock();
     let home = Home::new("loadcompact");
@@ -216,6 +216,7 @@ fn failed_fresh_log_keeps_the_old_session_attached() {
     let old_path = old.path().to_path_buf();
     old.append(&ChatMessage::user("original work")).unwrap();
     let (agent, _rx) = Agent::new(model);
+    agent.load_history(vec![ChatMessage::user("original work")]);
     agent.set_session(Some(old));
 
     // Make the workspace's session directory unwritable so the fresh log's
@@ -237,13 +238,12 @@ fn failed_fresh_log_keeps_the_old_session_attached() {
         return;
     }
 
-    agent.load_compacted("Goal: continue.", vec![ChatMessage::user("recent turn")]);
+    assert!(!agent.load_compacted("Goal: continue.", vec![ChatMessage::user("recent turn")]));
 
-    // Memory moved to the compacted state regardless.
+    // A compaction that cannot be persisted did not happen in memory either.
     let h = agent.history_snapshot();
-    assert_eq!(h.len(), 2);
-    assert!(h[0].content.contains("Goal: continue."));
-    assert_eq!(h[1].content, "recent turn");
+    assert_eq!(h.len(), 1);
+    assert_eq!(h[0].content, "original work");
 
     // No second session log appeared.
     let logs: Vec<_> = walk(&sessions)
@@ -263,6 +263,47 @@ fn failed_fresh_log_keeps_the_old_session_attached() {
 
     std::fs::set_permissions(slug_dir, before).unwrap();
     let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn one_huge_tool_call_cannot_bypass_the_summary_budget() {
+    let _lock = env_lock();
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"summary\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, server) = serve_sse(&[body]);
+    let home = Home::new("compact-call-budget");
+    home.auth(r#"{"mock":{"key":"k"}}"#);
+    let mut model = test_model("mock", port, Api::Completions);
+    model.context_window = 4_000;
+    let history = vec![ChatMessage::assistant(
+        "",
+        vec![ToolCall {
+            id: "huge".into(),
+            name: "write".into(),
+            arguments: format!(
+                r#"{{"path":"huge.txt","content":"{}"}}"#,
+                "x".repeat(200_000)
+            ),
+            signature: None,
+        }],
+    )];
+
+    let summary = e::core::agent::compact::summarize(model, &history)
+        .await
+        .unwrap();
+    assert_eq!(summary, "summary");
+    let sent = server.join().unwrap();
+    let request = request_json(&sent[0]);
+    let flattened = request["messages"][1]["content"].as_str().unwrap();
+    assert!(flattened.contains("arguments trimmed"));
+    assert!(
+        flattened.len() < 12_000,
+        "summary request was {} bytes",
+        flattened.len()
+    );
 }
 
 /// Every file under `dir`, any depth — small trees only.

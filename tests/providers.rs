@@ -9,7 +9,10 @@ mod common;
 use common::{clear_env_keys, env_lock, read_tool, request_json, serve_sse, test_model, Home};
 
 use e::core::providers::catalog::{self, Api, Model, Thinking};
-use e::core::providers::{self, ChatMessage, Event, FinishReason, Request, SseSplitter, ToolCall};
+use e::core::providers::{
+    self, ChatMessage, Event, FailureCause, FinishReason, Request, SseSplitter, SseStream,
+    ToolCall, MAX_SSE_EVENT_BYTES,
+};
 
 // ---------------------------------------------------------------------------
 // Shared framing
@@ -35,6 +38,39 @@ fn sse_splitter_preserves_utf8_across_byte_chunks() {
         splitter.feed_bytes(&bytes[split..]),
         vec![r#"{"text":"é"}"#]
     );
+}
+
+#[tokio::test]
+async fn unterminated_sse_event_is_bounded() {
+    let chunk = vec![b'x'; MAX_SSE_EVENT_BYTES + 1];
+    let stream = futures::stream::iter(vec![Ok::<_, std::io::Error>(chunk)]);
+    let mut sse = SseStream::new(stream);
+    let err = sse.next().await.unwrap_err();
+    assert_eq!(err.cause, FailureCause::Rejected);
+    assert!(err.message.contains("SSE event larger"));
+}
+
+#[tokio::test]
+async fn a_completed_oversized_sse_event_is_rejected_too() {
+    let mut chunk = b"data: ".to_vec();
+    chunk.extend(std::iter::repeat_n(b'x', MAX_SSE_EVENT_BYTES + 1));
+    chunk.extend_from_slice(b"\n\n");
+    let stream = futures::stream::iter(vec![Ok::<_, std::io::Error>(chunk)]);
+    let mut sse = SseStream::new(stream);
+    let err = sse.next().await.unwrap_err();
+    assert_eq!(err.cause, FailureCause::Rejected);
+}
+
+#[tokio::test]
+async fn periodic_bytes_do_not_reset_the_complete_event_deadline() {
+    let stream = futures::stream::unfold(0usize, |n| async move {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        Some((Ok::<_, std::io::Error>(vec![b'x']), n + 1))
+    });
+    let mut sse =
+        SseStream::with_event_timeout(Box::pin(stream), std::time::Duration::from_millis(25));
+    let err = sse.next().await.unwrap_err();
+    assert_eq!(err.cause, FailureCause::Stalled);
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +214,7 @@ fn dialects() -> Vec<DialectCase> {
             sse: concat!(
                 "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"planning\",\"thought\":true}]}}]}\n\n",
                 "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello \"}]}}]}\n\n",
-                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"world\"},{\"functionCall\":{\"name\":\"read\",\"args\":{\"path\":\"a.txt\"}},\"thoughtSignature\":\"sig-1\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":90,\"candidatesTokenCount\":20,\"thoughtsTokenCount\":5,\"cachedContentTokenCount\":30}}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"world\"},{\"functionCall\":{\"id\":\"g-call-1\",\"name\":\"read\",\"args\":{\"path\":\"a.txt\"}},\"thoughtSignature\":\"sig-1\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":90,\"candidatesTokenCount\":20,\"thoughtsTokenCount\":5,\"cachedContentTokenCount\":30}}\n\n",
             ),
             text: "hello world",
             reasoning: "planning",
@@ -186,7 +222,7 @@ fn dialects() -> Vec<DialectCase> {
             usage: Some((90, 25, 30)),
             tool: ToolExpect::Synthesized {
                 name: "read",
-                id_prefix: "read-",
+                id_prefix: "g-call-1",
                 args_json: r#"{"path":"a.txt"}"#,
                 signature: Some("sig-1"),
             },
@@ -271,8 +307,13 @@ fn assert_wire(name: &str, sent: &str) {
             let contents = body["contents"].as_array().unwrap();
             assert_eq!(contents[1]["role"], "model");
             assert_eq!(contents[1]["parts"][0]["functionCall"]["name"], "read");
+            assert_eq!(contents[1]["parts"][0]["functionCall"]["id"], "call_abc123");
             assert_eq!(contents[1]["parts"][0]["thoughtSignature"], "sig-0");
             assert_eq!(contents[2]["parts"][0]["functionResponse"]["name"], "read");
+            assert_eq!(
+                contents[2]["parts"][0]["functionResponse"]["id"],
+                "call_abc123"
+            );
         }
         other => panic!("unknown dialect {other}"),
     }
@@ -413,6 +454,34 @@ async fn each_dialect_streams_text_tools_and_usage() {
         assert_eq!(sent.len(), 1, "{}", case.name);
         assert_wire(case.name, &sent[0]);
     }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn completions_retries_without_rejected_stream_options() {
+    let _lock = env_lock();
+    let rejected = r#"{"error":{"message":"unknown field stream_options"}}"#;
+    let first = format!(
+        "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{rejected}",
+        rejected.len()
+    );
+    let second = common::sse_response("data: [DONE]\n\n");
+    let (port, server) = common::serve_raw(vec![first, second]);
+    let home = Home::new("strict-completions");
+    home.auth(r#"{"mock":{"key":"k"}}"#);
+    let request = Request {
+        model: test_model("mock", port, Api::Completions),
+        system: "sys".into(),
+        messages: vec![ChatMessage::user("hello")],
+        effort: None,
+        tools: Vec::new(),
+    };
+
+    collect_stream(request).await;
+    let sent = server.join().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert!(request_json(&sent[0]).get("stream_options").is_some());
+    assert!(request_json(&sent[1]).get("stream_options").is_none());
 }
 
 // The plain-key mount must never see `prompt_cache_key` (pinned in

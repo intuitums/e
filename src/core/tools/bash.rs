@@ -6,11 +6,14 @@
 
 use serde_json::{json, Value};
 #[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{schema_object, OutputStream, ToolOutcome, ToolOutput};
@@ -31,10 +34,12 @@ pub fn schema() -> Value {
 fn kill_group(pid: u32) {
     #[cfg(unix)]
     unsafe {
-        if libc::kill(-(pid as i32), libc::SIGKILL) == 0 {
-            return;
-        }
+        // The child creates this process group in `pre_exec`. ESRCH simply
+        // means every member has already exited; falling back to the positive
+        // pid after wait risks signaling a newly reused pid.
+        let _ = libc::kill(-(pid as i32), libc::SIGKILL);
     }
+    #[cfg(not(unix))]
     if let Ok(mut child) = Command::new("kill").arg("-9").arg(pid.to_string()).spawn() {
         let _ = child.wait();
     }
@@ -82,12 +87,23 @@ where
     };
 
     let (tx, rx) = mpsc::channel::<(OutputStream, Vec<u8>)>();
+    let reader_stop = Arc::new(AtomicBool::new(false));
     let mut readers = Vec::new();
     if let Some(stdout) = child.stdout.take() {
-        readers.push(spawn_reader(stdout, OutputStream::Stdout, tx.clone()));
+        readers.push(spawn_reader(
+            stdout,
+            OutputStream::Stdout,
+            tx.clone(),
+            reader_stop.clone(),
+        ));
     }
     if let Some(stderr) = child.stderr.take() {
-        readers.push(spawn_reader(stderr, OutputStream::Stderr, tx.clone()));
+        readers.push(spawn_reader(
+            stderr,
+            OutputStream::Stderr,
+            tx.clone(),
+            reader_stop.clone(),
+        ));
     }
     drop(tx);
 
@@ -128,8 +144,25 @@ where
         }
     }
 
+    // A shell can exit while a background descendant still owns its pipe.
+    // Background processes are outside this tool's contract, so close the
+    // group on natural exit too. Give readers a brief chance to observe EOF,
+    // then ask nonblocking readers to stop; never join a thread that is still
+    // stuck behind a setsid'd descendant which escaped the group.
+    kill_group(child.id());
+    let drain_deadline = Instant::now() + Duration::from_millis(100);
+    while readers.iter().any(|reader| !reader.is_finished()) && Instant::now() < drain_deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    reader_stop.store(true, Ordering::SeqCst);
+    let stop_deadline = Instant::now() + Duration::from_millis(100);
+    while readers.iter().any(|reader| !reader.is_finished()) && Instant::now() < stop_deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     for reader in readers {
-        let _ = reader.join();
+        if reader.is_finished() {
+            let _ = reader.join();
+        }
     }
     while let Ok((stream, bytes)) = rx.try_recv() {
         retain_and_publish(
@@ -200,10 +233,44 @@ where
 }
 
 /// Drain one process pipe and tag every chunk before joining the shared queue.
+#[cfg(unix)]
 fn spawn_reader<R>(
+    pipe: R,
+    stream: OutputStream,
+    tx: mpsc::Sender<(OutputStream, Vec<u8>)>,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()>
+where
+    R: std::io::Read + AsRawFd + Send + 'static,
+{
+    unsafe {
+        let fd = pipe.as_raw_fd();
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+    spawn_reader_loop(pipe, stream, tx, stop)
+}
+
+#[cfg(not(unix))]
+fn spawn_reader<R>(
+    pipe: R,
+    stream: OutputStream,
+    tx: mpsc::Sender<(OutputStream, Vec<u8>)>,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()>
+where
+    R: std::io::Read + Send + 'static,
+{
+    spawn_reader_loop(pipe, stream, tx, stop)
+}
+
+fn spawn_reader_loop<R>(
     mut pipe: R,
     stream: OutputStream,
     tx: mpsc::Sender<(OutputStream, Vec<u8>)>,
+    stop: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()>
 where
     R: std::io::Read + Send + 'static,
@@ -212,12 +279,23 @@ where
         let mut buffer = [0u8; 4096];
         loop {
             match pipe.read(&mut buffer) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
                 Ok(count) => {
                     if tx.send((stream, buffer[..count].to_vec())).is_err() {
                         break;
                     }
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(_) => break,
+            }
+            if stop.load(Ordering::SeqCst) {
+                break;
             }
         }
     })
@@ -253,6 +331,14 @@ fn retain_and_publish<F>(
     if retained.len() > RETAIN_LIMIT {
         let excess = retained.len() - RETAIN_LIMIT;
         retained.drain(..excess);
+        // The raw byte cut may land inside a UTF-8 code point. Discard only
+        // the orphaned continuation prefix so the retained tail starts at a
+        // real boundary and lossy decoding doesn't invent a leading U+FFFD.
+        let orphaned = retained
+            .iter()
+            .take_while(|byte| (**byte & 0b1100_0000) == 0b1000_0000)
+            .count();
+        retained.drain(..orphaned);
     }
     carry.extend_from_slice(bytes);
     let text = drain_complete_utf8(carry);

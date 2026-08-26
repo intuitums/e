@@ -530,8 +530,8 @@ impl App {
         // Seed the context gauge from the restored history so the statusline
         // and the auto-compact check don't see an empty context until the
         // first real usage report lands.
-        let seeded: usize = messages.iter().map(|m| m.content.chars().count()).sum();
-        self.context_tokens = (seeded / 4) as u64;
+        self.context_tokens =
+            crate::core::agent::compact::estimate_request_tokens(&system_prompt(), &messages);
         self.agent.load_history(messages);
         self.agent.set_session(Some(session));
         // Identity travels together: the resumed log's persisted name
@@ -1676,19 +1676,18 @@ pub async fn run(
                         // Ignore a result that outlived its session (/new won).
                         if app.compacting {
                             app.compacting = false;
-                            app.agent.load_compacted(&summary, kept);
-                            let seeded: usize = app
-                                .agent
-                                .history_snapshot()
-                                .iter()
-                                .map(|m| m.content.len())
-                                .sum();
-                            app.context_tokens = (seeded / 4) as u64;
-                            app.shell_block = None;
-                            app.transcript.clear();
-                            app.transcript.push(Block::new(Kind::Banner, crate::VERSION));
-                            app.transcript.push(Block::new(Kind::Notice, "compacted — recent messages kept, the full session is under /resume"));
-                            app.transcript.push(Block::new(Kind::Summary, summary));
+                            if app.agent.load_compacted(&summary, kept) {
+                                app.context_tokens =
+                                    crate::core::agent::compact::estimate_request_tokens(
+                                        &system_prompt(),
+                                        &app.agent.history_snapshot(),
+                                    );
+                                app.shell_block = None;
+                                app.transcript.clear();
+                                app.transcript.push(Block::new(Kind::Banner, crate::VERSION));
+                                app.transcript.push(Block::new(Kind::Notice, "compacted — recent messages kept, the full session is under /resume"));
+                                app.transcript.push(Block::new(Kind::Summary, summary));
+                            }
                             for text in std::mem::take(&mut app.held_prompts) {
                                 app.prompt(text);
                             }

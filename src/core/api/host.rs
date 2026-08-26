@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::protocol::{
@@ -28,6 +28,7 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(5);
 const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_EXTENSION_LINE_BYTES: usize = 1024 * 1024;
 
 /// Requests awaiting a response, keyed by wire id.
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
@@ -643,10 +644,18 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "extension".into());
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if !line.trim().is_empty() {
-                    let _ = notices.send(format!("extension {source}: {line}")).await;
+            let mut reader = BufReader::new(stderr);
+            loop {
+                match read_bounded_line(&mut reader).await {
+                    Ok(Some(line)) if !line.trim().is_empty() => {
+                        let _ = notices.try_send(format!("extension {source}: {line}"));
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(error) => {
+                        let _ = notices.try_send(format!("extension {source}: {error}"));
+                        break;
+                    }
                 }
             }
         });
@@ -684,8 +693,8 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
     let pending_reader = pending.clone();
     let alive_reader = alive.clone();
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut reader = BufReader::new(stdout);
+        while let Ok(Some(line)) = read_bounded_line(&mut reader).await {
             match protocol::parse_incoming(&line) {
                 Some(Incoming::Response { id, result }) => {
                     if let Some(tx) = pending_reader.lock().unwrap().remove(&id) {
@@ -693,7 +702,9 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
                     }
                 }
                 Some(Incoming::Notify { message }) => {
-                    let _ = notices.send(message).await;
+                    // Notices are best-effort UI output. A full transcript
+                    // channel must never hold up response dispatch.
+                    let _ = notices.try_send(message);
                 }
                 None => {}
             }
@@ -734,4 +745,53 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
         return Err("manifest has no name".into());
     }
     Ok(Extension { manifest, ..ext })
+}
+
+/// Read one protocol line without allowing a misbehaving extension to grow
+/// memory indefinitely. The newline is consumed but not returned.
+async fn read_bounded_line<R>(reader: &mut R) -> std::io::Result<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+
+        if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
+            if line.len().saturating_add(newline) > MAX_EXTENSION_LINE_BYTES {
+                reader.consume(newline + 1);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "protocol line exceeded 1 MiB",
+                ));
+            }
+            line.extend_from_slice(&available[..newline]);
+            reader.consume(newline + 1);
+            break;
+        }
+
+        let count = available.len();
+        if line.len().saturating_add(count) > MAX_EXTENSION_LINE_BYTES {
+            reader.consume(count);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "protocol line exceeded 1 MiB",
+            ));
+        }
+        line.extend_from_slice(available);
+        reader.consume(count);
+    }
+
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }

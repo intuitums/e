@@ -60,6 +60,8 @@ pub struct Turn {
     /// Latest request's full context, from real usage (a chars/4 seed until
     /// the first report lands).
     pub input: u64,
+    /// True until a provider Usage frame replaces the chars/4 seed.
+    pub input_estimated: bool,
     /// Output tokens of completed steps, from real usage.
     pub output: u64,
     /// chars/4 estimate of the current step's streamed text + reasoning.
@@ -85,6 +87,7 @@ impl Turn {
     pub fn new() -> Self {
         Turn {
             input: 0,
+            input_estimated: false,
             output: 0,
             estimated_output: 0,
             streamed_chars: 0,
@@ -114,10 +117,16 @@ impl Turn {
     /// estimate of tokens already counted for real.
     pub fn note_usage(&mut self, input: u64, output: u64) {
         self.input = input;
+        self.input_estimated = false;
         self.output = self.output.saturating_add(output);
         self.streamed_chars = 0;
         self.assembly_bytes = 0;
         self.estimated_output = 0;
+    }
+
+    pub fn seed_input(&mut self, input: u64) {
+        self.input = input;
+        self.input_estimated = true;
     }
 
     fn refresh_estimate(&mut self) {
@@ -129,8 +138,9 @@ impl Turn {
         if self.input == 0 && output == 0 {
             String::new()
         } else {
+            let estimate = if self.input_estimated { "~" } else { "" };
             format!(
-                "(↑{} ↓{})",
+                "(↑{estimate}{} ↓{})",
                 format_tokens(self.input),
                 format_tokens(output)
             )
@@ -309,6 +319,15 @@ mod tests {
         // The next step's streaming adds on top of the real total.
         turn.note_text("abcd");
         assert_eq!(turn.tokens(), "(↑9k ↓801)");
+    }
+
+    #[test]
+    fn seeded_input_is_visibly_an_estimate() {
+        let mut turn = Turn::new();
+        turn.seed_input(5_208_000);
+        assert_eq!(turn.tokens(), "(↑~5208k ↓0)");
+        turn.note_usage(10_000, 2);
+        assert_eq!(turn.tokens(), "(↑10k ↓2)");
     }
 
     #[test]

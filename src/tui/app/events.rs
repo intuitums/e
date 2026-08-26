@@ -23,14 +23,11 @@ impl App {
                 // Seed the token counters from request size so the activity
                 // row shows ↑ from the first second, like the reference.
                 if let Some(s) = &mut self.active {
-                    let chars: usize = system_prompt().chars().count()
-                        + self
-                            .agent
-                            .history_snapshot()
-                            .iter()
-                            .map(|m| m.content.chars().count())
-                            .sum::<usize>();
-                    s.turn.input = (chars / 4) as u64;
+                    let estimate = crate::core::agent::compact::estimate_request_tokens(
+                        &system_prompt(),
+                        &self.agent.history_snapshot(),
+                    );
+                    s.turn.seed_input(estimate);
                 }
             }
             SessionEvent::Steered(text) => {
@@ -297,8 +294,9 @@ impl App {
                     let tokens = if s.turn.input == 0 && s.turn.output == 0 {
                         String::new()
                     } else {
+                        let estimate = if s.turn.input_estimated { "~" } else { "" };
                         format!(
-                            " (↑{} ↓{})",
+                            " (↑{estimate}{} ↓{})",
                             format_tokens(s.turn.input),
                             format_tokens(s.turn.output)
                         )

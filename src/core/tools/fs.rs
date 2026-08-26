@@ -40,14 +40,31 @@ pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
         return err("read: missing path".into());
     };
     let full = resolve(cwd, path);
+    // Reads and mutations share the same stable path lock. Record the stamp
+    // paired with the bytes we actually return, not a later independent stat.
+    let _guard = super::fs_write_lock(&full);
     if let Err(output) = super::require_regular_file(&full, "read", path) {
         return output;
     }
-    let text = match std::fs::read_to_string(&full) {
-        Ok(t) => t,
-        Err(e) => return err(format!("read {path}: {e}")),
+    let mut stable = None;
+    for _ in 0..2 {
+        let before = super::file_stamp(&full);
+        let text = match std::fs::read_to_string(&full) {
+            Ok(t) => t,
+            Err(e) => return err(format!("read {path}: {e}")),
+        };
+        let after = super::file_stamp(&full);
+        if before.is_some() && before == after {
+            stable = Some((text, after.unwrap()));
+            break;
+        }
+    }
+    let Some((text, stamp)) = stable else {
+        return err(format!(
+            "read {path}: the file changed while it was being read"
+        ));
     };
-    super::note_seen(&full);
+    super::note_seen_stamp(&full, stamp);
     let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
     let limit = args["limit"].as_u64().map(|n| n as usize);
     let lines: Vec<&str> = text.lines().collect();
@@ -86,8 +103,8 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
     if let Err(output) = super::require_regular_file(&full, "write", path) {
         return output;
     }
-    // Same per-path lock as edit: a concurrent edit's read-modify-write
-    // must not interleave with this overwrite.
+    // Same per-path lock as edit: a concurrent mutation through any spelling
+    // of this path must finish before this overwrite starts.
     let _guard = super::fs_write_lock(&full);
     if let Err(output) = super::check_fresh(&full, "write", path) {
         return output;

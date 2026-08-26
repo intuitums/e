@@ -349,7 +349,7 @@ impl Agent {
     /// fails, the old log stays attached and later turns append to it, so a
     /// crash resumes into the complete pre-compaction conversation instead
     /// of a new file holding only an unanchored tail.
-    pub fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) {
+    pub fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) -> bool {
         let seed_message = ChatMessage::user(crate::core::agent::compact::seed(summary));
         let mut fresh_history = Vec::with_capacity(kept.len() + 1);
         fresh_history.push(seed_message.clone());
@@ -364,20 +364,26 @@ impl Agent {
                 if let Some(name) = self.session_name.lock().unwrap().clone() {
                     let _ = created.set_name(&name);
                 }
-                let mut result = Ok(());
                 for message in &fresh_history {
-                    result = created.append(message);
-                    if result.is_err() {
-                        break;
+                    if let Err(error) = created.append(message) {
+                        // This file never became the active compacted log. Do
+                        // not leave a plausible partial session in /resume.
+                        let failed_path = created.path().to_path_buf();
+                        drop(created);
+                        let _ = std::fs::remove_file(failed_path);
+                        note_persist(&self.persist_warned, Err(error), &self.events);
+                        return false;
                     }
                 }
                 *guard = Some(created);
-                result
+                *history_guard = fresh_history;
+                Ok(())
             }
             Err(e) => Err(e),
         };
-        *history_guard = fresh_history;
+        let installed = result.is_ok();
         note_persist(&self.persist_warned, result, &self.events);
+        installed
     }
 
     /// Attach a session log; created lazily on the first message when None.
@@ -465,9 +471,6 @@ impl Agent {
             // Steps this turn has run (one request each). The cap is a
             // runaway backstop far above real work, not a working budget.
             let mut steps = 0u32;
-            // Context size after the latest step, from real usage; 0 until a
-            // provider reports one.
-            let mut last_context = 0u64;
             let aborted = 'turn: loop {
                 if cancel.load(Ordering::SeqCst) {
                     break true;
@@ -489,6 +492,10 @@ impl Agent {
                 }
 
                 let messages = { history.lock().unwrap().clone() };
+                // Some compatible gateways omit usage entirely. Keep a local,
+                // conservative fallback so the mid-turn safety guard still
+                // exists there; a real Usage frame replaces it below.
+                let mut last_context = compact::estimate_request_tokens(&system, &messages);
                 let request = Request {
                     model: model.clone(),
                     system: system.clone(),
@@ -705,6 +712,10 @@ impl Agent {
                             cache_read,
                         })
                         .await;
+                } else {
+                    let provisional = ChatMessage::assistant(text.clone(), calls.clone());
+                    last_context =
+                        last_context.saturating_add(compact::estimate_message_tokens(&provisional));
                 }
                 // A cancelled or failed stream still commits what it already
                 // produced: the user watched that text arrive, and a history
@@ -887,6 +898,8 @@ impl Agent {
                             display: None,
                         },
                     };
+                    last_context = last_context
+                        .saturating_add((output.content.chars().count() as u64).div_ceil(4));
                     log.commit(ChatMessage::tool_result_with_meta(
                         call.id,
                         output.content,

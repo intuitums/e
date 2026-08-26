@@ -104,7 +104,16 @@ pub fn system_prompt(cwd: &Path) -> String {
         prompt.push_str("</project_context>\n");
     }
 
-    prompt.push_str(&format!("\nCurrent working directory: {}", cwd.display()));
+    // A path is untrusted metadata even before its workspace is trusted.
+    // Use JSON's escaping but omit its surrounding quotes, keeping ordinary
+    // paths unchanged while control characters can never add prompt lines.
+    let cwd_json =
+        serde_json::to_string(cwd.to_string_lossy().as_ref()).unwrap_or_else(|_| "\"\"".into());
+    let cwd_escaped = cwd_json
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(&cwd_json);
+    prompt.push_str(&format!("\nCurrent working directory: {cwd_escaped}"));
     // Environment facts the model would otherwise guess (and guess wrong —
     // models confidently write their training cutoff's date into changelogs).
     prompt.push_str(&format!("\nPlatform: {}", std::env::consts::OS));

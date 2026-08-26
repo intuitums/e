@@ -421,9 +421,10 @@ impl Drop for PathWriteGuard {
 }
 
 fn fs_write_lock(path: &Path) -> PathWriteGuard {
-    // Canonicalize so relative, absolute, and symlinked spellings of one
-    // file contend on one key; a not-yet-existing file keeps its given path.
-    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    // Canonicalize the deepest existing ancestor, then append the normalized
+    // missing tail. This gives a not-yet-created file the same key through
+    // `new`, `./new`, `dir/../new`, and a symlinked parent.
+    let key = stable_path_key(path);
     let mut held = FS_WRITE_HELD
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -468,7 +469,28 @@ fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
 }
 
 fn freshness_key(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    stable_path_key(path)
+}
+
+fn stable_path_key(path: &Path) -> PathBuf {
+    let mut cursor = path;
+    let mut tail = Vec::new();
+    loop {
+        if let Ok(mut existing) = cursor.canonicalize() {
+            for part in tail.iter().rev() {
+                existing.push(part);
+            }
+            return existing;
+        }
+        let Some(name) = cursor.file_name() else {
+            return path.to_path_buf();
+        };
+        tail.push(name.to_os_string());
+        let Some(parent) = cursor.parent() else {
+            return path.to_path_buf();
+        };
+        cursor = parent;
+    }
 }
 
 /// Record the file's current on-disk state as the one e has seen.
@@ -476,6 +498,10 @@ fn note_seen(path: &Path) {
     let Some(stamp) = file_stamp(path) else {
         return;
     };
+    note_seen_stamp(path, stamp);
+}
+
+fn note_seen_stamp(path: &Path, stamp: (std::time::SystemTime, u64)) {
     let mut seen = FS_SEEN.lock().unwrap_or_else(|p| p.into_inner());
     seen.get_or_insert_with(Default::default)
         .insert(freshness_key(path), stamp);
@@ -566,4 +592,31 @@ fn schema_object(name: &str, description: &str, properties: Value, required: &[&
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stable_path_key;
+
+    #[test]
+    fn new_file_aliases_have_one_lock_key() {
+        let root = std::env::temp_dir().join(format!(
+            "e-path-key-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join("child")).unwrap();
+
+        let expected = stable_path_key(&real.join("new.txt"));
+        assert_eq!(expected, stable_path_key(&real.join("./new.txt")));
+        assert_eq!(expected, stable_path_key(&real.join("child/../new.txt")));
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, root.join("alias")).unwrap();
+            assert_eq!(expected, stable_path_key(&root.join("alias/new.txt")));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

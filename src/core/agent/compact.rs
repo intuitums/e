@@ -37,6 +37,7 @@ pub fn keep_recent_tokens(context_window: u64) -> u64 {
 /// Tool results are trimmed in the flattened transcript; the summary needs
 /// what they meant, not their full bytes.
 const TOOL_RESULT_KEEP: usize = 1500;
+const TOOL_CALL_KEEP: usize = 1500;
 
 const SYSTEM: &str = "You summarize a coding-agent session so it can continue in a fresh context window. Preserve exact file paths, symbol names, and error messages. Write only the summary — no commentary about the summarization itself.";
 
@@ -72,12 +73,22 @@ pub fn should_compact(context_tokens: u64, context_window: u64) -> bool {
 
 /// chars/4, the reference heuristic — conservative, and only used to place
 /// the cut; the threshold itself works on real provider usage.
-fn estimate_tokens(message: &ChatMessage) -> u64 {
-    let mut chars = message.content.len();
+pub fn estimate_message_tokens(message: &ChatMessage) -> u64 {
+    let mut chars = message.content.chars().count();
     for call in &message.tool_calls {
-        chars += call.name.len() + call.arguments.len();
+        chars += call.name.chars().count() + call.arguments.chars().count();
     }
     (chars as u64).div_ceil(4)
+}
+
+/// Provider-independent fallback for gateways that omit usage. It is visibly
+/// treated as an estimate by the TUI; its purpose is safety headroom, not
+/// billing accuracy.
+pub fn estimate_request_tokens(system: &str, history: &[ChatMessage]) -> u64 {
+    let system = (system.chars().count() as u64).div_ceil(4);
+    history.iter().fold(system, |total, message| {
+        total.saturating_add(estimate_message_tokens(message))
+    })
 }
 
 /// Split history into (to_summarize, kept): walk backwards accumulating
@@ -92,7 +103,7 @@ pub fn split(history: &[ChatMessage], context_window: u64) -> (Vec<ChatMessage>,
     let mut accumulated = 0u64;
     let mut cut = 0usize;
     for (i, message) in history.iter().enumerate().rev() {
-        accumulated += estimate_tokens(message);
+        accumulated += estimate_message_tokens(message);
         if accumulated >= keep {
             // The nearest valid cut at or after the overrun point: not on a
             // tool result, and not between a reasoning block and the
@@ -121,12 +132,13 @@ pub async fn summarize(model: Model, history: &[ChatMessage]) -> Result<String, 
     // ones carry the state the continuation depends on.
     let budget_chars = (model.context_window.saturating_mul(4) / 2).max(4_096) as usize;
     let segments = transcript_segments(history);
-    let mut kept: Vec<&str> = Vec::new();
+    let mut kept: Vec<String> = Vec::new();
     let mut used = 0usize;
     for segment in segments.iter().rev() {
         if used + segment.len() > budget_chars && !kept.is_empty() {
             break;
         }
+        let segment = fit_segment(segment, budget_chars.saturating_sub(used));
         used += segment.len();
         kept.push(segment);
     }
@@ -194,10 +206,31 @@ fn transcript_segments(history: &[ChatMessage]) -> Vec<String> {
         }
         let mut segment = format!("{}:\n{content}\n", message.role);
         for call in &message.tool_calls {
-            segment.push_str(&format!("[called {} {}]\n", call.name, call.arguments));
+            let arguments: String = call.arguments.chars().take(TOOL_CALL_KEEP).collect();
+            let marker = if call.arguments.chars().count() > TOOL_CALL_KEEP {
+                "… [arguments trimmed]"
+            } else {
+                ""
+            };
+            segment.push_str(&format!("[called {} {arguments}{marker}]\n", call.name));
         }
         segment.push('\n');
         out.push(segment);
     }
     out
+}
+
+fn fit_segment(segment: &str, limit: usize) -> String {
+    const MARKER: &str = "\n[segment trimmed to fit the summarization request]\n";
+    if segment.len() <= limit {
+        return segment.to_string();
+    }
+    if limit <= MARKER.len() {
+        return MARKER[..limit].to_string();
+    }
+    let mut cut = limit - MARKER.len();
+    while cut > 0 && !segment.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}{MARKER}", &segment[..cut])
 }

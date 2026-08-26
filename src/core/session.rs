@@ -38,6 +38,10 @@ enum Entry {
 pub struct Session {
     path: PathBuf,
     file: File,
+    /// False only when an append failed and even truncating its partial tail
+    /// failed. Such a log is retired permanently; later records must never be
+    /// written behind a possibly torn line.
+    healthy: bool,
     /// Held for as long as this Session exists; its sidecar file marks
     /// ownership so a second e cannot append to the same log.
     _lock: LockGuard,
@@ -176,6 +180,7 @@ impl Session {
         Ok(Session {
             path,
             file,
+            healthy: true,
             _lock: lock,
         })
     }
@@ -188,7 +193,7 @@ impl Session {
             message: message.clone(),
         })?;
         line.push('\n');
-        self.file.write_all(line.as_bytes())
+        self.append_record(line.as_bytes())
     }
 
     /// Set the display name e shows for this session. Idempotent; appends a
@@ -202,7 +207,30 @@ impl Session {
             name: name.to_string(),
         })?;
         line.push('\n');
-        self.file.write_all(line.as_bytes())
+        self.append_record(line.as_bytes())
+    }
+
+    /// Append one whole JSONL record. `write_all` may have committed a prefix
+    /// before returning an error (disk full, quota, I/O failure), so roll back
+    /// to the known-good end. If rollback itself fails, permanently retire the
+    /// handle instead of ever turning that torn tail into interior corruption.
+    fn append_record(&mut self, record: &[u8]) -> std::io::Result<()> {
+        if !self.healthy {
+            return Err(std::io::Error::other(
+                "session log was retired after an incomplete write",
+            ));
+        }
+        let good_len = self.file.metadata()?.len();
+        if let Err(write_error) = self.file.write_all(record) {
+            if let Err(rollback_error) = self.file.set_len(good_len) {
+                self.healthy = false;
+                return Err(std::io::Error::other(format!(
+                    "{write_error}; could not remove the partial session record: {rollback_error}"
+                )));
+            }
+            return Err(write_error);
+        }
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {
@@ -248,6 +276,7 @@ impl Session {
         Ok(Session {
             path: path.to_path_buf(),
             file,
+            healthy: true,
             _lock: lock,
         })
     }
@@ -386,5 +415,35 @@ fn title_of(content: &str) -> String {
         title.chars().take(60).collect()
     } else {
         title
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_log_is_retired_when_a_failed_append_cannot_be_rolled_back() {
+        // /dev/full rejects writes and truncation, exercising the otherwise
+        // difficult disk-full + failed-rollback path deterministically.
+        let file = OpenOptions::new().append(true).open("/dev/full").unwrap();
+        let lock_path = std::env::temp_dir().join(format!(
+            "e-dev-full-{}-{}.lock",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let mut session = Session {
+            path: PathBuf::from("/dev/full"),
+            file,
+            healthy: true,
+            _lock: LockGuard { path: lock_path },
+        };
+
+        let first = session.append(&ChatMessage::user("lost")).unwrap_err();
+        assert!(first.to_string().contains("could not remove the partial"));
+        let second = session
+            .append(&ChatMessage::user("must not append"))
+            .unwrap_err();
+        assert!(second.to_string().contains("retired"));
     }
 }
