@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 
 use crate::core::auth::login;
 use crate::core::providers::{
-    http, require_success, send_request, Event, FinishReason, ProviderError, Request, SseStream,
-    StreamEnd, ToolCall,
+    http, require_success, retry_after_seconds, send_request, Event, FinishReason, ProviderError,
+    Request, SseStream, StreamEnd, ToolCall,
 };
 
 pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEnd, ProviderError> {
@@ -56,17 +56,33 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
         body["tools"] = json!(request.tools);
     }
 
-    let response = require_success(
+    let send = |body: &serde_json::Value| {
         send_request(
             http()
                 .post(format!("{}/chat/completions", request.model.base_url))
                 .bearer_auth(&key)
                 .header("accept", "text/event-stream")
-                .json(&body),
+                .json(body),
         )
-        .await?,
-    )
-    .await?;
+    };
+    let first = send(&body).await?;
+    let response = if matches!(first.status().as_u16(), 400 | 422) {
+        let status = first.status();
+        let retry_after = retry_after_seconds(&first);
+        let text = first.text().await.unwrap_or_default();
+        // Usage is useful but not essential. Strict OpenAI-compatible
+        // gateways commonly identify this optional field in their validation
+        // error; a rejected request generated no content, so one retry without
+        // it is safe and avoids a provider-specific compatibility table.
+        if text.to_ascii_lowercase().contains("stream_options") {
+            body.as_object_mut().unwrap().remove("stream_options");
+            require_success(send(&body).await?).await?
+        } else {
+            return Err(ProviderError::from_status(status, &text).with_retry_after(retry_after));
+        }
+    } else {
+        require_success(first).await?
+    };
 
     // Tool-call fragments accumulate per stream index until [DONE].
     let mut pending: BTreeMap<u64, ToolCall> = BTreeMap::new();
