@@ -17,10 +17,14 @@ use crate::core::providers::{
 };
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-/// Output ceiling per reply; every cataloged model allows at least this.
+/// Default output ceiling per reply, for models that don't declare their own
+/// (lower) `max_output` — a per-model catalog fact, since it varies by
+/// model (e.g. claude-haiku-4-5's ~8k against this 32k default).
 const MAX_TOKENS: u64 = 32_000;
 
-/// Extended-thinking budgets per effort; each stays under MAX_TOKENS.
+/// Extended-thinking budgets per effort; each stays under the default
+/// MAX_TOKENS, but a smaller declared `max_output` clamps this further
+/// below (see the `max_tokens - 1024` clamp at the call site).
 fn thinking_budget(effort: &str) -> u64 {
     match effort {
         "low" => 4_000,
@@ -107,9 +111,12 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
         }
     }
 
-    // The output ceiling must fit the model's window: a fixed 32k against a
-    // small declared window would be rejected before generation.
-    let max_tokens = MAX_TOKENS.min((request.model.context_window / 2).max(1024));
+    // The output ceiling must fit both the model's own max output (some
+    // models allow far less than the 32k default — claude-haiku-4-5 caps
+    // at ~8k) and its window: a fixed default against a small declared
+    // window would be rejected before generation either way.
+    let ceiling = request.model.max_output.unwrap_or(MAX_TOKENS);
+    let max_tokens = ceiling.min((request.model.context_window / 2).max(1024));
     let mut body = json!({
         "model": request.model.id,
         "max_tokens": max_tokens,

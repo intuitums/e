@@ -516,12 +516,14 @@ impl Agent {
                 let mut text = String::new();
                 let mut calls: Vec<ToolCall> = Vec::new();
                 let mut reasoning_items: Vec<String> = Vec::new();
-                // Gemini streams thought text only as ReasoningDelta — never
-                // as a committed ReasoningItem — so a thinking-only stream
-                // must still count as produced: otherwise a retryable error
-                // after a long thinking phase would retry (replaying the
-                // thoughts on screen) and a thinking-only stream ending
-                // without text would be called an empty response.
+                // A dialect can stream thought deltas without ever
+                // committing a ReasoningItem (e.g. Gemini's empty-text
+                // thought chunks), so a thinking-only stream must still
+                // count as produced by this flag alone: otherwise a
+                // retryable error after a long thinking phase would retry
+                // (replaying the thoughts on screen) and a thinking-only
+                // stream ending without text would be called an empty
+                // response.
                 let mut reasoning_streamed = false;
                 // Latest usage frame this step; emitted once after the stream
                 // ends. Dialects may report usage cumulatively mid-stream

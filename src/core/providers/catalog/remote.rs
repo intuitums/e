@@ -65,6 +65,7 @@ pub(super) fn remote_overlay(models: &mut Vec<Model>) {
                     efforts: Vec::new(),
                     thinking: Thinking::Manual,
                     context_window: item["context_window"].as_u64().unwrap_or(200_000),
+                    max_output: None,
                 }),
             }
         }

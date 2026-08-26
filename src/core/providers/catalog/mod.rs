@@ -76,6 +76,9 @@ pub struct Model {
     /// Context window in tokens. The seed value is a fallback: the
     /// provider's own reported window wins once a refresh has seen it.
     pub context_window: u64,
+    /// Output ceiling in tokens, when the model's own limit is below the
+    /// dialect's default. `None` leaves the dialect's own constant in force.
+    pub max_output: Option<u64>,
 }
 
 pub fn slug(model: &Model) -> String {
@@ -96,6 +99,7 @@ pub fn builtin_catalog() -> Vec<Model> {
                 efforts: decl.efforts.clone(),
                 thinking: Thinking::from_decl(decl.thinking.as_deref()),
                 context_window: decl.context_window,
+                max_output: decl.max_output,
             })
         })
         .collect()
@@ -119,6 +123,10 @@ struct ProviderEntry {
     context_window: Option<u64>,
     #[serde(default)]
     thinking: Option<String>,
+    /// Default output ceiling for this provider's models; each model may
+    /// override.
+    #[serde(default)]
+    max_output: Option<u64>,
     #[serde(default)]
     models: Vec<ModelEntry>,
 }
@@ -137,6 +145,8 @@ enum ModelEntry {
         efforts: Vec<String>,
         #[serde(default)]
         thinking: Option<String>,
+        #[serde(default)]
+        max_output: Option<u64>,
     },
 }
 
@@ -191,14 +201,15 @@ pub fn catalog() -> Vec<Model> {
                     continue;
                 };
                 for model in entry.models {
-                    let (id, window, efforts, thinking) = match model {
-                        ModelEntry::Id(id) => (id, None, Vec::new(), None),
+                    let (id, window, efforts, thinking, max_output) = match model {
+                        ModelEntry::Id(id) => (id, None, Vec::new(), None, None),
                         ModelEntry::Detailed {
                             id,
                             context_window,
                             efforts,
                             thinking,
-                        } => (id, context_window, efforts, thinking),
+                            max_output,
+                        } => (id, context_window, efforts, thinking, max_output),
                     };
                     let declared = builtin.and_then(|p| p.models.iter().find(|decl| decl.id == id));
                     let resolved = Model {
@@ -231,6 +242,9 @@ pub fn catalog() -> Vec<Model> {
                             .or(entry.context_window)
                             .or_else(|| declared.map(|d| d.context_window))
                             .unwrap_or(200_000),
+                        max_output: max_output
+                            .or(entry.max_output)
+                            .or_else(|| declared.and_then(|d| d.max_output)),
                     };
                     models.retain(|m| !(m.provider == resolved.provider && m.id == resolved.id));
                     models.push(resolved);

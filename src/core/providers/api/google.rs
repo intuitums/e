@@ -2,7 +2,10 @@
 //! with `alt=sse`, `x-goog-api-key` auth. Candidate chunks stream text,
 //! thought summaries, and function calls; thought signatures on function
 //! calls are captured and replayed verbatim — the API requires them back on
-//! the next request of a tool loop. Effort maps to
+//! the next request of a tool loop. A signature verifies against the thought
+//! text that preceded it, so that text is committed as a "reasoning" history
+//! item too and replayed ahead of the function call it signs (mirroring how
+//! the Anthropic dialect replays signed thinking blocks). Effort maps to
 //! `thinkingConfig.thinkingLevel`. The stream has no `[DONE]` sentinel: the
 //! chunk carrying `finishReason` is terminal.
 
@@ -32,13 +35,17 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
     // parts, consecutive results joining one turn to mirror the batch.
     // functionResponse.name comes from the assistant call the id refers to —
     // ids may be another dialect's (a mid-session model switch), so the name
-    // is never derived from the id's spelling.
+    // is never derived from the id's spelling. Signed thought text committed
+    // as "reasoning" messages replays verbatim at the head of the assistant
+    // turn it preceded — the API validates a function call's signature
+    // against that thought content.
     let mut contents: Vec<serde_json::Value> = Vec::new();
     let mut call_names: std::collections::HashMap<String, String> = Default::default();
+    let mut pending_thoughts: Vec<serde_json::Value> = Vec::new();
     for m in &request.messages {
         match m.role.as_str() {
             "assistant" => {
-                let mut parts = Vec::new();
+                let mut parts = std::mem::take(&mut pending_thoughts);
                 if !m.content.is_empty() {
                     parts.push(json!({"text": m.content}));
                 }
@@ -80,9 +87,25 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                     _ => contents.push(json!({"role": "user", "parts": [part]})),
                 }
             }
-            // Responses-dialect reasoning items mean nothing here.
-            "reasoning" => {}
-            _ => contents.push(json!({"role": "user", "parts": [{"text": m.content}]})),
+            "reasoning" => {
+                // Only this dialect's own items; items from other dialects
+                // (Anthropic thinking blocks, Responses reasoning JSON) mean
+                // nothing here.
+                if let Ok(item) = serde_json::from_str::<serde_json::Value>(&m.content) {
+                    if item["type"].as_str() == Some("gemini_thought") {
+                        if let Some(text) = item["text"].as_str() {
+                            pending_thoughts.push(json!({"text": text, "thought": true}));
+                        }
+                    }
+                }
+            }
+            _ => {
+                // A turn boundary without an assistant message orphans any
+                // buffered thought text; replaying it elsewhere would fail
+                // the signature check.
+                pending_thoughts.clear();
+                contents.push(json!({"role": "user", "parts": [{"text": m.content}]}));
+            }
         }
     }
 
@@ -155,6 +178,10 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                 if let Some(text) = part["text"].as_str() {
                     if part["thought"].as_bool().unwrap_or(false) {
                         let _ = tx.send(Event::ReasoningDelta(text.into())).await;
+                        if !text.is_empty() {
+                            let item = json!({"type": "gemini_thought", "text": text});
+                            let _ = tx.send(Event::ReasoningItem(item.to_string())).await;
+                        }
                     } else if !text.is_empty() {
                         let _ = tx.send(Event::TextDelta(text.into())).await;
                     }

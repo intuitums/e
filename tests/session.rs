@@ -67,6 +67,7 @@ fn session_name_sets_reads_and_clears() {
         efforts: Vec::new(),
         thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 1_000,
+        max_output: None,
     };
     let (agent, _events) = Agent::new(model);
 
@@ -96,6 +97,7 @@ fn opening_e_does_not_count_as_a_session() {
         efforts: Vec::new(),
         thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 1_000,
+        max_output: None,
     };
     let (_agent, _events) = Agent::new(model);
     assert!(
@@ -458,6 +460,7 @@ async fn persistence_failure_warns_once_not_silently() {
         efforts: Vec::new(),
         thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 200_000,
+        max_output: None,
     };
     let (agent, mut rx) = Agent::new(model);
     agent.record_user("first".into());

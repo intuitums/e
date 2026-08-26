@@ -53,6 +53,10 @@ pub struct ModelDecl {
     /// Which thinking wire shape this model speaks (Anthropic dialect).
     #[serde(default)]
     pub thinking: Option<String>,
+    /// Output ceiling in tokens, when it's below the dialect's own default
+    /// (e.g. claude-haiku-4-5's ~8k against the Anthropic dialect's 32k).
+    #[serde(default)]
+    pub max_output: Option<u64>,
 }
 
 fn default_window() -> u64 {

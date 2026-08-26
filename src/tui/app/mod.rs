@@ -2041,6 +2041,7 @@ mod tests {
             efforts: Vec::new(),
             thinking: crate::core::providers::catalog::Thinking::Manual,
             context_window: 200_000,
+            max_output: None,
         });
         let (jobs, _) = tokio::sync::mpsc::channel(1);
         let (logins, _) = tokio::sync::mpsc::channel(1);

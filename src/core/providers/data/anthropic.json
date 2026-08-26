@@ -9,6 +9,6 @@
 		{ "id": "claude-opus-5", "context_window": 1000000, "efforts": ["low", "medium", "high"], "thinking": "adaptive" },
 		{ "id": "claude-sonnet-5", "context_window": 1000000, "efforts": ["low", "medium", "high"], "thinking": "adaptive" },
 		{ "id": "claude-opus-4-8", "context_window": 1000000, "efforts": ["low", "medium", "high"], "thinking": "adaptive" },
-		{ "id": "claude-haiku-4-5", "context_window": 200000, "efforts": ["low", "medium", "high"], "thinking": "manual" }
+		{ "id": "claude-haiku-4-5", "context_window": 200000, "efforts": ["low", "medium", "high"], "thinking": "manual", "max_output": 8192 }
 	]
 }

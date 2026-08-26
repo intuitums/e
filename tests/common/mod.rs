@@ -105,6 +105,7 @@ pub fn test_model(provider: &str, port: u16, api: Api) -> Model {
         efforts: vec!["low".into(), "medium".into(), "high".into()],
         thinking: Thinking::Manual,
         context_window: 200_000,
+        max_output: None,
     }
 }
 

@@ -29,6 +29,10 @@ built-in's provider and id replaces it — the file wins, like themes.
 - `context_window` may sit on the provider (default for its models) or on a
   model object; it drives the statusline percentage and auto-compaction, so
   set it truthfully. Default: 200000.
+- `max_output` may sit on the provider or a model object; it caps the
+  reply-token ceiling for models whose real limit is below the dialect's own
+  default (e.g. a small Anthropic model). Only the Anthropic dialect reads
+  it today. Default: the dialect's own constant.
 - `efforts` on a model object declares its reasoning levels, in cycle order —
   shift+tab walks exactly this list (e.g. `["low", "medium", "high",
   "xhigh"]`). Built-ins carry their own; a file entry without `efforts` has

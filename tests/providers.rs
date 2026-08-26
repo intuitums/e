@@ -660,6 +660,80 @@ async fn signed_thinking_blocks_are_captured_and_replayed() {
     assert_eq!(content[1]["type"], "tool_use");
 }
 
+/// Gemini verifies a function call's thoughtSignature against the thought
+/// text that preceded it. A multi-step tool loop must replay that signed
+/// thought text ahead of the function call it signs, not just the
+/// signature — otherwise the follow-up request rejects.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn gemini_replays_signed_thought_text_ahead_of_its_function_call() {
+    let _lock = env_lock();
+    let first = concat!(
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"let me look\",\"thought\":true}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"id\":\"g-call-1\",\"name\":\"read\",\"args\":{\"path\":\"a.txt\"}},\"thoughtSignature\":\"sig-abc\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5}}\n\n",
+    );
+    let second =
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, server) = serve_sse(&[first, second]);
+    let home = Home::new("gemini-signed-thought");
+    home.auth(r#"{"google":{"key":"g-test"}}"#);
+
+    let model = test_model("google", port, Api::Google);
+    let request = Request {
+        model: model.clone(),
+        system: "sys".into(),
+        messages: vec![ChatMessage::user("read a.txt")],
+        effort: None,
+        tools: Vec::new(),
+    };
+    let (mut rx, _handle) = providers::stream(request);
+    let mut items = Vec::new();
+    let mut calls = Vec::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            Event::ReasoningItem(item) => items.push(item),
+            Event::ToolCall(c) => calls.push(c),
+            Event::Error(err) => panic!("stream errored: {}", err.message),
+            Event::Done(_) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(items.len(), 1, "one signed thought captured");
+    let item: serde_json::Value = serde_json::from_str(&items[0]).unwrap();
+    assert_eq!(item["type"], "gemini_thought");
+    assert_eq!(item["text"], "let me look");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].signature.as_deref(), Some("sig-abc"));
+
+    let request = Request {
+        model,
+        system: "sys".into(),
+        messages: vec![
+            ChatMessage::user("read a.txt"),
+            ChatMessage::reasoning(items.remove(0)),
+            ChatMessage::assistant("", calls.clone()),
+            ChatMessage::tool_result("g-call-1", "contents"),
+        ],
+        effort: None,
+        tools: Vec::new(),
+    };
+    let (_text, _reasoning, _calls, _usage, _finish) = collect_stream(request).await;
+
+    let sent = server.join().unwrap();
+    assert_eq!(sent.len(), 2);
+    let value = request_json(&sent[1]);
+    let model_turn = &value["contents"][1];
+    assert_eq!(model_turn["role"], "model");
+    let parts = model_turn["parts"].as_array().unwrap();
+    assert_eq!(
+        parts[0]["text"], "let me look",
+        "the signed thought text must lead the turn it signs: {value}"
+    );
+    assert_eq!(parts[0]["thought"], true);
+    assert_eq!(parts[1]["functionCall"]["name"], "read");
+    assert_eq!(parts[1]["thoughtSignature"], "sig-abc");
+}
+
 /// A small declared context window (a user-defined custom model, or a
 /// mistyped override) can shrink `max_tokens` below the room a manual
 /// thinking budget needs — the request must degrade by dropping the
@@ -695,6 +769,45 @@ async fn small_context_window_drops_thinking_instead_of_an_invalid_budget() {
     assert!(
         !sent.contains("\"thinking\""),
         "a max_tokens too small for any valid budget must drop thinking entirely: {sent}"
+    );
+}
+
+/// A model whose real output ceiling is below the Anthropic dialect's 32k
+/// default (declared via `max_output`, e.g. claude-haiku-4-5's ~8k) must
+/// have `max_tokens` clamped to that ceiling — otherwise the request 400s
+/// with a max_tokens-exceeds-limit error before generation.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn small_max_output_clamps_max_tokens_below_the_dialect_default() {
+    let _lock = env_lock();
+    let body = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9}}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let (port, server) = serve_sse(&[body]);
+    let home = Home::new("small-max-output");
+    home.auth(r#"{"anthropic":{"key":"sk-ant-test"}}"#);
+
+    let mut model = test_model("anthropic", port, Api::Anthropic);
+    model.thinking = Thinking::Manual;
+    model.context_window = 200_000; // half the window (100k) would otherwise clamp nothing
+    model.max_output = Some(8_192);
+    let request = Request {
+        model,
+        system: "be helpful".into(),
+        messages: vec![ChatMessage::user("hi")],
+        effort: None,
+        tools: Vec::new(),
+    };
+    let (_text, _reasoning, _calls, _usage, _finish) = collect_stream(request).await;
+
+    let sent = server.join().unwrap().remove(0);
+    assert_eq!(
+        request_json(&sent)["max_tokens"],
+        8_192,
+        "max_tokens must respect the model's own max_output, not the dialect's 32k default: {sent}"
     );
 }
 
@@ -913,6 +1026,7 @@ fn registry_and_catalog_match_the_embedded_data() {
             assert_eq!(model.base_url, provider.base_url, "{}", decl.id);
             assert_eq!(model.api, provider.api(), "{}", decl.id);
             assert_eq!(model.context_window, decl.context_window, "{}", decl.id);
+            assert_eq!(model.max_output, decl.max_output, "{}", decl.id);
             assert_eq!(model.efforts, decl.efforts, "{}", decl.id);
             let thinking = match decl.thinking.as_deref() {
                 Some("adaptive") => Thinking::Adaptive,
@@ -985,6 +1099,16 @@ fn registry_and_catalog_match_the_embedded_data() {
         assert_eq!(thinking(id), Thinking::Adaptive, "{id} must be adaptive");
     }
     assert_eq!(thinking("claude-haiku-4-5"), Thinking::Manual);
+
+    let haiku = catalog
+        .iter()
+        .find(|m| m.provider == "anthropic" && m.id == "claude-haiku-4-5")
+        .unwrap();
+    assert_eq!(
+        haiku.max_output,
+        Some(8_192),
+        "haiku's real output ceiling is well under the Anthropic dialect's 32k default"
+    );
 }
 
 #[test]
@@ -1009,6 +1133,21 @@ fn models_json_windows_and_overrides() {
         find("big").context_window,
         1_000_000,
         "per-model wins over provider default"
+    );
+
+    let catalog = catalog_with_models_json(
+        r#"{"providers":{"anthropic":{"models":[
+            {"id":"claude-haiku-4-5","max_output":4096}
+        ]}}}"#,
+    );
+    let haiku = catalog
+        .iter()
+        .find(|m| m.provider == "anthropic" && m.id == "claude-haiku-4-5")
+        .unwrap();
+    assert_eq!(
+        haiku.max_output,
+        Some(4_096),
+        "a models.json override wins over the built-in max_output"
     );
 
     let catalog = catalog_with_models_json(
