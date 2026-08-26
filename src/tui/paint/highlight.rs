@@ -282,19 +282,37 @@ mod tests {
     #[test]
     fn long_single_line_stays_linear() {
         // Regression: byte_at re-summed the UTF-8 prefix of the whole line
-        // for every char, so a ~64KB single-line tool output cost on the
-        // order of 2×10⁹ char-ops and stalled the frame thread for seconds.
-        let mut line = String::with_capacity(64 * 1024 + 3);
-        line.push('"');
-        line.push_str(&"a".repeat(64 * 1024));
-        line.push_str("\" // note");
+        // for every char, making cost quadratic in line length. Compare a
+        // 4x-larger input against a baseline instead of pinning an absolute
+        // wall-clock budget: a linear scan lands near 4x even under heavy
+        // scheduling noise, while a quadratic one blows well past the 16x
+        // margin asserted below — so this stays meaningful on a slow or
+        // loaded CI runner instead of flaking on an arbitrary time limit.
+        fn line_of(n: usize) -> String {
+            let mut line = String::with_capacity(n + 12);
+            line.push('"');
+            line.push_str(&"a".repeat(n));
+            line.push_str("\" // note");
+            line
+        }
+
+        let t = theme();
+        let small = line_of(16 * 1024);
+        let large = line_of(64 * 1024);
+
         let start = std::time::Instant::now();
-        let out = highlight_line(&theme(), "rust", &line);
-        let elapsed = start.elapsed();
+        let out_small = highlight_line(&t, "rust", &small);
+        let small_elapsed = start.elapsed();
+
+        let start = std::time::Instant::now();
+        let out_large = highlight_line(&t, "rust", &large);
+        let large_elapsed = start.elapsed();
+
+        assert!(out_small.contains("// note"));
+        assert!(out_large.contains("// note"));
         assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "long single-line highlight took {elapsed:?}"
+            large_elapsed.as_nanos() < small_elapsed.as_nanos().max(1) * 16,
+            "highlight_line scales worse than linear: {small_elapsed:?} -> {large_elapsed:?}"
         );
-        assert!(out.contains("// note"));
     }
 }

@@ -28,7 +28,6 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
             (access, Some(account))
         }
     };
-    let session_id = uuid::Uuid::new_v4().to_string();
 
     // Responses-API items: messages, function calls, and their outputs.
     let mut input: Vec<serde_json::Value> = Vec::new();
@@ -111,6 +110,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
         // need the account-dependent body field nor accept an unknown
         // parameter from a strict upstream.
         Some(account) => {
+            let session_id = uuid::Uuid::new_v4().to_string();
             body["prompt_cache_key"] = json!(session_id);
             http()
                 .post(format!("{}/codex/responses", request.model.base_url))
