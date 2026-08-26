@@ -1,0 +1,359 @@
+//! Session-event handling: the one ordered stream from the agent —
+//! text, thinking, tool lifecycle, usage, retries — projected onto App
+//! state and the transcript.
+
+use super::*;
+
+impl App {
+    /// The single session stream, in order. Turn bookkeeping hangs off it.
+    pub(super) fn on_session_event(&mut self, event: SessionEvent) {
+        match event {
+            SessionEvent::TurnStart => {
+                self.active = Some(ActiveTurn {
+                    block: None,
+                    text: String::new(),
+                    thinking_block: None,
+                    thinking: String::new(),
+                    turn: Turn::new(),
+                    started: Instant::now(),
+                    error: None,
+                    tool_blocks: std::collections::HashMap::new(),
+                    pending_tools: 0,
+                });
+                // Seed the token counters from request size so the activity
+                // row shows ↑ from the first second, like the reference.
+                if let Some(s) = &mut self.active {
+                    let chars: usize = system_prompt().chars().count()
+                        + self
+                            .agent
+                            .history_snapshot()
+                            .iter()
+                            .map(|m| m.content.chars().count())
+                            .sum::<usize>();
+                    s.turn.input = (chars / 4) as u64;
+                }
+            }
+            SessionEvent::Steered(text) => {
+                // A mid-turn message: show it as a user turn where it landed.
+                self.transcript.push(Block::new(Kind::User, text));
+                // The next assistant text opens a fresh block.
+                if let Some(s) = &mut self.active {
+                    s.block = None;
+                    s.text.clear();
+                    // The steered reply restarts its own thinking block.
+                    // The prior block stays live until TurnEnd dims the
+                    // whole turn — clearing the index must not finish it.
+                    s.thinking_block = None;
+                    s.thinking.clear();
+                }
+            }
+            SessionEvent::TextDelta(delta) => {
+                if let Some(s) = &mut self.active {
+                    s.turn.phase = TurnPhase::AssistantText;
+                    s.turn.note_text(&delta);
+                    // Model output is untrusted: strip control sequences
+                    // before it can reach the paint stream. (The raw text
+                    // still goes to the model's own history in core.)
+                    s.text
+                        .push_str(&crate::core::tools::sanitize_display(&delta));
+                    let idx = match s.block {
+                        Some(idx) => idx,
+                        None => {
+                            let idx = self.transcript.push(Block::new(Kind::Assistant, ""));
+                            s.block = Some(idx);
+                            idx
+                        }
+                    };
+                    let text = s.text.clone();
+                    if let Some(b) = self.transcript.blocks.get_mut(idx) {
+                        b.text = text;
+                        b.touch();
+                    }
+                }
+            }
+            // Reasoning stays on screen through the turn — it must not vanish
+            // while the reply streams, and it dims with the committed turn,
+            // not before. Raw provider text is stripped before it can reach
+            // the paint stream, like assistant text.
+            SessionEvent::ReasoningDelta(delta) => {
+                if let Some(s) = &mut self.active {
+                    s.turn.note_text(&delta);
+                    if self.show_thinking {
+                        s.thinking
+                            .push_str(&crate::core::tools::sanitize_display(&delta));
+                        let idx = match s.thinking_block {
+                            Some(idx) => idx,
+                            None => {
+                                let idx = self.transcript.push(Block::new(Kind::Thinking, ""));
+                                s.thinking_block = Some(idx);
+                                idx
+                            }
+                        };
+                        let text = s.thinking.clone();
+                        if let Some(b) = self.transcript.blocks.get_mut(idx) {
+                            b.text = text;
+                            b.touch();
+                        }
+                    }
+                }
+            }
+            SessionEvent::ToolCallAssembly { bytes } => {
+                // The model is streaming tool-call arguments — no text to
+                // show yet, but the row must move: phase plus a ticking
+                // estimate, so a long write call never looks like a stall.
+                if let Some(s) = &mut self.active {
+                    s.turn.phase = TurnPhase::ToolAssembly;
+                    s.turn.note_assembly(bytes);
+                }
+            }
+            SessionEvent::ToolBatchStart { calls } => {
+                if let Some(s) = &mut self.active {
+                    s.block = None;
+                    s.text.clear();
+                    // The pre-batch reasoning stays as its own block above;
+                    // the next burst starts fresh below the tools. The
+                    // prior block stays live until TurnEnd — clearing the
+                    // index must not finish it, or it would dim early.
+                    s.thinking_block = None;
+                    s.thinking.clear();
+                    s.turn.phase = TurnPhase::Tool;
+                    s.pending_tools += calls.len();
+                    let children = calls
+                        .iter()
+                        .map(|call| {
+                            crate::tui::transcript::ToolChild::pending(
+                                call.id,
+                                call.category.clone(),
+                                call.running.clone(),
+                                call.completed.clone(),
+                                call.target.clone(),
+                            )
+                        })
+                        .collect();
+                    let idx = self.transcript.push(Block::tool_group(children));
+                    for call in calls {
+                        s.tool_blocks.insert(call.id, idx);
+                    }
+                }
+            }
+            SessionEvent::ToolStart { id } => {
+                if let Some(s) = &mut self.active {
+                    s.turn.phase = TurnPhase::Tool;
+                    if let Some(&idx) = s.tool_blocks.get(&id) {
+                        if let Some(block) = self.transcript.blocks.get_mut(idx) {
+                            block.start_tool(id);
+                        }
+                    }
+                }
+            }
+            SessionEvent::ToolOutput { id, chunk, .. } => {
+                if let Some(s) = &mut self.active {
+                    if let Some(&idx) = s.tool_blocks.get(&id) {
+                        if let Some(block) = self.transcript.blocks.get_mut(idx) {
+                            block.append_tool_output(id, &chunk);
+                        }
+                    }
+                }
+            }
+            SessionEvent::Named(name) => {
+                self.agent.set_session_name(name.clone());
+                self.notice(format!("session: {name}"));
+                set_tab_title(&tab_title(&title_path(), Some(&name)));
+            }
+            SessionEvent::ToolEnd {
+                id,
+                outcome,
+                summary,
+                content,
+            } => {
+                let mut title = None;
+                if let Some(s) = &mut self.active {
+                    if let Some(&idx) = s.tool_blocks.get(&id) {
+                        if let Some(block) = self.transcript.blocks.get_mut(idx) {
+                            if let Some(child) =
+                                block.tool_children.iter().find(|child| child.id == id)
+                            {
+                                title = Some(if child.target.is_empty() {
+                                    child.completed.clone()
+                                } else {
+                                    format!("{} {}", child.completed, child.target)
+                                });
+                            }
+                            block.finish_tool(id, outcome, summary, &content);
+                        }
+                    }
+                    s.pending_tools = s.pending_tools.saturating_sub(1);
+                    s.turn.phase = if s.pending_tools == 0 {
+                        TurnPhase::Thinking
+                    } else {
+                        TurnPhase::Tool
+                    };
+                }
+                if !content.trim().is_empty() {
+                    self.remember_output(
+                        title.unwrap_or_else(|| "tool output".into()),
+                        crate::core::tools::sanitize_display(&content),
+                    );
+                }
+            }
+            SessionEvent::Usage {
+                input,
+                output,
+                cache_read: _,
+            } => {
+                // `input` is the inclusive prompt total per the Usage
+                // contract — adding the cached subset again would double
+                // count and trigger compaction early.
+                self.context_tokens = input + output;
+                if let Some(s) = &mut self.active {
+                    // Every step resends the whole context, so `input` is the
+                    // latest request's size, not new work — summing it across
+                    // steps re-counted the same tokens once per step and
+                    // showed absurd totals for long tool loops. Latest wins
+                    // (displacing the seed estimate); only `output` — the
+                    // tokens each step actually generated — accumulates, and
+                    // the live chars/4 estimate resets to cover only what the
+                    // next step streams.
+                    s.turn.note_usage(input, output);
+                }
+            }
+            SessionEvent::Retry {
+                attempt,
+                limit,
+                delay_secs,
+                cause,
+                reason,
+            } => {
+                // Replaces the Thinking row in place — a live status, not a
+                // scrollback notice: it's transient by nature and would
+                // otherwise leave one permanent line per attempt behind.
+                if let Some(s) = &mut self.active {
+                    s.turn.phase = TurnPhase::Retrying;
+                    s.turn.retry = Some(RetryStatus {
+                        attempt,
+                        limit,
+                        delay_secs,
+                        cause,
+                        reason,
+                    });
+                    s.turn.recovered = None;
+                    // The abandoned attempt's argument bytes die with it —
+                    // the fresh attempt streams from scratch.
+                    s.turn.note_assembly(0);
+                    // A retry replays its thinking fresh; the abandoned
+                    // attempt's block stays behind as history and stays
+                    // live until TurnEnd dims the whole turn.
+                    s.thinking_block = None;
+                    s.thinking.clear();
+                }
+            }
+            SessionEvent::Recovered { attempt, limit } => {
+                if let Some(s) = &mut self.active {
+                    s.turn.phase = TurnPhase::Thinking;
+                    s.turn.retry = None;
+                    s.turn.recovered = Some(RecoveredStatus {
+                        attempt,
+                        limit,
+                        since: Instant::now(),
+                    });
+                }
+            }
+            SessionEvent::Error(message) => {
+                if let Some(s) = &mut self.active {
+                    s.error = Some(message);
+                } else {
+                    self.notice(format!("error: {message}"));
+                }
+            }
+            SessionEvent::Warning(message) => {
+                self.notice(format!("warning: {message}"));
+            }
+            SessionEvent::TurnEnd { aborted } => {
+                let stranded = self.agent.on_turn_end();
+                if aborted {
+                    // Every started or serially pending member reaches a
+                    // terminal state; no ghost Running row survives Esc.
+                    for block in &mut self.transcript.blocks {
+                        if block.kind == Kind::ToolGroup {
+                            block.cancel_unfinished_tools();
+                        } else if block.kind == Kind::Tool && !block.done {
+                            block.cancelled = true;
+                            block.touch();
+                        }
+                    }
+                }
+                let Some(s) = self.active.take() else { return };
+                // The turn's thinking dims with it — same moment, not early.
+                // Tool batches, retries, and steered messages each start a
+                // fresh block without finishing the prior one, so the live
+                // index is only the last segment. Dim every still-live
+                // thinking row, not just that index.
+                dim_thinking(&mut self.transcript);
+                // The reference grammar: a completed turn ends with a dim
+                // duration-and-tokens row; a cancelled one says so instead.
+                if aborted {
+                    self.transcript.push(Block::new(Kind::System, "cancelled"));
+                } else {
+                    let tokens = if s.turn.input == 0 && s.turn.output == 0 {
+                        String::new()
+                    } else {
+                        format!(
+                            " (↑{} ↓{})",
+                            format_tokens(s.turn.input),
+                            format_tokens(s.turn.output)
+                        )
+                    };
+                    self.transcript.push(Block::new(
+                        Kind::Summary,
+                        format!(
+                            "{}{}",
+                            format_duration(s.started.elapsed().as_millis() as u64),
+                            tokens
+                        ),
+                    ));
+                }
+                if let Some(message) = s.error {
+                    // A failed turn ends visibly: the error persists in error
+                    // color below the trailer, never a vanishing status blip.
+                    self.transcript
+                        .push(Block::new(Kind::Error, format!("error: {message}")));
+                }
+                // Compaction runs between turns, never during one: a deferred
+                // /compact fires here, and so does the auto threshold check
+                // against real usage (window minus reserve).
+                let over = crate::core::agent::compact::should_compact(
+                    self.context_tokens,
+                    self.agent.model.context_window,
+                );
+                if !aborted && (self.compact_requested || over) {
+                    let auto = !self.compact_requested;
+                    self.compact_requested = false;
+                    self.start_compaction(auto);
+                }
+                // A prompt submitted in the gap between the worker's final
+                // pending check and this handler had no worker left to drain
+                // it. Resubmit in order; after Esc, dropping it visibly
+                // beats silently starting a turn the user just stopped.
+                for text in stranded {
+                    if aborted {
+                        self.notice(format!("queued message discarded by Esc: {text}"));
+                    } else {
+                        self.prompt(text);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Dim every still-live thinking row. Tool batches, retries, and steered
+/// messages start a fresh block without finishing the prior one, so the
+/// live index is not the full set — TurnEnd walks them all, same moment.
+pub(super) fn dim_thinking(transcript: &mut Transcript) {
+    for block in &mut transcript.blocks {
+        if block.kind == Kind::Thinking && !block.done {
+            block.done = true;
+            block.touch();
+        }
+    }
+}

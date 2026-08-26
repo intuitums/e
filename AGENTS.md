@@ -36,15 +36,33 @@ src/core/    the harness, terminal-free
                   embedded guides behind `e docs`)
   api/            the extension host: subprocesses over a JSONL line
                   protocol (docs/extensions.md) — tools, commands, hooks
-  tools/          read · write · edit · ls · grep · bash · skill
+  tools/          read · write · edit · ls · grep · find · bash · skill
   session.rs · output.rs · workspace.rs
 src/tui/     the frontend (short paths re-export from the groups)
   paint/          render · screen · theme · background · highlight
   content/        markdown · transcript · composer · statusline
   surfaces/       panel · menu · settingspanel · authpanel · trustpanel
-  app/            the interactive frame loop (state, keys, session events)
+  app/            mod.rs (App state, keys, the frame loop) · events.rs
+                  (session-event handling) · menus.rs (footer menus) ·
+                  login.rs (sign-in flows)
 src/main.rs  CLI entry — flags, ask/docs/auth/update, then tui::app::run
 ```
+
+## Running one thing, not everything
+
+Each `tests/*.rs` file is its own binary; the fast loops are:
+
+```sh
+cargo test --test stream            # agent turn loop against a mock provider
+cargo test --test providers         # the three wire dialects' request/stream shapes
+cargo test --test parity            # byte-pinned rendering (run after any look change)
+cargo test --test toolloop          # end-to-end tool execution
+cargo test name_of_one_test         # any single test, by name substring
+```
+
+New integration tests use `tests/common/` (`mod common;`) — `Home` for an
+isolated `E_HOME`, `env_lock()` around anything env-global, `serve_sse` +
+`test_model` for a mock provider. Don't hand-roll a second mock harness.
 
 ## How the look stays consistent
 

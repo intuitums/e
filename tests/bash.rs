@@ -107,11 +107,49 @@ fn cancellation_kills_the_process_group() {
 
 #[test]
 fn process_output_is_safe_for_terminal_rendering() {
+    // A whole OSC sequence disappears — payload included: stripping only the
+    // ESC byte used to leave "]0;owned" behind as visible garbage.
     let clean = tools::sanitize_display("ok\x1b]0;owned\x07\tend\r\n");
-    assert_eq!(clean, "ok]0;owned    end\n");
+    assert_eq!(clean, "ok    end\n");
+    // CSI colour codes go the same way, parameters and all.
+    assert_eq!(tools::sanitize_display("\x1b[1;31mred\x1b[0m"), "red");
     assert!(!clean
         .chars()
         .any(|character| character.is_control() && character != '\n'));
+}
+
+#[test]
+fn model_facing_output_drops_ansi_and_progress_rewrites() {
+    // The model's copy of command output pays no tokens for colour codes,
+    // and a progress bar that redrew itself collapses to its final frame.
+    let out = run_cmd(
+        "printf '\\033[32mgreen\\033[0m\\nstep 1\\rstep 2\\rstep 3\\ndone\\n'",
+        10,
+    );
+    assert_eq!(out.content, "green\nstep 3\ndone");
+}
+
+#[test]
+fn long_output_keeps_the_tail_where_the_verdict_lives() {
+    // 64KB of filler then the failure line: compilers and test runners put
+    // the verdict at the end, so the retained window must be the tail.
+    let out = run_cmd(
+        "for i in $(seq 1 4000); do echo \"filler line $i\"; done; echo 'error: the actual failure'",
+        30,
+    );
+    assert!(
+        out.content.contains("error: the actual failure"),
+        "the tail was dropped: {}",
+        &out.content[..200.min(out.content.len())]
+    );
+    assert!(
+        out.content.starts_with("… [truncated"),
+        "a truncated log must announce itself up front"
+    );
+    assert!(
+        !out.content.contains("filler line 1\n"),
+        "head was retained"
+    );
 }
 
 #[test]

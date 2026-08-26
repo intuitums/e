@@ -7,6 +7,21 @@ use std::sync::Mutex;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// `YYYY-MM-DD` with plausible ranges, no regex dependency needed.
+fn regex_lite_date(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    let (y, m, d) = (
+        parts[0].parse::<u32>().ok(),
+        parts[1].parse::<u32>().ok(),
+        parts[2].parse::<u32>().ok(),
+    );
+    matches!((y, m, d), (Some(y), Some(m), Some(d))
+        if (2020..3000).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d))
+}
+
 fn with_home<F: FnOnce()>(name: &str, f: F) {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = std::env::temp_dir().join(format!("e-prompt-{name}"));
@@ -31,9 +46,18 @@ fn default_prompt_has_pi_structure() {
         // The self-docs section: the agent learns e's own formats via `e docs`.
         assert!(prompt.contains("e documentation (read only when the user asks about e itself"));
         assert!(prompt.contains("`e docs <topic>`"));
-        assert!(prompt
-            .trim_end()
-            .ends_with("Current working directory: /tmp/proj"));
+        // The environment tail: cwd, then facts the model would otherwise
+        // guess (platform, today's date).
+        assert!(prompt.contains("Current working directory: /tmp/proj"));
+        assert!(prompt.contains(&format!("Platform: {}", std::env::consts::OS)));
+        let date_line = prompt
+            .lines()
+            .find(|l| l.starts_with("Today's date: "))
+            .expect("date line present");
+        let date = date_line
+            .trim_start_matches("Today's date: ")
+            .trim_end_matches(" (UTC)");
+        assert!(regex_lite_date(date), "date must be YYYY-MM-DD, got {date}");
         // AGENTS.md is bare by default — no project_context.
         assert!(!prompt.contains("<project_context>"));
     });

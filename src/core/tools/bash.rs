@@ -18,7 +18,7 @@ use super::{schema_object, OutputStream, ToolOutcome, ToolOutput};
 pub fn schema() -> Value {
     schema_object(
         "bash",
-        "Run a shell command in the workspace and return its combined output.",
+        "Run a shell command in the workspace root and return its combined output. Each call is a fresh shell: cd, environment variables, and background processes do not persist between calls. Output keeps the most recent 32KB when longer.",
         json!({
             "command": {"type": "string"},
             "timeout": {"type": "integer", "description": "Seconds before the command is killed (default 120)"}
@@ -153,15 +153,19 @@ where
     }
 
     let status = status.expect("loop stops only after child exit");
-    let mut combined = String::from_utf8_lossy(&retained).trim_end().to_string();
+    // The model's copy: decoded, stripped of colour codes and progress-bar
+    // rewrites — token noise it should never pay for.
+    let mut combined =
+        super::resolve_carriage_returns(&super::strip_ansi(&String::from_utf8_lossy(&retained)))
+            .trim_end()
+            .to_string();
     if total_bytes > retained.len() {
-        if !combined.is_empty() {
-            combined.push('\n');
-        }
-        combined.push_str(&format!(
-            "… [truncated: {total_bytes} bytes total, cap {}]",
+        // The marker leads: a reader of a truncated log needs to know it is
+        // mid-stream before line one, not after 32KB.
+        combined = format!(
+            "… [truncated: {total_bytes} bytes total, showing the last {} — earlier output dropped]\n{combined}",
             retained.len()
-        ));
+        );
     }
     let (outcome, summary) = if cancelled {
         (ToolOutcome::Cancelled, "cancelled".to_string())
@@ -191,6 +195,7 @@ where
         content: combined,
         outcome,
         summary,
+        display: None,
     }
 }
 
@@ -225,10 +230,13 @@ fn carry_index(stream: OutputStream) -> usize {
     }
 }
 
-/// Retain a bounded prefix and publish every chunk so pipe draining never
-/// depends on the model-output cap. Publishing goes through the stream's
-/// carry so only complete UTF-8 leaves; a split code point waits for its
-/// remaining bytes instead of becoming a replacement character.
+/// Retain a bounded suffix and publish every chunk so pipe draining never
+/// depends on the model-output cap. The tail is what is kept: compilers and
+/// test runners put the verdict at the end of a long log, so retaining the
+/// head handed the model 32KB of passing output and dropped the failure.
+/// Publishing goes through the stream's carry so only complete UTF-8 leaves;
+/// a split code point waits for its remaining bytes instead of becoming a
+/// replacement character.
 fn retain_and_publish<F>(
     retained: &mut Vec<u8>,
     total_bytes: &mut usize,
@@ -241,9 +249,10 @@ fn retain_and_publish<F>(
 {
     const RETAIN_LIMIT: usize = 32 * 1024;
     *total_bytes = total_bytes.saturating_add(bytes.len());
-    if retained.len() < RETAIN_LIMIT {
-        let keep = (RETAIN_LIMIT - retained.len()).min(bytes.len());
-        retained.extend_from_slice(&bytes[..keep]);
+    retained.extend_from_slice(bytes);
+    if retained.len() > RETAIN_LIMIT {
+        let excess = retained.len() - RETAIN_LIMIT;
+        retained.drain(..excess);
     }
     carry.extend_from_slice(bytes);
     let text = drain_complete_utf8(carry);
@@ -289,5 +298,6 @@ fn failure(message: &str) -> ToolOutput {
         content: message.into(),
         outcome: ToolOutcome::Failed,
         summary: "error".into(),
+        display: None,
     }
 }

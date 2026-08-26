@@ -175,9 +175,16 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                 }
                 "response.function_call_arguments.delta" => {
                     let key = value["item_id"].as_str().unwrap_or("").to_string();
+                    let delta = value["delta"].as_str().unwrap_or("");
                     if let Some(call) = pending.get_mut(&key) {
-                        call.arguments
-                            .push_str(value["delta"].as_str().unwrap_or(""));
+                        call.arguments.push_str(delta);
+                    }
+                    if !delta.is_empty() {
+                        let _ = tx
+                            .send(Event::ToolCallDelta {
+                                bytes: delta.len() as u64,
+                            })
+                            .await;
                     }
                 }
                 "response.output_item.done" => {

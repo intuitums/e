@@ -3,25 +3,12 @@
 //! summarized part reaches the model flattened and trimmed, and the fresh
 //! session file carries the seed plus the kept messages.
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
+mod common;
 
-use std::sync::Mutex;
-
+use common::{env_lock, serve_sse, test_model, Home};
 use e::core::agent::Agent;
-use e::core::providers::catalog::{Api, Model};
+use e::core::providers::catalog::Api;
 use e::core::providers::{ChatMessage, ToolCall};
-
-// E_HOME and the process cwd are global; serialize the tests that set them.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn sse(body: &str) -> String {
-    format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    )
-}
 
 // The env lock is deliberately held across the summarize await: E_HOME and
 // the cwd must stay ours for the whole test, and each tokio test gets its
@@ -29,13 +16,14 @@ fn sse(body: &str) -> String {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn compact_summarizes_and_seeds_a_fresh_session() {
-    let _env = ENV_LOCK.lock().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-compact-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
+    let _env = env_lock();
+    let reply = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Goal: fix the parser. Next: run tests.\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, server) = serve_sse(&[reply]);
+    let home = Home::new("compact");
+    home.auth(r#"{"mock":{"key":"k"}}"#);
     let ws = std::env::temp_dir().join(format!("e-compact-ws-{port}"));
     std::fs::create_dir_all(&ws).unwrap();
     // macOS: /var is a symlink to /private/var; the agent sees the canonical
@@ -43,28 +31,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
     let ws = ws.canonicalize().unwrap();
     std::env::set_current_dir(&ws).unwrap();
 
-    let server = std::thread::spawn(move || {
-        let (mut a, _) = listener.accept().unwrap();
-        let mut buf = vec![0u8; 262144];
-        let n = a.read(&mut buf).unwrap();
-        let sent = String::from_utf8_lossy(&buf[..n]).to_string();
-        let reply = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Goal: fix the parser. Next: run tests.\"}}]}\n\n",
-            "data: [DONE]\n\n",
-        );
-        a.write_all(sse(reply).as_bytes()).unwrap();
-        sent
-    });
-
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
+    let model = test_model("mock", port, Api::Completions);
 
     let long_tool_output = "x".repeat(5000);
     let history = [
@@ -88,7 +55,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
     assert_eq!(summary, "Goal: fix the parser. Next: run tests.");
 
     // The request carried the flattened history, tool output trimmed.
-    let sent = server.join().unwrap();
+    let sent = server.join().unwrap().remove(0);
     assert!(sent.contains("fix the parser"));
     assert!(sent.contains("[called read"));
     assert!(sent.contains("[trimmed]"), "long tool output not trimmed");
@@ -115,18 +82,28 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
         "kept tail not persisted to the new session"
     );
 
-    let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&ws);
 }
 
 #[test]
 fn threshold_is_window_minus_reserve() {
-    use e::core::agent::compact::{should_compact, RESERVE_TOKENS};
+    use e::core::agent::compact::{
+        keep_recent_tokens, reserve_tokens, should_compact, RESERVE_TOKENS,
+    };
+    // Large windows keep the reference reserve.
     let window = 200_000u64;
+    assert_eq!(reserve_tokens(window), RESERVE_TOKENS);
     assert!(!should_compact(window - RESERVE_TOKENS, window));
     assert!(should_compact(window - RESERVE_TOKENS + 1, window));
+    // Small windows scale: a 32k local model must not spend half its context
+    // on a reserve tuned for 200k, and the keep budget must stay well under
+    // the window or compaction becomes a no-op exactly where it matters.
+    assert_eq!(reserve_tokens(32_000), 4_000);
+    assert!(keep_recent_tokens(32_000) < 32_000 / 2);
+    assert!(should_compact(29_000, 32_000));
+    assert!(!should_compact(20_000, 32_000));
     // A tiny window never underflows.
-    assert!(should_compact(1, RESERVE_TOKENS / 2));
+    assert!(should_compact(1_900, 2_000));
 }
 
 #[test]
@@ -135,7 +112,7 @@ fn split_spares_small_histories() {
         ChatMessage::user("hi"),
         ChatMessage::assistant("hello", Vec::new()),
     ];
-    let (to_summarize, kept) = e::core::agent::compact::split(&history);
+    let (to_summarize, kept) = e::core::agent::compact::split(&history, 200_000);
     assert!(to_summarize.is_empty());
     assert_eq!(kept.len(), 2);
 }
@@ -162,7 +139,7 @@ fn split_never_cuts_at_a_tool_result() {
         ChatMessage::tool_result("c1", &big),
         ChatMessage::assistant("done", Vec::new()),
     ];
-    let (to_summarize, kept) = e::core::agent::compact::split(&history);
+    let (to_summarize, kept) = e::core::agent::compact::split(&history, 200_000);
     assert_eq!(
         kept.len(),
         1,
@@ -183,13 +160,7 @@ fn split_never_separates_signed_thinking_from_its_assistant_turn() {
         ChatMessage::user("old work"),
         ChatMessage::assistant("earlier reply", Vec::new()),
         ChatMessage::user("new task"),
-        ChatMessage {
-            role: "reasoning".into(),
-            content: r#"{"type":"thinking","thinking":"hmm","signature":"sig"}"#.into(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_meta: None,
-        },
+        ChatMessage::reasoning(r#"{"type":"thinking","thinking":"hmm","signature":"sig"}"#),
         ChatMessage::assistant(
             "",
             vec![ToolCall {
@@ -202,7 +173,7 @@ fn split_never_separates_signed_thinking_from_its_assistant_turn() {
         ChatMessage::tool_result("c1", "ok"),
         ChatMessage::assistant("done", Vec::new()),
     ];
-    let (to_summarize, kept) = e::core::agent::compact::split(&history);
+    let (to_summarize, kept) = e::core::agent::compact::split(&history, 200_000);
     // A cut happened, and the signed block stayed with its turn: either both
     // were summarized away or both remain in the kept tail, adjacent.
     let reasoning_kept = kept.iter().any(|m| m.role == "reasoning");
@@ -231,25 +202,14 @@ fn failed_fresh_log_keeps_the_old_session_attached() {
     // the complete pre-compaction file instead of a new file holding only an
     // unanchored tail, and memory still moves to the compacted state.
     use std::os::unix::fs::PermissionsExt;
-    let _env = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("e-loadcompact-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("E_HOME", &home);
+    let _env = env_lock();
+    let home = Home::new("loadcompact");
     let ws = std::env::temp_dir().join(format!("e-loadcompact-ws-{}", std::process::id()));
     std::fs::create_dir_all(&ws).unwrap();
     let ws = ws.canonicalize().unwrap();
     std::env::set_current_dir(&ws).unwrap();
 
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: "http://127.0.0.1:1".into(),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
+    let model = test_model("mock", 1, Api::Completions);
 
     // An old session with history, attached the way a resumed session is.
     let mut old = e::core::session::Session::create(&ws, "m").unwrap();
@@ -260,10 +220,22 @@ fn failed_fresh_log_keeps_the_old_session_attached() {
 
     // Make the workspace's session directory unwritable so the fresh log's
     // create fails (the parent stays readable so create_dir_all still passes).
-    let sessions = home.join("sessions");
+    let sessions = home.dir.join("sessions");
     let slug_dir = old_path.parent().unwrap();
     let before = std::fs::metadata(slug_dir).unwrap().permissions();
     std::fs::set_permissions(slug_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Probe that the fault actually took: root (CI containers, sandboxes)
+    // ignores directory permissions, and then the failure this test pins
+    // cannot be injected at all — skip rather than fail on a fault that
+    // didn't happen.
+    let probe = slug_dir.join(".probe");
+    if std::fs::write(&probe, b"x").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        std::fs::set_permissions(slug_dir, before).unwrap();
+        let _ = std::fs::remove_dir_all(&ws);
+        eprintln!("skipped: permission-based fault injection is inert for this user");
+        return;
+    }
 
     agent.load_compacted("Goal: continue.", vec![ChatMessage::user("recent turn")]);
 
@@ -290,7 +262,6 @@ fn failed_fresh_log_keeps_the_old_session_attached() {
     );
 
     std::fs::set_permissions(slug_dir, before).unwrap();
-    let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&ws);
 }
 

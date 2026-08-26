@@ -275,15 +275,22 @@ async fn a_blank_successful_stream_surfaces_an_error_not_silence() {
         "data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":0}}\n\n",
         "data: [DONE]\n\n",
     );
-    let (port, _server) = serve_sse(&[body]);
+    // A blank success earns one quiet re-request before the error, so the
+    // mock must answer twice: blank, then blank again.
+    let (port, _server) = serve_sse(&[body, body]);
     let _home = mock_home();
 
     let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
     agent.submit("hi".into(), "sys".into());
 
+    let mut saw_retry = false;
     let mut saw_error = false;
     while let Some(event) = rx.recv().await {
         match event {
+            SessionEvent::Retry { reason, .. } => {
+                saw_retry = true;
+                assert!(reason.contains("empty"), "unexpected retry: {reason}");
+            }
             SessionEvent::Error(message) => {
                 saw_error = true;
                 assert!(message.contains("empty"), "unexpected error: {message}");
@@ -292,7 +299,8 @@ async fn a_blank_successful_stream_surfaces_an_error_not_silence() {
             _ => {}
         }
     }
-    assert!(saw_error, "a blank success must surface an error");
+    assert!(saw_retry, "the first blank success gets one re-request");
+    assert!(saw_error, "a second blank success must surface an error");
 }
 
 /// Gemini sends thought text only as ReasoningDelta — never a committed

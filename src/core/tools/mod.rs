@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 mod bash;
 mod edit;
+mod find;
 mod fs;
 mod skill;
 
@@ -38,15 +39,26 @@ pub enum OutputStream {
 
 /// Result of a tool call: text for the model, plus its display outcome.
 pub struct ToolOutput {
+    /// What the model reads. Kept lean on purpose: it enters the history and
+    /// is resent with every later request of the session, so an echo of
+    /// content the model already produced is paid for over and over.
     pub content: String,
     pub outcome: ToolOutcome,
     /// One-line summary for the transcript row, e.g. `12 lines`.
     pub summary: String,
+    /// Richer text for the detail viewer only (e.g. a full diff). None means
+    /// the viewer shows `content`.
+    pub display: Option<String>,
 }
 
 impl ToolOutput {
     pub fn is_error(&self) -> bool {
         self.outcome.is_error()
+    }
+
+    /// The text the detail viewer shows: `display` when set, else `content`.
+    pub fn display_text(&self) -> &str {
+        self.display.as_deref().unwrap_or(&self.content)
     }
 }
 
@@ -85,62 +97,56 @@ pub struct Presentation {
 
 /// Resolve state-aware labels without throwing away workspace-relative paths.
 pub fn present(name: &str, args: &Value) -> Presentation {
-    let path = || sanitize_inline(args["path"].as_str().unwrap_or(""));
-    let command = || sanitize_inline(args["command"].as_str().unwrap_or(""));
-    match name {
-        "read" => Presentation {
-            category: "read".into(),
-            running: "Reading".into(),
-            completed: "Read".into(),
-            target: path(),
+    match SPECS.iter().find(|s| s.name == name) {
+        Some(spec) => Presentation {
+            category: spec.category.into(),
+            running: spec.running.into(),
+            completed: spec.completed.into(),
+            target: (spec.target)(args),
         },
-        "write" => Presentation {
-            category: "write".into(),
-            running: "Writing".into(),
-            completed: "Wrote".into(),
-            target: path(),
-        },
-        "edit" => Presentation {
-            category: "edit".into(),
-            running: "Editing".into(),
-            completed: "Edited".into(),
-            target: path(),
-        },
-        "bash" => Presentation {
-            category: "command".into(),
-            running: "Running".into(),
-            completed: "Ran".into(),
-            target: command(),
-        },
-        "grep" => Presentation {
-            category: "search".into(),
-            running: "Searching".into(),
-            completed: "Searched".into(),
-            target: sanitize_inline(args["pattern"].as_str().unwrap_or("")),
-        },
-        "ls" => Presentation {
-            category: "list".into(),
-            running: "Listing".into(),
-            completed: "Listed".into(),
-            target: sanitize_inline(args["path"].as_str().unwrap_or(".")),
-        },
-        "skill" => Presentation {
-            category: "skill".into(),
-            running: "Loading".into(),
-            completed: "Loaded".into(),
-            target: sanitize_inline(args["name"].as_str().unwrap_or("")),
-        },
-        other => Presentation {
-            category: other.into(),
-            running: format!("Running {other}"),
-            completed: format!("Ran {other}"),
+        None => Presentation {
+            category: name.into(),
+            running: format!("Running {name}"),
+            completed: format!("Ran {name}"),
             target: String::new(),
         },
     }
 }
 
+/// `(name, one-line description)` for the system prompt's tools list.
+pub fn snippets() -> impl Iterator<Item = (&'static str, &'static str)> {
+    SPECS.iter().map(|s| (s.name, s.snippet))
+}
+
+fn target_path(args: &Value) -> String {
+    sanitize_inline(args["path"].as_str().unwrap_or(""))
+}
+fn target_dir(args: &Value) -> String {
+    sanitize_inline(args["path"].as_str().unwrap_or("."))
+}
+fn target_command(args: &Value) -> String {
+    sanitize_inline(args["command"].as_str().unwrap_or(""))
+}
+fn target_pattern(args: &Value) -> String {
+    sanitize_inline(args["pattern"].as_str().unwrap_or(""))
+}
+fn target_name(args: &Value) -> String {
+    sanitize_inline(args["name"].as_str().unwrap_or(""))
+}
+
+/// Everything a built-in tool is, in one row: schema and runner, the
+/// system-prompt one-liner, and the transcript's lifecycle labels. One
+/// table so adding a tool cannot leave the prompt, the presentation, or the
+/// dispatcher out of sync.
 struct Spec {
     name: &'static str,
+    /// One-line description for the system prompt's Available-tools list.
+    snippet: &'static str,
+    category: &'static str,
+    running: &'static str,
+    completed: &'static str,
+    /// Project the transcript target out of the call arguments.
+    target: fn(&Value) -> String,
     schema: fn() -> Value,
     run: fn(&Value, &Path) -> ToolOutput,
 }
@@ -148,36 +154,81 @@ struct Spec {
 static SPECS: &[Spec] = &[
     Spec {
         name: "read",
+        snippet: "Read the contents of a file. Use offset/limit for large files.",
+        category: "read",
+        running: "Reading",
+        completed: "Read",
+        target: target_path,
         schema: fs::read_schema,
         run: fs::read,
     },
     Spec {
         name: "write",
+        snippet: "Write content to a file, creating it if needed, overwriting if it exists.",
+        category: "write",
+        running: "Writing",
+        completed: "Wrote",
+        target: target_path,
         schema: fs::write_schema,
         run: fs::write,
     },
     Spec {
         name: "edit",
+        snippet: "Replace an exact string in a file; the old text must match once.",
+        category: "edit",
+        running: "Editing",
+        completed: "Edited",
+        target: target_path,
         schema: edit::schema,
         run: edit::run,
     },
     Spec {
         name: "ls",
+        snippet: "List the entries of a directory.",
+        category: "list",
+        running: "Listing",
+        completed: "Listed",
+        target: target_dir,
         schema: fs::ls_schema,
         run: fs::ls,
     },
     Spec {
         name: "grep",
+        snippet: "Search file contents by regular expression across the workspace.",
+        category: "search",
+        running: "Searching",
+        completed: "Searched",
+        target: target_pattern,
         schema: fs::grep_schema,
         run: fs::grep,
     },
     Spec {
+        name: "find",
+        snippet: "Find files by name with a glob pattern (`*`, `?`, `**`).",
+        category: "search",
+        running: "Finding",
+        completed: "Found",
+        target: target_pattern,
+        schema: find::schema,
+        run: find::run,
+    },
+    Spec {
         name: "bash",
+        snippet: "Execute a bash command in the workspace root. Each call is a fresh shell — cd and variables don't persist.",
+        category: "command",
+        running: "Running",
+        completed: "Ran",
+        target: target_command,
         schema: bash::schema,
         run: bash::run,
     },
     Spec {
         name: "skill",
+        snippet: "Load a skill's instructions by name when a listed skill fits the task.",
+        category: "skill",
+        running: "Loading",
+        completed: "Loaded",
+        target: target_name,
         schema: skill::schema,
         run: skill::run,
     },
@@ -213,7 +264,21 @@ pub fn run_streaming<F>(
 where
     F: FnMut(OutputStream, &str),
 {
-    let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+    // Broken argument JSON must be reported as exactly that: falling back to
+    // Null made every tool answer "missing <param>", sending the model off to
+    // fix a parameter it did send instead of the JSON framing it broke.
+    let args: Value = match serde_json::from_str(arguments) {
+        Ok(v) => v,
+        Err(_) if arguments.trim().is_empty() => Value::Null,
+        Err(e) => {
+            return ToolOutput {
+                content: format!("tool arguments were not valid JSON: {e}"),
+                outcome: ToolOutcome::Failed,
+                summary: "bad arguments".into(),
+                display: None,
+            }
+        }
+    };
     if name == "bash" {
         return bash::run_streaming(&args, cwd, cancel, on_output);
     }
@@ -222,6 +287,7 @@ where
             content: "tool cancelled".into(),
             outcome: ToolOutcome::Cancelled,
             summary: "cancelled".into(),
+            display: None,
         };
     }
     match SPECS.iter().find(|s| s.name == name) {
@@ -230,14 +296,73 @@ where
             content: format!("unknown tool: {name}"),
             outcome: ToolOutcome::Failed,
             summary: "unknown".into(),
+            display: None,
         },
     }
+}
+
+/// Remove ANSI escape sequences — CSI (colours, cursor moves), OSC (titles,
+/// hyperlinks), and two-byte ESC forms — leaving the plain text. Applied to
+/// the model-facing capture and the display path alike: neither should pay
+/// for (or render) colour codes.
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('[') => {
+                chars.next();
+                // CSI: parameter and intermediate bytes, then one final byte.
+                for n in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                // OSC: runs to BEL or the ESC \ string terminator.
+                while let Some(n) = chars.next() {
+                    if n == '\u{07}' {
+                        break;
+                    }
+                    if n == '\u{1b}' {
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                chars.next(); // ESC plus one byte (ESC 7, ESC c, …)
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+/// Resolve carriage-return overwrites the way a terminal would: within each
+/// line only the text after the last `\r` survives, so a progress bar that
+/// redrew itself a thousand times collapses to its final state instead of a
+/// thousand concatenated frames.
+pub fn resolve_carriage_returns(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .split('\n')
+        .map(|line| line.rsplit('\r').next().unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Remove control sequences before untrusted process output reaches the TUI.
 pub fn sanitize_display(text: &str) -> String {
     let mut clean = String::with_capacity(text.len());
-    for character in text.chars() {
+    for character in strip_ansi(text).chars() {
         match character {
             '\n' => clean.push('\n'),
             '\t' => clean.push_str("    "),
@@ -302,9 +427,101 @@ fn require_regular_file(path: &Path, tool: &str, shown: &str) -> Result<(), Tool
             content: format!("{tool} {shown}: not a regular file"),
             outcome: ToolOutcome::Failed,
             summary: "error".into(),
+            display: None,
         }),
         _ => Ok(()),
     }
+}
+
+/// The state of each file as e last saw it (after a read, write, or edit),
+/// keyed by canonical path. `edit` and `write` check against it so a file
+/// that changed under them — a user's editor, a bash `sed -i`, another
+/// process — fails with "changed on disk" instead of silently clobbering
+/// work built on a stale copy. A file e never saw carries no record and
+/// passes: the guard catches staleness, it does not impose read-before-edit.
+static FS_SEEN: std::sync::Mutex<
+    Option<std::collections::HashMap<PathBuf, (std::time::SystemTime, u64)>>,
+> = std::sync::Mutex::new(None);
+
+fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+fn freshness_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Record the file's current on-disk state as the one e has seen.
+fn note_seen(path: &Path) {
+    let Some(stamp) = file_stamp(path) else {
+        return;
+    };
+    let mut seen = FS_SEEN.lock().unwrap_or_else(|p| p.into_inner());
+    seen.get_or_insert_with(Default::default)
+        .insert(freshness_key(path), stamp);
+}
+
+/// Fail when a recorded file changed on disk since e last saw it.
+fn check_fresh(path: &Path, tool: &str, shown: &str) -> Result<(), ToolOutput> {
+    let recorded = {
+        let seen = FS_SEEN.lock().unwrap_or_else(|p| p.into_inner());
+        seen.as_ref()
+            .and_then(|s| s.get(&freshness_key(path)).copied())
+    };
+    let Some(recorded) = recorded else {
+        return Ok(());
+    };
+    if file_stamp(path) == Some(recorded) {
+        return Ok(());
+    }
+    Err(ToolOutput {
+        content: format!(
+            "{tool} {shown}: the file changed on disk since it was last read — read it again before modifying it"
+        ),
+        outcome: ToolOutcome::Failed,
+        summary: "stale".into(),
+        display: None,
+    })
+}
+
+/// Depth-first walk under `root` with the shared traversal rules — dotfiles
+/// and the build/vendor directories are skipped, only regular files are
+/// visited (a FIFO in the tree would hang the walk). `visit` returns false
+/// to stop early (a result cap); the walk then unwinds immediately.
+/// The one traversal for every file-scanning tool: grep and find diverging
+/// on skip rules would make "no matches" mean different things per tool.
+fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path) -> bool) -> bool {
+    const SKIP: &[&str] = &[".git", "target", "node_modules", "dist", ".cache"];
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e.flatten().map(|e| e.path()).collect::<Vec<_>>(),
+        Err(_) => return true,
+    };
+    for path in entries {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.starts_with('.') || SKIP.contains(&name.as_str()) {
+            continue;
+        }
+        // Never follow symlinks: a link cycle (`ln -s . loop`) would recurse
+        // forever, and a link out of the tree would silently widen the walk.
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            if !walk_files(&path, visit) {
+                return false;
+            }
+        } else if meta.is_file() && !visit(&path) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Resolve a possibly-relative path against the workspace root.

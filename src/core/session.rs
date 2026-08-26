@@ -209,20 +209,25 @@ impl Session {
         &self.path
     }
 
-    /// Read all messages out of a session file. A malformed record is
-    /// corruption, not noise — returning a shortened history would present
-    /// lost messages as a valid conversation.
+    /// Read all messages out of a session file. An interior malformed record
+    /// is corruption, not noise — returning a shortened history would present
+    /// lost messages as a valid conversation. The one exception is a torn
+    /// final line: a crash mid-append leaves exactly that, it is the most
+    /// common artifact an append-only log ever shows, and refusing to resume
+    /// the whole session over it turns a lost record into a lost session.
     pub fn load(path: &Path) -> std::io::Result<Vec<ChatMessage>> {
         let reader = BufReader::new(File::open(path)?);
+        let lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>()?;
+        let last_nonempty = lines.iter().rposition(|l| !l.trim().is_empty());
         let mut messages = Vec::new();
-        for (index, line) in reader.lines().enumerate() {
-            let line = line?;
+        for (index, line) in lines.iter().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<Entry>(&line) {
+            match serde_json::from_str::<Entry>(line) {
                 Ok(Entry::Message { message }) => messages.push(message),
                 Ok(_) => {}
+                Err(_) if Some(index) == last_nonempty => break,
                 Err(e) => {
                     return Err(std::io::Error::other(format!(
                         "corrupt session record at line {}: {e}",
@@ -231,6 +236,7 @@ impl Session {
                 }
             }
         }
+        repair_tail(&mut messages);
         Ok(messages)
     }
 
@@ -244,6 +250,37 @@ impl Session {
             file,
             _lock: lock,
         })
+    }
+}
+
+/// Make a loaded history replayable when a crash cut it mid-record: a
+/// trailing reasoning block with no assistant turn after it fails signature
+/// replay, and an assistant tool call whose result never got appended is a
+/// dangling tool_use every dialect rejects. The former is dropped; the
+/// latter gets an honest synthetic result so the content survives.
+fn repair_tail(messages: &mut Vec<ChatMessage>) {
+    while matches!(messages.last(), Some(m) if m.role == "reasoning") {
+        messages.pop();
+    }
+    let Some(assistant_at) = messages.iter().rposition(|m| m.role == "assistant") else {
+        return;
+    };
+    let answered: Vec<String> = messages[assistant_at..]
+        .iter()
+        .filter(|m| m.role == "tool")
+        .filter_map(|m| m.tool_call_id.clone())
+        .collect();
+    let missing: Vec<String> = messages[assistant_at]
+        .tool_calls
+        .iter()
+        .map(|c| c.id.clone())
+        .filter(|id| !answered.contains(id))
+        .collect();
+    for id in missing {
+        messages.push(ChatMessage::tool_result(
+            id,
+            "not executed — the session ended before this call completed",
+        ));
     }
 }
 

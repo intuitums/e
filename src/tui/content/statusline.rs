@@ -15,6 +15,10 @@ pub enum TurnPhase {
     Thinking,
     /// Backing off after a retryable failure before another attempt.
     Retrying,
+    /// The model is streaming tool-call arguments — real output the
+    /// transcript can't show yet. Without its own phase the row froze on
+    /// "Thinking" while a large write call assembled for tens of seconds.
+    ToolAssembly,
     Tool,
     AssistantText,
 }
@@ -53,10 +57,17 @@ fn clip(s: &str, max_chars: usize) -> String {
 
 /// Per-turn token flow and focused activity phase.
 pub struct Turn {
+    /// Latest request's full context, from real usage (a chars/4 seed until
+    /// the first report lands).
     pub input: u64,
+    /// Output tokens of completed steps, from real usage.
     pub output: u64,
+    /// chars/4 estimate of the current step's streamed text + reasoning.
     pub estimated_output: u64,
     streamed_chars: u64,
+    /// Cumulative tool-call argument bytes streamed this step (liveness for
+    /// the assembly phase; also real output the estimate must count).
+    assembly_bytes: u64,
     pub phase: TurnPhase,
     /// Set while `phase == Retrying`.
     pub retry: Option<RetryStatus>,
@@ -77,6 +88,7 @@ impl Turn {
             output: 0,
             estimated_output: 0,
             streamed_chars: 0,
+            assembly_bytes: 0,
             phase: TurnPhase::Thinking,
             retry: None,
             recovered: None,
@@ -87,11 +99,33 @@ impl Turn {
         self.streamed_chars = self
             .streamed_chars
             .saturating_add(text.chars().count() as u64);
-        self.estimated_output = self.streamed_chars.div_ceil(4);
+        self.refresh_estimate();
+    }
+
+    /// Record the cumulative argument bytes the agent reported for this step.
+    pub fn note_assembly(&mut self, cumulative_bytes: u64) {
+        self.assembly_bytes = cumulative_bytes;
+        self.refresh_estimate();
+    }
+
+    /// A real usage report landed: fold it in and reset the estimate — from
+    /// here the estimate covers only what the *next* step streams, so the
+    /// live display is real tokens plus the current step's delta, never an
+    /// estimate of tokens already counted for real.
+    pub fn note_usage(&mut self, input: u64, output: u64) {
+        self.input = input;
+        self.output = self.output.saturating_add(output);
+        self.streamed_chars = 0;
+        self.assembly_bytes = 0;
+        self.estimated_output = 0;
+    }
+
+    fn refresh_estimate(&mut self) {
+        self.estimated_output = (self.streamed_chars + self.assembly_bytes).div_ceil(4);
     }
 
     pub fn tokens(&self) -> String {
-        let output = self.output.max(self.estimated_output);
+        let output = self.output.saturating_add(self.estimated_output);
         if self.input == 0 && output == 0 {
             String::new()
         } else {
@@ -139,6 +173,15 @@ impl Turn {
                         r.limit
                     )
                 })
+            }
+            TurnPhase::ToolAssembly => {
+                let tokens = self.tokens();
+                let suffix = if tokens.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {tokens}")
+                };
+                Some(format!("Writing tool call ({elapsed_secs}s){suffix}"))
             }
             TurnPhase::Tool => None,
             TurnPhase::AssistantText => {
@@ -234,6 +277,38 @@ mod tests {
 
         turn.phase = TurnPhase::Thinking;
         assert_eq!(turn.label(3).as_deref(), Some("Thinking (3s) (↑1k ↓20)"));
+    }
+
+    #[test]
+    fn tool_assembly_keeps_the_row_alive() {
+        let mut turn = Turn::new();
+        turn.note_usage(50_000, 200);
+        turn.phase = TurnPhase::ToolAssembly;
+        turn.note_assembly(8_000); // ~2k tokens of argument JSON so far
+        assert_eq!(
+            turn.label(7).as_deref(),
+            Some("Writing tool call (7s) (↑50k ↓2.2k)")
+        );
+        // The next cumulative report ticks the same counter.
+        turn.note_assembly(12_000);
+        assert_eq!(
+            turn.label(8).as_deref(),
+            Some("Writing tool call (8s) (↑50k ↓3.2k)")
+        );
+    }
+
+    #[test]
+    fn usage_resets_the_streaming_estimate() {
+        let mut turn = Turn::new();
+        turn.note_text(&"x".repeat(4_000)); // ~1k estimated
+        assert_eq!(turn.tokens(), "(↑0 ↓1k)");
+        // Real usage lands: the estimate must not double what is now
+        // counted for real.
+        turn.note_usage(9_000, 800);
+        assert_eq!(turn.tokens(), "(↑9k ↓800)");
+        // The next step's streaming adds on top of the real total.
+        turn.note_text("abcd");
+        assert_eq!(turn.tokens(), "(↑9k ↓801)");
     }
 
     #[test]

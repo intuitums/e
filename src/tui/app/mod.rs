@@ -28,6 +28,10 @@ use crate::tui::theme::Theme;
 use crate::tui::transcript::{Block, Kind, Transcript};
 use crate::tui::trustpanel::{self, TrustStage};
 
+mod events;
+mod login;
+mod menus;
+
 /// Per-turn frontend bookkeeping; the engine state lives in the Agent.
 struct ActiveTurn {
     /// The current assistant text block, if one is streaming.
@@ -45,9 +49,6 @@ struct ActiveTurn {
     tool_blocks: std::collections::HashMap<u64, usize>,
     /// Batch members not yet terminal, including serially pending calls.
     pending_tools: usize,
-    /// False until the provider's first real Usage lands; the seed estimate
-    /// fills the counters before that.
-    usage_seen: bool,
 }
 
 /// The ctrl+o full-detail screen: one stored output at a time, scrollable,
@@ -361,135 +362,6 @@ impl App {
 
     /* ---------- pickers ---------- */
 
-    fn command_items(&self) -> Vec<MenuItem> {
-        let mut items = vec![
-            MenuItem::new(
-                "/login",
-                "sign in to a provider — account or API key",
-                "/login",
-            ),
-            MenuItem::new("/models", "switch the model", "/models"),
-            MenuItem::new(
-                "/scoped-models",
-                "choose which models ctrl+p cycles",
-                "/scoped-models",
-            ),
-            MenuItem::new(
-                "/reload",
-                "reload extensions, themes, and config",
-                "/reload",
-            ),
-            MenuItem::new("/resume", "resume a saved session", "/resume"),
-            MenuItem::new("/new", "start a fresh session", "/new"),
-            MenuItem::new("/copy", "copy the last reply", "/copy"),
-            MenuItem::new("/compact", "summarize into a fresh session", "/compact"),
-            MenuItem::new(
-                "/trust",
-                "trust this directory (loads its AGENTS.md, .e resources)",
-                "/trust",
-            ),
-            MenuItem::new("/settings", "change preferences", "/settings"),
-            MenuItem::new("/help", "show commands", "/help"),
-            MenuItem::new("/version", "show the version", "/version"),
-            MenuItem::new("/quit", "exit", "/quit"),
-        ];
-        // Built-in dispatch wins name clashes, so a template or extension
-        // command shadowed by a built-in is unreachable — listing it would
-        // show a duplicate row that runs the built-in anyway.
-        for template in crate::core::resources::prompts::list(&self.agent.cwd()) {
-            if is_builtin_command(&template.name) {
-                continue;
-            }
-            let slash = format!("/{}", template.name);
-            let description = if template.argument_hint.is_empty() {
-                template.description.clone()
-            } else {
-                format!("{} — {}", template.description, template.argument_hint)
-            };
-            items.push(MenuItem::new(&slash, &description, &slash));
-        }
-        for (name, description) in self.host.commands() {
-            if is_builtin_command(&name) {
-                continue;
-            }
-            let slash = format!("/{name}");
-            items.push(MenuItem::new(&slash, &description, &slash));
-        }
-        items
-    }
-
-    /// The scoped-models multi-select: every available model, Space toggling
-    /// membership. The reference semantics: no scope stored = everything in
-    /// scope; the first toggle narrows the scope to just that model.
-    fn open_scoped_menu(&mut self) {
-        let available = model::available();
-        if available.is_empty() {
-            self.notice("no models available — use /login to sign in to a provider".into());
-            return;
-        }
-        let scope = model::scope();
-        let mut available = model::provider_grouped(available);
-        // The scoped entries lead the list — what you curated, not a hunt.
-        if let Some(ids) = &scope {
-            available.sort_by_key(|m| !ids.contains(&model::slug(m)));
-        }
-        let items: Vec<MenuItem> = available
-            .iter()
-            .map(|m| {
-                let slug = model::slug(m);
-                let mut item = MenuItem::new(&m.id, &m.provider, &slug);
-                let in_scope = match &scope {
-                    Some(ids) => ids.contains(&slug),
-                    None => true,
-                };
-                if in_scope {
-                    item.meta = "in scope".into();
-                }
-                item
-            })
-            .collect();
-        self.menu = Some(Menu::new(
-            MenuKind::Scoped,
-            "Scoped models",
-            HINT_SCOPED,
-            items,
-        ));
-    }
-
-    /// Space on the scoped picker: reference toggle semantics — no scope yet
-    /// means the first toggle starts a scope of exactly that model.
-    fn toggle_scoped(&mut self) {
-        let Some(menu) = &mut self.menu else { return };
-        let Some(slug) = menu.current().map(|i| i.value.clone()) else {
-            return;
-        };
-        match model::scope() {
-            None => {
-                model::set_scope(std::slice::from_ref(&slug));
-                menu.for_each_item(|item| {
-                    item.meta = if item.value == slug {
-                        "in scope".into()
-                    } else {
-                        String::new()
-                    };
-                });
-            }
-            Some(mut ids) => {
-                let meta = if let Some(pos) = ids.iter().position(|id| *id == slug) {
-                    ids.remove(pos);
-                    ""
-                } else {
-                    ids.push(slug.clone());
-                    "in scope"
-                };
-                if let Some(item) = menu.current_mut() {
-                    item.meta = meta.into();
-                }
-                model::set_scope(&ids);
-            }
-        }
-    }
-
     /// ctrl+p / ctrl+shift+p: cycle through the scope (or all available
     /// models when no scope is set), persisting the switch. The statusline is
     /// the feedback — it shows the new model immediately.
@@ -523,7 +395,9 @@ impl App {
     }
 
     fn open_resume_menu(&mut self) {
-        if self.active.is_some() {
+        // Both checks: `active` covers a turn whose TurnStart has been seen,
+        // `is_streaming` covers the gap between submit and that event.
+        if self.active.is_some() || self.agent.is_streaming() {
             self.notice("a turn is running — press Esc to stop it, then /resume".into());
             return;
         }
@@ -562,8 +436,9 @@ impl App {
     fn resume_path(&mut self, path: std::path::PathBuf) {
         // The picker can already be open when a turn starts (queued prompt);
         // re-check here so a selection can never splice a running turn's
-        // output into the resumed session.
-        if self.active.is_some() {
+        // output into the resumed session. `is_streaming` also covers the
+        // gap between a submit and its TurnStart event.
+        if self.active.is_some() || self.agent.is_streaming() {
             self.notice("a turn is running — press Esc to stop it, then resume".into());
             return;
         }
@@ -652,6 +527,11 @@ impl App {
                 _ => {}
             }
         }
+        // Seed the context gauge from the restored history so the statusline
+        // and the auto-compact check don't see an empty context until the
+        // first real usage report lands.
+        let seeded: usize = messages.iter().map(|m| m.content.len()).sum();
+        self.context_tokens = (seeded / 4) as u64;
         self.agent.load_history(messages);
         self.agent.set_session(Some(session));
         // Identity travels together: the resumed log's persisted name
@@ -677,288 +557,6 @@ impl App {
         self.settings = Some(crate::tui::settingspanel::SettingsPanel::new(
             self.agent.efforts(),
         ));
-    }
-
-    fn open_model_menu(&mut self) {
-        // Instant discovery where it matters: show the cached list now, ask
-        // the gateways in the background (60s floor), and pop new rows into
-        // the open picker when the answer lands.
-        let results = self.results.clone();
-        tokio::spawn(async move {
-            crate::core::providers::catalog::refresh_remote_within(60_000).await;
-            let _ = results.send(AppJob::CatalogRefreshed).await;
-        });
-        self.build_model_menu();
-    }
-
-    /// The picker itself, from the current catalog — no refresh side effects,
-    /// so the rebuild-on-refresh arm cannot loop.
-    fn build_model_menu(&mut self) {
-        let available = model::provider_grouped(model::available());
-        if available.is_empty() {
-            self.notice("no models available — use /login to sign in to a provider".into());
-            return;
-        }
-        let current = self.agent.model_slug();
-        let items = available
-            .iter()
-            .map(|m| {
-                let slug = model::slug(m);
-                let mut item = MenuItem::new(&m.id, &m.provider, &slug);
-                if slug == current {
-                    item.meta = "current".into();
-                }
-                item
-            })
-            .collect();
-        self.menu = Some(Menu::new(MenuKind::Models, "Models", HINT_USE, items));
-    }
-
-    /// Stop both the async flow and any blocking localhost callback wait.
-    /// Returns whether a flow was active.
-    fn cancel_login(&mut self) -> bool {
-        self.login_task.take().is_some()
-    }
-
-    fn next_login_flow(&mut self) -> u64 {
-        self.login_sequence = self.login_sequence.wrapping_add(1);
-        self.login_sequence
-    }
-
-    fn login_outcome_is_current(&self, flow_id: Option<u64>) -> bool {
-        match flow_id {
-            None => true,
-            Some(flow_id) => self
-                .login_task
-                .as_ref()
-                .is_some_and(|login| login.flow_id == flow_id),
-        }
-    }
-    fn start_codex_login(&mut self, provider: String) {
-        self.cancel_login();
-        let flow_id = self.next_login_flow();
-        let cancellation = crate::core::auth::login::LoginCancellation::default();
-        let task = tokio::spawn(crate::core::auth::login::codex_login(
-            provider,
-            self.jobs.clone(),
-            self.logins.clone(),
-            cancellation.clone(),
-            flow_id,
-        ));
-        self.login_task = Some(ActiveLogin {
-            flow_id,
-            cancellation,
-            task,
-            wait_for_callback: true,
-        });
-    }
-
-    fn start_xai_login(&mut self) {
-        self.cancel_login();
-        let flow_id = self.next_login_flow();
-        let cancellation = crate::core::auth::login::LoginCancellation::default();
-        let task = tokio::spawn(crate::core::auth::login::xai_login(
-            self.jobs.clone(),
-            self.logins.clone(),
-            cancellation.clone(),
-            flow_id,
-        ));
-        self.login_task = Some(ActiveLogin {
-            flow_id,
-            cancellation,
-            task,
-            wait_for_callback: false,
-        });
-    }
-
-    /// /login: the sign-in panel — the flow's method choice in the auth
-    /// surface's own look.
-    fn open_login_menu(&mut self) {
-        self.menu = None;
-        self.cancel_login();
-        self.auth = Some(AuthStage::Choose { selected: 0 });
-    }
-
-    /// A choice made on the panel. One account provider and one key provider
-    /// today, so provider steps collapse straight through.
-    fn auth_choose(&mut self, selected: usize) {
-        self.auth = Some(if selected == 0 {
-            AuthStage::Account { selected: 0 }
-        } else {
-            AuthStage::Key { selected: 0 }
-        });
-    }
-
-    /// A subscription picked on the account panel — the registry names the
-    /// flow; this just dispatches it.
-    fn auth_account(&mut self, selected: usize) {
-        let providers = crate::core::providers::registry::oauth_providers();
-        let Some(provider) = providers.get(selected) else {
-            return;
-        };
-        self.auth = Some(AuthStage::Waiting);
-        self.notice(format!("starting the {} sign-in…", provider.display));
-        match provider.auth.oauth.as_deref() {
-            Some("xai-device") => self.start_xai_login(),
-            _ => self.start_codex_login(provider.name.clone()),
-        }
-    }
-
-    /// A provider picked on the API-key panel.
-    fn auth_key(&mut self, selected: usize) {
-        let providers = crate::core::providers::registry::key_providers();
-        let Some(provider) = providers.get(selected) else {
-            return;
-        };
-        self.cancel_login();
-        self.auth = Some(AuthStage::ApiKey {
-            provider: provider.name.clone(),
-        });
-        self.pending_key = Some(provider.name.clone());
-        self.editor.mask = true;
-        self.editor.set_text("");
-    }
-
-    fn open_skills_menu(&mut self, query: &str) {
-        let items: Vec<MenuItem> = crate::core::resources::skills::list(&self.agent.cwd())
-            .into_iter()
-            .map(|s| MenuItem::new(&s.name, &s.description, &s.name))
-            .collect();
-        if items.is_empty() {
-            return;
-        }
-        let mut menu = Menu::new(MenuKind::Skills, "Skills", HINT_USE, items);
-        menu.set_query(query);
-        self.menu = Some(menu);
-    }
-
-    fn open_file_menu(&mut self, query: &str) {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let items = crate::core::workspace::list_files(&cwd)
-            .into_iter()
-            .map(|path| MenuItem::new(&path, "", &path))
-            .collect();
-        let mut menu = Menu::new(MenuKind::Files, "Files", HINT_USE, items);
-        menu.set_query(query);
-        self.menu = Some(menu);
-    }
-
-    /// Keep pickers in sync with the composer text: `/` at the start opens
-    /// the command picker, an `@word` under the cursor the file picker.
-    fn sync_menu(&mut self) {
-        let text = self.editor.text();
-        if self.pending_key.is_some() {
-            return;
-        }
-        // Slash picker: leading '/', no space yet.
-        if text.starts_with('/') && !text.contains(' ') && !text.contains('\n') {
-            let query = text[1..].to_string();
-            match &mut self.menu {
-                Some(m) if m.kind == MenuKind::Commands => m.set_query(&query),
-                _ => {
-                    let mut menu = Menu::new(
-                        MenuKind::Commands,
-                        "Commands",
-                        HINT_USE,
-                        self.command_items(),
-                    );
-                    menu.set_query(&query);
-                    self.menu = Some(menu);
-                }
-            }
-            return;
-        }
-        // File picker: the last token starts with '@'.
-        if let Some(token) = text
-            .split_whitespace()
-            .last()
-            .filter(|t| t.starts_with('@'))
-        {
-            let query = token[1..].to_string();
-            match &mut self.menu {
-                Some(m) if m.kind == MenuKind::Files => m.set_query(&query),
-                _ => self.open_file_menu(&query),
-            }
-            return;
-        }
-        // Skills picker: the last token starts with '$'.
-        if let Some(token) = text
-            .split_whitespace()
-            .last()
-            .filter(|t| t.starts_with('$'))
-        {
-            let query = token[1..].to_string();
-            match &mut self.menu {
-                Some(m) if m.kind == MenuKind::Skills => m.set_query(&query),
-                _ => self.open_skills_menu(&query),
-            }
-            return;
-        }
-        // Auto pickers close when their trigger text is gone.
-        if matches!(
-            self.menu.as_ref().map(|m| m.kind),
-            Some(MenuKind::Commands) | Some(MenuKind::Files) | Some(MenuKind::Skills)
-        ) {
-            self.menu = None;
-        }
-    }
-
-    /// Enter on an open picker. Returns true when the key was consumed.
-    fn select_menu(&mut self) -> bool {
-        let Some(menu) = &self.menu else { return false };
-        let Some(item) = menu.current().cloned() else {
-            self.menu = None;
-            return true;
-        };
-        let kind = menu.kind;
-        self.menu = None;
-        match kind {
-            MenuKind::Commands => {
-                self.editor.set_text("");
-                self.dispatch_command(item.value);
-            }
-            MenuKind::Files => {
-                // Replace the @token under construction with the chosen path.
-                let text = self.editor.text();
-                let replaced = match text.rfind('@') {
-                    Some(at) => format!("{}{}", &text[..at], item.value),
-                    None => item.value,
-                };
-                self.editor.set_text(&replaced);
-            }
-            MenuKind::Sessions => {
-                self.resume_path(std::path::PathBuf::from(item.value));
-            }
-            MenuKind::Scoped => {}
-            MenuKind::Skills => {
-                // Replace the $token, then send the skill body as context.
-                let text = self.editor.text();
-                let rest = match text.rfind('$') {
-                    Some(at) => text[..at].trim_end().to_string(),
-                    None => String::new(),
-                };
-                self.editor.set_text("");
-                if let Some(skill) =
-                    crate::core::resources::skills::get(&item.value, &self.agent.cwd())
-                {
-                    let combined = if rest.is_empty() {
-                        skill.body
-                    } else {
-                        format!("{}\n\n{rest}", skill.body)
-                    };
-                    self.prompt(combined);
-                }
-            }
-            MenuKind::Models => {
-                if let Some(found) = model::resolve(&item.value) {
-                    persist_model(&found);
-                    self.notice(format!("model set to {}", model::slug(&found)));
-                    self.agent.model = found;
-                    self.refresh_status_cache();
-                }
-            }
-        }
-        true
     }
 
     fn dispatch_command(&mut self, command: String) {
@@ -1008,29 +606,6 @@ impl App {
             return;
         }
         self.submit_direct(trimmed);
-    }
-
-    fn submit_api_key(&mut self, key: &str) {
-        let Some(secret_for) = self.pending_key.take() else {
-            return;
-        };
-        self.auth = None;
-        self.editor.mask = false;
-        match crate::core::auth::login::save_api_key(&secret_for, key) {
-            Ok(()) => {
-                self.notice(format!("{secret_for}: key saved to ~/.e/auth.json"));
-                // An API-key sign-in is a sign-in: emit the same typed
-                // outcome the OAuth flows send, so the stranded-model
-                // re-pick happens here too, not only for browser logins.
-                let _ = self
-                    .logins
-                    .try_send(crate::core::auth::login::Outcome::SignedIn {
-                        provider: secret_for,
-                        flow_id: None,
-                    });
-            }
-            Err(e) => self.notice(format!("{secret_for}: {e}")),
-        }
     }
 
     fn apply_input_verdict(&mut self, text: String, verdict: crate::core::api::InputVerdict) {
@@ -1115,8 +690,10 @@ impl App {
             }
             "/new" | "/clear" => {
                 // A running turn owns the history and session log; replacing
-                // them mid-turn would commit its reply into the wrong session.
-                if self.active.is_some() {
+                // them mid-turn would commit its reply into the wrong
+                // session. `is_streaming` also covers the gap between a
+                // submit and its TurnStart event.
+                if self.active.is_some() || self.agent.is_streaming() {
                     self.notice("a turn is running — press Esc to stop it, then /new".into());
                     return;
                 }
@@ -1182,40 +759,6 @@ impl App {
         }
     }
 
-    /// `/login` — bare lists providers and methods; with a provider, runs
-    /// that provider's method: Account (browser OAuth) or API key (masked
-    /// paste into the composer).
-    fn login(&mut self, provider: String) {
-        if provider.is_empty() {
-            self.open_login_menu();
-            return;
-        }
-        let flow =
-            crate::core::providers::registry::find(&provider).and_then(|p| p.auth.oauth.clone());
-        if flow.as_deref() == Some("codex") {
-            self.notice(format!(
-                "starting the {} sign-in…",
-                model::display_name(&provider)
-            ));
-            self.auth = Some(AuthStage::Waiting);
-            self.start_codex_login(provider);
-        } else if flow.as_deref() == Some("xai-device") {
-            self.notice(format!(
-                "starting the {} sign-in…",
-                model::display_name(&provider)
-            ));
-            self.auth = Some(AuthStage::Waiting);
-            self.start_xai_login();
-        } else {
-            self.cancel_login();
-            self.notice(format!(
-                "paste the {provider} API key and press enter (esc cancels)"
-            ));
-            self.pending_key = Some(provider);
-            self.editor.mask = true;
-        }
-    }
-
     /// Deliver a held -r launch prompt into the current session — the pick
     /// it was waiting for fell through (declined, or the resume failed), and
     /// stranding it would silently drop typed text. The trust question, if
@@ -1241,336 +784,6 @@ impl App {
         let held = self.agent.submit(text.clone(), system_prompt());
         if !held {
             self.transcript.push(Block::new(Kind::User, text));
-        }
-    }
-
-    /// The single session stream, in order. Turn bookkeeping hangs off it.
-    fn on_session_event(&mut self, event: SessionEvent) {
-        match event {
-            SessionEvent::TurnStart => {
-                self.active = Some(ActiveTurn {
-                    block: None,
-                    text: String::new(),
-                    thinking_block: None,
-                    thinking: String::new(),
-                    turn: Turn::new(),
-                    started: Instant::now(),
-                    error: None,
-                    tool_blocks: std::collections::HashMap::new(),
-                    pending_tools: 0,
-                    usage_seen: false,
-                });
-                // Seed the token counters from request size so the activity
-                // row shows ↑ from the first second, like the reference.
-                if let Some(s) = &mut self.active {
-                    let chars: usize = system_prompt().chars().count()
-                        + self
-                            .agent
-                            .history_snapshot()
-                            .iter()
-                            .map(|m| m.content.chars().count())
-                            .sum::<usize>();
-                    s.turn.input = (chars / 4) as u64;
-                }
-            }
-            SessionEvent::Steered(text) => {
-                // A mid-turn message: show it as a user turn where it landed.
-                self.transcript.push(Block::new(Kind::User, text));
-                // The next assistant text opens a fresh block.
-                if let Some(s) = &mut self.active {
-                    s.block = None;
-                    s.text.clear();
-                    // The steered reply restarts its own thinking block.
-                    // The prior block stays live until TurnEnd dims the
-                    // whole turn — clearing the index must not finish it.
-                    s.thinking_block = None;
-                    s.thinking.clear();
-                }
-            }
-            SessionEvent::TextDelta(delta) => {
-                if let Some(s) = &mut self.active {
-                    s.turn.phase = TurnPhase::AssistantText;
-                    s.turn.note_text(&delta);
-                    // Model output is untrusted: strip control sequences
-                    // before it can reach the paint stream. (The raw text
-                    // still goes to the model's own history in core.)
-                    s.text
-                        .push_str(&crate::core::tools::sanitize_display(&delta));
-                    let idx = match s.block {
-                        Some(idx) => idx,
-                        None => {
-                            let idx = self.transcript.push(Block::new(Kind::Assistant, ""));
-                            s.block = Some(idx);
-                            idx
-                        }
-                    };
-                    let text = s.text.clone();
-                    if let Some(b) = self.transcript.blocks.get_mut(idx) {
-                        b.text = text;
-                        b.touch();
-                    }
-                }
-            }
-            // Reasoning stays on screen through the turn — it must not vanish
-            // while the reply streams, and it dims with the committed turn,
-            // not before. Raw provider text is stripped before it can reach
-            // the paint stream, like assistant text.
-            SessionEvent::ReasoningDelta(delta) => {
-                if let Some(s) = &mut self.active {
-                    s.turn.note_text(&delta);
-                    if self.show_thinking {
-                        s.thinking
-                            .push_str(&crate::core::tools::sanitize_display(&delta));
-                        let idx = match s.thinking_block {
-                            Some(idx) => idx,
-                            None => {
-                                let idx = self.transcript.push(Block::new(Kind::Thinking, ""));
-                                s.thinking_block = Some(idx);
-                                idx
-                            }
-                        };
-                        let text = s.thinking.clone();
-                        if let Some(b) = self.transcript.blocks.get_mut(idx) {
-                            b.text = text;
-                            b.touch();
-                        }
-                    }
-                }
-            }
-            SessionEvent::ToolBatchStart { calls } => {
-                if let Some(s) = &mut self.active {
-                    s.block = None;
-                    s.text.clear();
-                    // The pre-batch reasoning stays as its own block above;
-                    // the next burst starts fresh below the tools. The
-                    // prior block stays live until TurnEnd — clearing the
-                    // index must not finish it, or it would dim early.
-                    s.thinking_block = None;
-                    s.thinking.clear();
-                    s.turn.phase = TurnPhase::Tool;
-                    s.pending_tools += calls.len();
-                    let children = calls
-                        .iter()
-                        .map(|call| {
-                            crate::tui::transcript::ToolChild::pending(
-                                call.id,
-                                call.category.clone(),
-                                call.running.clone(),
-                                call.completed.clone(),
-                                call.target.clone(),
-                            )
-                        })
-                        .collect();
-                    let idx = self.transcript.push(Block::tool_group(children));
-                    for call in calls {
-                        s.tool_blocks.insert(call.id, idx);
-                    }
-                }
-            }
-            SessionEvent::ToolStart { id } => {
-                if let Some(s) = &mut self.active {
-                    s.turn.phase = TurnPhase::Tool;
-                    if let Some(&idx) = s.tool_blocks.get(&id) {
-                        if let Some(block) = self.transcript.blocks.get_mut(idx) {
-                            block.start_tool(id);
-                        }
-                    }
-                }
-            }
-            SessionEvent::ToolOutput { id, chunk, .. } => {
-                if let Some(s) = &mut self.active {
-                    if let Some(&idx) = s.tool_blocks.get(&id) {
-                        if let Some(block) = self.transcript.blocks.get_mut(idx) {
-                            block.append_tool_output(id, &chunk);
-                        }
-                    }
-                }
-            }
-            SessionEvent::Named(name) => {
-                self.agent.set_session_name(name.clone());
-                self.notice(format!("session: {name}"));
-                set_tab_title(&tab_title(&title_path(), Some(&name)));
-            }
-            SessionEvent::ToolEnd {
-                id,
-                outcome,
-                summary,
-                content,
-            } => {
-                let mut title = None;
-                if let Some(s) = &mut self.active {
-                    if let Some(&idx) = s.tool_blocks.get(&id) {
-                        if let Some(block) = self.transcript.blocks.get_mut(idx) {
-                            if let Some(child) =
-                                block.tool_children.iter().find(|child| child.id == id)
-                            {
-                                title = Some(if child.target.is_empty() {
-                                    child.completed.clone()
-                                } else {
-                                    format!("{} {}", child.completed, child.target)
-                                });
-                            }
-                            block.finish_tool(id, outcome, summary, &content);
-                        }
-                    }
-                    s.pending_tools = s.pending_tools.saturating_sub(1);
-                    s.turn.phase = if s.pending_tools == 0 {
-                        TurnPhase::Thinking
-                    } else {
-                        TurnPhase::Tool
-                    };
-                }
-                if !content.trim().is_empty() {
-                    self.remember_output(
-                        title.unwrap_or_else(|| "tool output".into()),
-                        crate::core::tools::sanitize_display(&content),
-                    );
-                }
-            }
-            SessionEvent::Usage {
-                input,
-                output,
-                cache_read: _,
-            } => {
-                // `input` is the inclusive prompt total per the Usage
-                // contract — adding the cached subset again would double
-                // count and trigger compaction early.
-                self.context_tokens = input + output;
-                if let Some(s) = &mut self.active {
-                    // The seed estimate holds the counters until the first
-                    // real usage lands; from then on, accumulate per step.
-                    if s.usage_seen {
-                        s.turn.input += input;
-                        s.turn.output += output;
-                    } else {
-                        s.turn.input = input;
-                        s.turn.output = output;
-                        s.usage_seen = true;
-                    }
-                }
-            }
-            SessionEvent::Retry {
-                attempt,
-                limit,
-                delay_secs,
-                cause,
-                reason,
-            } => {
-                // Replaces the Thinking row in place — a live status, not a
-                // scrollback notice: it's transient by nature and would
-                // otherwise leave one permanent line per attempt behind.
-                if let Some(s) = &mut self.active {
-                    s.turn.phase = TurnPhase::Retrying;
-                    s.turn.retry = Some(RetryStatus {
-                        attempt,
-                        limit,
-                        delay_secs,
-                        cause,
-                        reason,
-                    });
-                    s.turn.recovered = None;
-                    // A retry replays its thinking fresh; the abandoned
-                    // attempt's block stays behind as history and stays
-                    // live until TurnEnd dims the whole turn.
-                    s.thinking_block = None;
-                    s.thinking.clear();
-                }
-            }
-            SessionEvent::Recovered { attempt, limit } => {
-                if let Some(s) = &mut self.active {
-                    s.turn.phase = TurnPhase::Thinking;
-                    s.turn.retry = None;
-                    s.turn.recovered = Some(RecoveredStatus {
-                        attempt,
-                        limit,
-                        since: Instant::now(),
-                    });
-                }
-            }
-            SessionEvent::Error(message) => {
-                if let Some(s) = &mut self.active {
-                    s.error = Some(message);
-                } else {
-                    self.notice(format!("error: {message}"));
-                }
-            }
-            SessionEvent::Warning(message) => {
-                self.notice(format!("warning: {message}"));
-            }
-            SessionEvent::TurnEnd { aborted } => {
-                let stranded = self.agent.on_turn_end();
-                if aborted {
-                    // Every started or serially pending member reaches a
-                    // terminal state; no ghost Running row survives Esc.
-                    for block in &mut self.transcript.blocks {
-                        if block.kind == Kind::ToolGroup {
-                            block.cancel_unfinished_tools();
-                        } else if block.kind == Kind::Tool && !block.done {
-                            block.cancelled = true;
-                            block.touch();
-                        }
-                    }
-                }
-                let Some(s) = self.active.take() else { return };
-                // The turn's thinking dims with it — same moment, not early.
-                // Tool batches, retries, and steered messages each start a
-                // fresh block without finishing the prior one, so the live
-                // index is only the last segment. Dim every still-live
-                // thinking row, not just that index.
-                dim_thinking(&mut self.transcript);
-                // The reference grammar: a completed turn ends with a dim
-                // duration-and-tokens row; a cancelled one says so instead.
-                if aborted {
-                    self.transcript.push(Block::new(Kind::System, "cancelled"));
-                } else {
-                    let tokens = if s.turn.input == 0 && s.turn.output == 0 {
-                        String::new()
-                    } else {
-                        format!(
-                            " (↑{} ↓{})",
-                            format_tokens(s.turn.input),
-                            format_tokens(s.turn.output)
-                        )
-                    };
-                    self.transcript.push(Block::new(
-                        Kind::Summary,
-                        format!(
-                            "{}{}",
-                            format_duration(s.started.elapsed().as_millis() as u64),
-                            tokens
-                        ),
-                    ));
-                }
-                if let Some(message) = s.error {
-                    // A failed turn ends visibly: the error persists in error
-                    // color below the trailer, never a vanishing status blip.
-                    self.transcript
-                        .push(Block::new(Kind::Error, format!("error: {message}")));
-                }
-                // Compaction runs between turns, never during one: a deferred
-                // /compact fires here, and so does the auto threshold check
-                // against real usage (window minus reserve).
-                let over = crate::core::agent::compact::should_compact(
-                    self.context_tokens,
-                    self.agent.model.context_window,
-                );
-                if !aborted && (self.compact_requested || over) {
-                    let auto = !self.compact_requested;
-                    self.compact_requested = false;
-                    self.start_compaction(auto);
-                }
-                // A prompt submitted in the gap between the worker's final
-                // pending check and this handler had no worker left to drain
-                // it. Resubmit in order; after Esc, dropping it visibly
-                // beats silently starting a turn the user just stopped.
-                for text in stranded {
-                    if aborted {
-                        self.notice(format!("queued message discarded by Esc: {text}"));
-                    } else {
-                        self.prompt(text);
-                    }
-                }
-            }
         }
     }
 
@@ -1601,7 +814,8 @@ impl App {
             self.notice("nothing to compact yet".into());
             return;
         }
-        let (to_summarize, kept) = crate::core::agent::compact::split(&history);
+        let (to_summarize, kept) =
+            crate::core::agent::compact::split(&history, self.agent.model.context_window);
         if to_summarize.is_empty() {
             if !auto {
                 self.notice("recent context already fits — nothing to compact".into());
@@ -1647,6 +861,7 @@ impl App {
                 content: "shell command panicked".into(),
                 outcome: crate::core::tools::ToolOutcome::Failed,
                 summary: "error".into(),
+                display: None,
             });
             let _ = results.send(AppJob::Shell { cmd, output, epoch }).await;
         });
@@ -1748,18 +963,6 @@ impl App {
 
     fn notice(&mut self, text: String) {
         self.transcript.push(Block::new(Kind::Notice, text));
-    }
-}
-
-/// Dim every still-live thinking row. Tool batches, retries, and steered
-/// messages start a fresh block without finishing the prior one, so the
-/// live index is not the full set — TurnEnd walks them all, same moment.
-fn dim_thinking(transcript: &mut Transcript) {
-    for block in &mut transcript.blocks {
-        if block.kind == Kind::Thinking && !block.done {
-            block.done = true;
-            block.touch();
-        }
     }
 }
 

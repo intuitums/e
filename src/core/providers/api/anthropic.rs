@@ -89,9 +89,30 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
         }
     }
 
+    // Moving cache breakpoint on the last cacheable content block: the
+    // system block alone caches only the prefix ahead of the conversation,
+    // so every step of a tool loop re-billed the whole history uncached.
+    // With the tail marked, each request extends the previous step's cached
+    // prefix instead. Thinking blocks can't carry cache_control; skip them.
+    if let Some(last) = messages.last_mut() {
+        if let Some(blocks) = last["content"].as_array_mut() {
+            if let Some(block) = blocks.iter_mut().rev().find(|b| {
+                !matches!(
+                    b["type"].as_str(),
+                    Some("thinking") | Some("redacted_thinking")
+                )
+            }) {
+                block["cache_control"] = json!({"type": "ephemeral"});
+            }
+        }
+    }
+
+    // The output ceiling must fit the model's window: a fixed 32k against a
+    // small declared window would be rejected before generation.
+    let max_tokens = MAX_TOKENS.min((request.model.context_window / 2).max(1024));
     let mut body = json!({
         "model": request.model.id,
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": max_tokens,
         "stream": true,
         "system": [{"type": "text", "text": request.system,
                     "cache_control": {"type": "ephemeral"}}],
@@ -122,9 +143,11 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                 body["output_config"] = json!({"effort": effort});
             }
             Thinking::Manual => {
+                // The budget must stay under max_tokens or the request is
+                // rejected; the clamp only bites on small declared windows.
                 body["thinking"] = json!({
                     "type": "enabled",
-                    "budget_tokens": thinking_budget(effort),
+                    "budget_tokens": thinking_budget(effort).min(max_tokens.saturating_sub(1024).max(1024)),
                 });
             }
         }
@@ -215,8 +238,15 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                     }
                     "input_json_delta" => {
                         if let Some((call, _)) = &mut open_tool {
-                            call.arguments
-                                .push_str(value["delta"]["partial_json"].as_str().unwrap_or(""));
+                            let partial = value["delta"]["partial_json"].as_str().unwrap_or("");
+                            call.arguments.push_str(partial);
+                            if !partial.is_empty() {
+                                let _ = tx
+                                    .send(Event::ToolCallDelta {
+                                        bytes: partial.len() as u64,
+                                    })
+                                    .await;
+                            }
                         }
                     }
                     _ => {}

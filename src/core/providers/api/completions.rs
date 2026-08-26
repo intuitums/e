@@ -128,6 +128,13 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                         }
                         if let Some(args) = fragment["function"]["arguments"].as_str() {
                             entry.arguments.push_str(args);
+                            if !args.is_empty() {
+                                let _ = tx
+                                    .send(Event::ToolCallDelta {
+                                        bytes: args.len() as u64,
+                                    })
+                                    .await;
+                            }
                         }
                     }
                 }

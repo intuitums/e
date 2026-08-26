@@ -8,8 +8,13 @@ use std::time::Duration;
 /// Total provider requests a single failure campaign gets, including the
 /// initial request, before the turn fails outright.
 pub const MAX_ATTEMPTS: u32 = 10;
-/// Backoff — computed or `Retry-After` — never waits longer than this.
+/// The computed backoff ladder never waits longer than this.
 const CEILING_SECS: u64 = 30;
+/// A provider's own `Retry-After` is honored up to this higher bound:
+/// clamping a requested 60s to 30s just burned attempts on requests the
+/// provider already said would fail. Still capped — a provider cannot buy
+/// an unbounded pause.
+const RETRY_AFTER_CEILING_SECS: u64 = 60;
 
 /// Delay before retry attempt `n` (1-indexed; 0 means "no wait"): 250ms, 1s,
 /// 2s, 4s, 8s, 16s, then flat at the ceiling for every attempt after.
@@ -22,11 +27,10 @@ pub fn backoff(attempt: u32) -> Duration {
 }
 
 /// The wait before the next attempt: the provider's own `Retry-After` when
-/// it sent one (capped at the same ceiling — a provider cannot buy an
-/// unbounded pause), else the computed backoff.
+/// it sent one (capped at its own ceiling), else the computed backoff.
 pub fn delay_for(attempt: u32, retry_after_secs: Option<u64>) -> Duration {
     match retry_after_secs {
-        Some(secs) => Duration::from_secs(secs.min(CEILING_SECS)),
+        Some(secs) => Duration::from_secs(secs.min(RETRY_AFTER_CEILING_SECS)),
         None => backoff(attempt),
     }
 }
@@ -48,9 +52,13 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_is_capped_at_the_ceiling_and_skips_the_ladder() {
-        assert_eq!(delay_for(1, Some(999)), Duration::from_secs(CEILING_SECS));
+    fn retry_after_is_capped_at_its_ceiling_and_skips_the_ladder() {
+        assert_eq!(
+            delay_for(1, Some(999)),
+            Duration::from_secs(RETRY_AFTER_CEILING_SECS)
+        );
         assert_eq!(delay_for(1, Some(5)), Duration::from_secs(5));
+        assert_eq!(delay_for(1, Some(60)), Duration::from_secs(60));
         assert_eq!(delay_for(7, Some(2)), Duration::from_secs(2));
     }
 }

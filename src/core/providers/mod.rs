@@ -68,6 +68,17 @@ impl ChatMessage {
             tool_meta: None,
         }
     }
+    /// A dialect-owned reasoning item (signed thinking block, Responses
+    /// reasoning JSON) that must replay ahead of its assistant turn.
+    pub fn reasoning(item: impl Into<String>) -> Self {
+        ChatMessage {
+            role: "reasoning".into(),
+            content: item.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_meta: None,
+        }
+    }
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         ChatMessage {
             role: "tool".into(),
@@ -295,6 +306,13 @@ impl StreamEnd {
 pub enum Event {
     TextDelta(String),
     ReasoningDelta(String),
+    /// Bytes of tool-call argument JSON just streamed. Argument assembly is
+    /// the one long phase with no visible text — a model writing a 20KB
+    /// `write` call streams for tens of seconds — so without this the UI
+    /// (and its live token estimate) sits frozen while the turn is alive.
+    ToolCallDelta {
+        bytes: u64,
+    },
     /// A completed tool request (dialects accumulate the argument deltas).
     ToolCall(ToolCall),
     /// Token usage from the terminal usage frame. `input` is the TOTAL

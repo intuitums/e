@@ -10,6 +10,7 @@ fn ok(content: String, summary: String) -> ToolOutput {
         content,
         outcome: ToolOutcome::Completed,
         summary,
+        display: None,
     }
 }
 fn err(message: String) -> ToolOutput {
@@ -17,13 +18,14 @@ fn err(message: String) -> ToolOutput {
         content: message,
         outcome: ToolOutcome::Failed,
         summary: "error".into(),
+        display: None,
     }
 }
 
 pub fn read_schema() -> Value {
     schema_object(
         "read",
-        "Read a UTF-8 text file. Optional 1-based line offset and count.",
+        "Read a UTF-8 text file. Each returned line is prefixed with its 1-based line number and a tab; the prefix is not part of the file. Use offset/limit to window large files.",
         json!({
             "path": {"type": "string", "description": "File path, absolute or workspace-relative"},
             "offset": {"type": "integer", "description": "1-based first line"},
@@ -45,14 +47,20 @@ pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
         Ok(t) => t,
         Err(e) => return err(format!("read {path}: {e}")),
     };
+    super::note_seen(&full);
     let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
     let limit = args["limit"].as_u64().map(|n| n as usize);
     let lines: Vec<&str> = text.lines().collect();
     let start = offset - 1;
-    let slice: Vec<&str> = match limit {
-        Some(n) => lines.iter().skip(start).take(n).copied().collect(),
-        None => lines.iter().skip(start).copied().collect(),
-    };
+    // Numbered lines: the model can quote "line 42" from compiler output
+    // straight back at the file, and a windowed read says where it sits.
+    let slice: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(limit.unwrap_or(usize::MAX))
+        .map(|(i, line)| format!("{}\t{}", i + 1, line))
+        .collect();
     let count = slice.len();
     ok(truncate(slice.join("\n")), format!("{count} lines"))
 }
@@ -60,7 +68,7 @@ pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
 pub fn write_schema() -> Value {
     schema_object(
         "write",
-        "Write content to a file, creating parent directories. Overwrites.",
+        "Write content to a file, creating parent directories. Overwrites the existing file; fails if the file changed on disk since it was last read.",
         json!({
             "path": {"type": "string"},
             "content": {"type": "string"}
@@ -81,12 +89,16 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
     // Same per-path lock as edit: a concurrent edit's read-modify-write
     // must not interleave with this overwrite.
     let _guard = super::fs_write_lock(&full);
+    if let Err(output) = super::check_fresh(&full, "write", path) {
+        return output;
+    }
     let before = std::fs::read_to_string(&full).unwrap_or_default();
     if let Some(parent) = full.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     match std::fs::write(&full, content) {
         Ok(()) => {
+            super::note_seen(&full);
             let additions = if before == content {
                 0
             } else {
@@ -97,6 +109,10 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
             } else {
                 before.lines().count()
             };
+            // The model wrote this content one message ago — echoing it back
+            // would bill the whole file into the context a second time (and
+            // again on every later request). The full diff goes to the
+            // detail viewer instead.
             let mut detail = format!("wrote {path}");
             if before != content {
                 if !before.is_empty() {
@@ -112,10 +128,12 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
                     }
                 }
             }
-            ok(
-                truncate(detail.trim_end().to_string()),
-                format!("+{additions} -{deletions}"),
-            )
+            ToolOutput {
+                content: format!("wrote {path} ({} lines)", content.lines().count()),
+                outcome: ToolOutcome::Completed,
+                summary: format!("+{additions} -{deletions}"),
+                display: Some(truncate(detail.trim_end().to_string())),
+            }
         }
         Err(e) => err(format!("write {path}: {e}")),
     }
@@ -150,13 +168,15 @@ pub fn ls(args: &Value, cwd: &Path) -> ToolOutput {
         .collect();
     names.sort();
     let count = names.len();
-    ok(names.join("\n"), format!("{count} entries"))
+    // Bounded like every other tool: one giant vendored directory must not
+    // flood the context past the cap the rest of the tools respect.
+    ok(truncate(names.join("\n")), format!("{count} entries"))
 }
 
 pub fn grep_schema() -> Value {
     schema_object(
         "grep",
-        "Search file contents for a regular expression, workspace-wide.",
+        "Search file contents for a regular expression, workspace-wide. Traversal skips dotfiles and .git/target/node_modules/dist/.cache (an explicitly named file is always searched), and stops at 200 matches — the result says so when capped.",
         json!({
             "pattern": {"type": "string"},
             "path": {"type": "string", "description": "Directory or file to search (default: workspace root)"}
@@ -177,7 +197,10 @@ pub fn grep(args: &Value, cwd: &Path) -> ToolOutput {
     let mut hits = Vec::new();
     let mut count = 0usize;
     if root.is_dir() {
-        walk(&root, cwd, &re, &mut hits, &mut count);
+        super::walk_files(&root, &mut |path| {
+            search_file(path, cwd, &re, &mut hits, &mut count);
+            count < MATCH_CAP
+        });
     } else {
         // An explicitly requested file is searched as asked — the dotfile
         // skip rule is a traversal heuristic, not a veto over `.env`.
@@ -186,36 +209,22 @@ pub fn grep(args: &Value, cwd: &Path) -> ToolOutput {
     if hits.is_empty() {
         return ok(String::new(), "0 matches".into());
     }
-    ok(truncate(hits.join("\n")), format!("{count} matches"))
+    // A capped search must say so: "200 matches" alone reads as an exact
+    // count, and the model can't tell a complete result from a stopped one.
+    let mut body = hits.join("\n");
+    let summary = if count >= MATCH_CAP {
+        body.push_str(&format!(
+            "\n… [stopped at {MATCH_CAP} matches — narrow the pattern or path to see the rest]"
+        ));
+        format!("{count}+ matches")
+    } else {
+        format!("{count} matches")
+    };
+    ok(truncate(body), summary)
 }
 
-fn walk(dir: &Path, cwd: &Path, re: &regex::Regex, hits: &mut Vec<String>, count: &mut usize) {
-    const SKIP: &[&str] = &[".git", "target", "node_modules", "dist", ".cache"];
-    if *count >= 200 {
-        return;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e.flatten().map(|e| e.path()).collect::<Vec<_>>(),
-        Err(_) => return,
-    };
-    for path in entries {
-        if *count >= 200 {
-            return;
-        }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if name.starts_with('.') || SKIP.contains(&name.as_str()) {
-            continue;
-        }
-        if path.is_dir() {
-            walk(&path, cwd, re, hits, count);
-        } else {
-            search_file(&path, cwd, re, hits, count);
-        }
-    }
-}
+/// Matches after which a search stops rather than flooding the context.
+const MATCH_CAP: usize = 200;
 
 fn search_file(
     path: &Path,
@@ -239,7 +248,7 @@ fn search_file(
         if re.is_match(line) {
             hits.push(format!("{rel}:{}: {}", n + 1, line.trim()));
             *count += 1;
-            if *count >= 200 {
+            if *count >= MATCH_CAP {
                 return;
             }
         }

@@ -3,36 +3,32 @@
 //! back, a second request made, plain reply ends the turn — all on the one
 //! session stream, TurnStart first, TurnEnd last.
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::sync::Mutex;
+mod common;
 
-// Both tests replace E_HOME and the process cwd; serialize them.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
+use common::{env_lock, serve_sse, test_model, Home};
 use e::core::agent::{Agent, SessionEvent};
-use e::core::providers::catalog::{Api, Model};
-
-fn sse(body: &str) -> String {
-    format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    )
-}
+use e::core::providers::catalog::Api;
 
 // The env lock is deliberately held across awaits: E_HOME and cwd must stay
 // ours for the whole test, and each #[tokio::test] runs on its own runtime.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_runs_a_tool_then_replies() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-toolloop-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
+    let _lock = env_lock();
+    // First request → ask to read hello.txt; second → a plain reply.
+    let first = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",",
+        "\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"hello.txt\\\"}\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let second = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"the file has two lines\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, server) = serve_sse(&[first, second]);
+    let home = Home::new("toolloop");
+    home.auth(r#"{"mock":{"key":"k"}}"#);
 
     // A workspace with one file for the tool to read.
     let ws = std::env::temp_dir().join(format!("e-ws-{port}"));
@@ -40,54 +36,21 @@ async fn agent_runs_a_tool_then_replies() {
     std::fs::write(ws.join("hello.txt"), "line one\nline two\n").unwrap();
     std::env::set_current_dir(&ws).unwrap();
 
-    std::thread::spawn(move || {
-        // First request → ask to read hello.txt.
-        let (mut a, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 16384];
-        let _ = a.read(&mut buf);
-        let first = concat!(
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",",
-            "\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"hello.txt\\\"}\"}}]}}]}\n\n",
-            "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
-            "data: [DONE]\n\n",
-        );
-        a.write_all(sse(first).as_bytes()).unwrap();
-
-        // Second request (now carrying the tool result) → a plain reply.
-        let (mut b, _) = listener.accept().unwrap();
-        let mut buf2 = vec![0u8; 65536];
-        let n = b.read(&mut buf2).unwrap();
-        let sent = String::from_utf8_lossy(&buf2[..n]);
-        // The tool result must have been fed back.
-        assert!(
-            sent.contains("line one"),
-            "tool result not sent back to model"
-        );
-        let second = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"the file has two lines\"}}]}\n\n",
-            "data: [DONE]\n\n",
-        );
-        b.write_all(sse(second).as_bytes()).unwrap();
-    });
-
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
-    let (mut agent, mut rx) = Agent::new(model);
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
     agent.submit("how many lines in hello.txt?".into(), "sys".into());
 
     let mut order = Vec::new();
     let mut reply = String::new();
     let mut tool_ok = false;
+    let mut assembly: Vec<u64> = Vec::new();
+    let mut assembly_before_batch = false;
     while let Some(event) = rx.recv().await {
         match event {
             SessionEvent::TurnStart => order.push("start"),
+            SessionEvent::ToolCallAssembly { bytes } => {
+                assembly_before_batch |= !order.contains(&"batch");
+                assembly.push(bytes);
+            }
             SessionEvent::ToolBatchStart { calls } => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].running, "Reading");
@@ -110,69 +73,49 @@ async fn agent_runs_a_tool_then_replies() {
     assert_eq!(order, vec!["start", "batch", "tool", "end"]);
     assert!(tool_ok, "the read tool errored");
     assert_eq!(reply, "the file has two lines");
+    // Argument streaming is visible while it happens — cumulative byte
+    // counts, arriving before the batch opens, so a long tool call never
+    // looks like a stalled turn.
+    assert!(!assembly.is_empty(), "no ToolCallAssembly liveness events");
+    assert!(assembly.windows(2).all(|w| w[0] < w[1]) || assembly.len() == 1);
+    assert!(assembly_before_batch, "liveness must precede the batch");
+    // The second request carried the tool result back to the model.
+    let captured = server.join().unwrap();
+    assert!(
+        captured[1].contains("line one"),
+        "tool result not sent back to model"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
 }
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_batches_run_concurrently_and_commit_in_source_order() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let home = std::env::temp_dir().join(format!("e-concurrent-{port}"));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"mock":{"key":"k"}}"#).unwrap();
-    std::env::set_var("E_HOME", &home);
+    let _lock = env_lock();
+    // First request → two calls: a slow command and a fast read; second → a
+    // plain reply.
+    let first = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[",
+        "{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"sleep 0.4\\\"}\"}},",
+        "{\"index\":1,\"id\":\"c2\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"quick.txt\\\"}\"}}",
+        "]}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let second = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"both done\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let (port, server) = serve_sse(&[first, second]);
+    let home = Home::new("concurrent");
+    home.auth(r#"{"mock":{"key":"k"}}"#);
 
     let ws = std::env::temp_dir().join(format!("e-ws-c-{port}"));
     std::fs::create_dir_all(&ws).unwrap();
     std::fs::write(ws.join("quick.txt"), "quick body\n").unwrap();
     std::env::set_current_dir(&ws).unwrap();
 
-    std::thread::spawn(move || {
-        // First request → two calls: a slow command and a fast read.
-        let (mut a, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 16384];
-        let _ = a.read(&mut buf);
-        let first = concat!(
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[",
-            "{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"sleep 0.4\\\"}\"}},",
-            "{\"index\":1,\"id\":\"c2\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"quick.txt\\\"}\"}}",
-            "]}}]}\n\n",
-            "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
-            "data: [DONE]\n\n"
-        );
-        a.write_all(sse(first).as_bytes()).unwrap();
-
-        // Second request → plain reply; the sent history must carry both
-        // results in assistant source order (c1 before c2).
-        let (mut b, _) = listener.accept().unwrap();
-        let mut buf2 = vec![0u8; 65536];
-        let n = b.read(&mut buf2).unwrap();
-        let sent = String::from_utf8_lossy(&buf2[..n]);
-        let c1 = sent.find("call_id\":\"c1\"").expect("c1 result sent");
-        let c2 = sent.find("call_id\":\"c2\"").expect("c2 result sent");
-        assert!(c1 < c2, "results must commit in source order");
-        let second = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"both done\"}}]}
-
-",
-            "data: [DONE]
-
-"
-        );
-        b.write_all(sse(second).as_bytes()).unwrap();
-    });
-
-    let model = Model {
-        provider: "mock".into(),
-        id: "m".into(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        api: Api::Completions,
-        efforts: Vec::new(),
-        thinking: e::core::providers::catalog::Thinking::Manual,
-        context_window: 200_000,
-    };
-    let (mut agent, mut rx) = Agent::new(model);
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
     agent.submit("run both".into(), "sys".into());
 
     let mut started = Vec::new();
@@ -194,4 +137,11 @@ async fn tool_batches_run_concurrently_and_commit_in_source_order() {
     // Concurrency: the second call starts before the first one finishes.
     assert_eq!(started.len(), 2);
     assert!(!ended_before_last_start, "calls ran serially");
+    // The sent history carries both results in assistant source order.
+    let captured = server.join().unwrap();
+    let sent = &captured[1];
+    let c1 = sent.find("call_id\":\"c1\"").expect("c1 result sent");
+    let c2 = sent.find("call_id\":\"c2\"").expect("c2 result sent");
+    assert!(c1 < c2, "results must commit in source order");
+    let _ = std::fs::remove_dir_all(&ws);
 }

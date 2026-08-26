@@ -221,6 +221,17 @@ fn assert_wire(name: &str, sent: &str) {
                 "high effort budget missing"
             );
             assert!(body["max_tokens"].is_number());
+            // Prompt caching: the system block anchors the prefix and the
+            // last message carries the moving breakpoint — without it every
+            // step of a tool loop re-bills the whole history uncached.
+            assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+            let last = body["messages"].as_array().unwrap().last().unwrap();
+            let blocks = last["content"].as_array().unwrap();
+            assert_eq!(
+                blocks.last().unwrap()["cache_control"]["type"],
+                "ephemeral",
+                "moving cache breakpoint missing on the last message"
+            );
         }
         "responses" => {
             // The regression that 400'd the first live turn: tools[0].name
@@ -361,6 +372,8 @@ async fn collect_stream(
                 break;
             }
             Event::ReasoningItem(_) => {}
+            // Liveness progress; the accumulated call itself is asserted on.
+            Event::ToolCallDelta { .. } => {}
         }
     }
     (text, reasoning, calls, usage, finish)

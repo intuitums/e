@@ -1,0 +1,312 @@
+//! The footer menus: commands, models, scoped models, skills, files —
+//! building them, syncing them to the composer, and applying a selection.
+
+use super::*;
+
+impl App {
+    pub(super) fn command_items(&self) -> Vec<MenuItem> {
+        let mut items = vec![
+            MenuItem::new(
+                "/login",
+                "sign in to a provider — account or API key",
+                "/login",
+            ),
+            MenuItem::new("/models", "switch the model", "/models"),
+            MenuItem::new(
+                "/scoped-models",
+                "choose which models ctrl+p cycles",
+                "/scoped-models",
+            ),
+            MenuItem::new(
+                "/reload",
+                "reload extensions, themes, and config",
+                "/reload",
+            ),
+            MenuItem::new("/resume", "resume a saved session", "/resume"),
+            MenuItem::new("/new", "start a fresh session", "/new"),
+            MenuItem::new("/copy", "copy the last reply", "/copy"),
+            MenuItem::new("/compact", "summarize into a fresh session", "/compact"),
+            MenuItem::new(
+                "/trust",
+                "trust this directory (loads its AGENTS.md, .e resources)",
+                "/trust",
+            ),
+            MenuItem::new("/settings", "change preferences", "/settings"),
+            MenuItem::new("/help", "show commands", "/help"),
+            MenuItem::new("/version", "show the version", "/version"),
+            MenuItem::new("/quit", "exit", "/quit"),
+        ];
+        // Built-in dispatch wins name clashes, so a template or extension
+        // command shadowed by a built-in is unreachable — listing it would
+        // show a duplicate row that runs the built-in anyway.
+        for template in crate::core::resources::prompts::list(&self.agent.cwd()) {
+            if is_builtin_command(&template.name) {
+                continue;
+            }
+            let slash = format!("/{}", template.name);
+            let description = if template.argument_hint.is_empty() {
+                template.description.clone()
+            } else {
+                format!("{} — {}", template.description, template.argument_hint)
+            };
+            items.push(MenuItem::new(&slash, &description, &slash));
+        }
+        for (name, description) in self.host.commands() {
+            if is_builtin_command(&name) {
+                continue;
+            }
+            let slash = format!("/{name}");
+            items.push(MenuItem::new(&slash, &description, &slash));
+        }
+        items
+    }
+
+    /// The scoped-models multi-select: every available model, Space toggling
+    /// membership. The reference semantics: no scope stored = everything in
+    /// scope; the first toggle narrows the scope to just that model.
+    pub(super) fn open_scoped_menu(&mut self) {
+        let available = model::available();
+        if available.is_empty() {
+            self.notice("no models available — use /login to sign in to a provider".into());
+            return;
+        }
+        let scope = model::scope();
+        let mut available = model::provider_grouped(available);
+        // The scoped entries lead the list — what you curated, not a hunt.
+        if let Some(ids) = &scope {
+            available.sort_by_key(|m| !ids.contains(&model::slug(m)));
+        }
+        let items: Vec<MenuItem> = available
+            .iter()
+            .map(|m| {
+                let slug = model::slug(m);
+                let mut item = MenuItem::new(&m.id, &m.provider, &slug);
+                let in_scope = match &scope {
+                    Some(ids) => ids.contains(&slug),
+                    None => true,
+                };
+                if in_scope {
+                    item.meta = "in scope".into();
+                }
+                item
+            })
+            .collect();
+        self.menu = Some(Menu::new(
+            MenuKind::Scoped,
+            "Scoped models",
+            HINT_SCOPED,
+            items,
+        ));
+    }
+
+    /// Space on the scoped picker: reference toggle semantics — no scope yet
+    /// means the first toggle starts a scope of exactly that model.
+    pub(super) fn toggle_scoped(&mut self) {
+        let Some(menu) = &mut self.menu else { return };
+        let Some(slug) = menu.current().map(|i| i.value.clone()) else {
+            return;
+        };
+        match model::scope() {
+            None => {
+                model::set_scope(std::slice::from_ref(&slug));
+                menu.for_each_item(|item| {
+                    item.meta = if item.value == slug {
+                        "in scope".into()
+                    } else {
+                        String::new()
+                    };
+                });
+            }
+            Some(mut ids) => {
+                let meta = if let Some(pos) = ids.iter().position(|id| *id == slug) {
+                    ids.remove(pos);
+                    ""
+                } else {
+                    ids.push(slug.clone());
+                    "in scope"
+                };
+                if let Some(item) = menu.current_mut() {
+                    item.meta = meta.into();
+                }
+                model::set_scope(&ids);
+            }
+        }
+    }
+
+    pub(super) fn open_model_menu(&mut self) {
+        // Instant discovery where it matters: show the cached list now, ask
+        // the gateways in the background (60s floor), and pop new rows into
+        // the open picker when the answer lands.
+        let results = self.results.clone();
+        tokio::spawn(async move {
+            crate::core::providers::catalog::refresh_remote_within(60_000).await;
+            let _ = results.send(AppJob::CatalogRefreshed).await;
+        });
+        self.build_model_menu();
+    }
+
+    /// The picker itself, from the current catalog — no refresh side effects,
+    /// so the rebuild-on-refresh arm cannot loop.
+    pub(super) fn build_model_menu(&mut self) {
+        let available = model::provider_grouped(model::available());
+        if available.is_empty() {
+            self.notice("no models available — use /login to sign in to a provider".into());
+            return;
+        }
+        let current = self.agent.model_slug();
+        let items = available
+            .iter()
+            .map(|m| {
+                let slug = model::slug(m);
+                let mut item = MenuItem::new(&m.id, &m.provider, &slug);
+                if slug == current {
+                    item.meta = "current".into();
+                }
+                item
+            })
+            .collect();
+        self.menu = Some(Menu::new(MenuKind::Models, "Models", HINT_USE, items));
+    }
+
+    pub(super) fn open_skills_menu(&mut self, query: &str) {
+        let items: Vec<MenuItem> = crate::core::resources::skills::list(&self.agent.cwd())
+            .into_iter()
+            .map(|s| MenuItem::new(&s.name, &s.description, &s.name))
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let mut menu = Menu::new(MenuKind::Skills, "Skills", HINT_USE, items);
+        menu.set_query(query);
+        self.menu = Some(menu);
+    }
+
+    pub(super) fn open_file_menu(&mut self, query: &str) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let items = crate::core::workspace::list_files(&cwd)
+            .into_iter()
+            .map(|path| MenuItem::new(&path, "", &path))
+            .collect();
+        let mut menu = Menu::new(MenuKind::Files, "Files", HINT_USE, items);
+        menu.set_query(query);
+        self.menu = Some(menu);
+    }
+
+    /// Keep pickers in sync with the composer text: `/` at the start opens
+    /// the command picker, an `@word` under the cursor the file picker.
+    pub(super) fn sync_menu(&mut self) {
+        let text = self.editor.text();
+        if self.pending_key.is_some() {
+            return;
+        }
+        // Slash picker: leading '/', no space yet.
+        if text.starts_with('/') && !text.contains(' ') && !text.contains('\n') {
+            let query = text[1..].to_string();
+            match &mut self.menu {
+                Some(m) if m.kind == MenuKind::Commands => m.set_query(&query),
+                _ => {
+                    let mut menu = Menu::new(
+                        MenuKind::Commands,
+                        "Commands",
+                        HINT_USE,
+                        self.command_items(),
+                    );
+                    menu.set_query(&query);
+                    self.menu = Some(menu);
+                }
+            }
+            return;
+        }
+        // File picker: the last token starts with '@'.
+        if let Some(token) = text
+            .split_whitespace()
+            .last()
+            .filter(|t| t.starts_with('@'))
+        {
+            let query = token[1..].to_string();
+            match &mut self.menu {
+                Some(m) if m.kind == MenuKind::Files => m.set_query(&query),
+                _ => self.open_file_menu(&query),
+            }
+            return;
+        }
+        // Skills picker: the last token starts with '$'.
+        if let Some(token) = text
+            .split_whitespace()
+            .last()
+            .filter(|t| t.starts_with('$'))
+        {
+            let query = token[1..].to_string();
+            match &mut self.menu {
+                Some(m) if m.kind == MenuKind::Skills => m.set_query(&query),
+                _ => self.open_skills_menu(&query),
+            }
+            return;
+        }
+        // Auto pickers close when their trigger text is gone.
+        if matches!(
+            self.menu.as_ref().map(|m| m.kind),
+            Some(MenuKind::Commands) | Some(MenuKind::Files) | Some(MenuKind::Skills)
+        ) {
+            self.menu = None;
+        }
+    }
+
+    /// Enter on an open picker. Returns true when the key was consumed.
+    pub(super) fn select_menu(&mut self) -> bool {
+        let Some(menu) = &self.menu else { return false };
+        let Some(item) = menu.current().cloned() else {
+            self.menu = None;
+            return true;
+        };
+        let kind = menu.kind;
+        self.menu = None;
+        match kind {
+            MenuKind::Commands => {
+                self.editor.set_text("");
+                self.dispatch_command(item.value);
+            }
+            MenuKind::Files => {
+                // Replace the @token under construction with the chosen path.
+                let text = self.editor.text();
+                let replaced = match text.rfind('@') {
+                    Some(at) => format!("{}{}", &text[..at], item.value),
+                    None => item.value,
+                };
+                self.editor.set_text(&replaced);
+            }
+            MenuKind::Sessions => {
+                self.resume_path(std::path::PathBuf::from(item.value));
+            }
+            MenuKind::Scoped => {}
+            MenuKind::Skills => {
+                // Replace the $token, then send the skill body as context.
+                let text = self.editor.text();
+                let rest = match text.rfind('$') {
+                    Some(at) => text[..at].trim_end().to_string(),
+                    None => String::new(),
+                };
+                self.editor.set_text("");
+                if let Some(skill) =
+                    crate::core::resources::skills::get(&item.value, &self.agent.cwd())
+                {
+                    let combined = if rest.is_empty() {
+                        skill.body
+                    } else {
+                        format!("{}\n\n{rest}", skill.body)
+                    };
+                    self.prompt(combined);
+                }
+            }
+            MenuKind::Models => {
+                if let Some(found) = model::resolve(&item.value) {
+                    persist_model(&found);
+                    self.notice(format!("model set to {}", model::slug(&found)));
+                    self.agent.model = found;
+                    self.refresh_status_cache();
+                }
+            }
+        }
+        true
+    }
+}

@@ -363,6 +363,81 @@ fn a_corrupted_record_is_surfaced_not_silently_dropped() {
     let _ = std::fs::remove_dir_all(home);
 }
 
+/// A crash mid-append leaves a torn final line — the most common artifact an
+/// append-only log ever shows. That must cost one record, not the session;
+/// interior corruption (the test above) stays fatal.
+#[test]
+fn a_torn_final_line_costs_the_record_not_the_session() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!(
+        "e-session-torn-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+    let cwd = home.join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut s = Session::create(&cwd, "test/model").unwrap();
+    s.append(&ChatMessage::user("first")).unwrap();
+    s.append(&ChatMessage::assistant("second", Vec::new()))
+        .unwrap();
+    let path = s.path().to_path_buf();
+    drop(s);
+
+    // The crash: a record cut mid-write at the end of the file.
+    let mut raw = std::fs::read_to_string(&path).unwrap();
+    raw.push_str("{\"type\":\"message\",\"message\":{\"role\":\"user\",\"con");
+    std::fs::write(&path, raw).unwrap();
+
+    let messages = Session::load(&path).unwrap();
+    assert_eq!(messages.len(), 2, "the complete records survive");
+    assert_eq!(messages[1].content, "second");
+
+    let _ = std::fs::remove_dir_all(home);
+}
+
+/// A crash between a tool call and its result leaves a dangling tool_use
+/// every dialect rejects on replay; load repairs the tail with an honest
+/// synthetic result instead of handing the agent an unreplayable history.
+#[test]
+fn a_dangling_tool_call_is_repaired_on_load() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!(
+        "e-session-dangling-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+    let cwd = home.join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut s = Session::create(&cwd, "test/model").unwrap();
+    s.append(&ChatMessage::user("task")).unwrap();
+    s.append(&ChatMessage::assistant(
+        "working",
+        vec![e::core::providers::ToolCall {
+            id: "call-1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+            signature: None,
+        }],
+    ))
+    .unwrap();
+    let path = s.path().to_path_buf();
+    drop(s);
+
+    let messages = Session::load(&path).unwrap();
+    let last = messages.last().unwrap();
+    assert_eq!(last.role, "tool", "a synthetic result closes the batch");
+    assert_eq!(last.tool_call_id.as_deref(), Some("call-1"));
+    assert!(last.content.contains("not executed"));
+
+    let _ = std::fs::remove_dir_all(home);
+}
+
 /// A session that cannot be created must say so — once per failure episode,
 /// not per message, and not never.
 #[tokio::test(flavor = "multi_thread")]

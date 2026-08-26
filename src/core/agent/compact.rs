@@ -14,11 +14,25 @@
 use crate::core::providers::catalog::Model;
 use crate::core::providers::{self, ChatMessage, Event, Request};
 
-/// Auto-compact when context tokens exceed `context_window - RESERVE_TOKENS`.
+/// Ceiling of the auto-compact reserve (large windows).
 pub const RESERVE_TOKENS: u64 = 16_384;
 
-/// Approximate token budget of recent messages kept verbatim through a compact.
+/// Ceiling of the keep-recent budget (large windows).
 pub const KEEP_RECENT_TOKENS: u64 = 20_000;
+
+/// Headroom kept free before auto-compact fires: an eighth of the window,
+/// bounded. A fixed 16k reserve was tuned for 200k windows — against a 32k
+/// local model it triggered at half the usable context.
+pub fn reserve_tokens(context_window: u64) -> u64 {
+    (context_window / 8).clamp(2_048.min(context_window), RESERVE_TOKENS)
+}
+
+/// Budget of recent messages kept verbatim through a compact: a quarter of
+/// the window, bounded. The fixed 20k budget was larger than some whole
+/// windows, which made compaction a no-op exactly where it was needed most.
+pub fn keep_recent_tokens(context_window: u64) -> u64 {
+    KEEP_RECENT_TOKENS.min((context_window / 4).max(1_024))
+}
 
 /// Tool results are trimmed in the flattened transcript; the summary needs
 /// what they meant, not their full bytes.
@@ -48,9 +62,12 @@ File paths, commands, data, or references needed to continue, or \"(none)\".
 
 Keep each section concise.";
 
-/// True when the session has grown into the reserve headroom.
+/// True when the session has grown into the reserve headroom. A window of 0
+/// (a broken user-declared model) never compacts: the threshold would sit at
+/// zero and every turn would end in a pointless compaction loop.
 pub fn should_compact(context_tokens: u64, context_window: u64) -> bool {
-    context_tokens > context_window.saturating_sub(RESERVE_TOKENS)
+    context_window > 0
+        && context_tokens > context_window.saturating_sub(reserve_tokens(context_window))
 }
 
 /// chars/4, the reference heuristic — conservative, and only used to place
@@ -64,18 +81,19 @@ fn estimate_tokens(message: &ChatMessage) -> u64 {
 }
 
 /// Split history into (to_summarize, kept): walk backwards accumulating
-/// estimated tokens until the keep budget is reached, then cut at the nearest
-/// valid boundary at or after that point — a tool result always stays with
-/// its call, and a signed thinking block ("reasoning") always stays with the
-/// assistant turn it precedes; replaying either apart from its partner fails
-/// the request. Returns an empty `to_summarize` when the history is small
-/// enough that compaction would gain nothing.
-pub fn split(history: &[ChatMessage]) -> (Vec<ChatMessage>, Vec<ChatMessage>) {
+/// estimated tokens until the keep budget (window-relative) is reached, then
+/// cut at the nearest valid boundary at or after that point — a tool result
+/// always stays with its call, and a signed thinking block ("reasoning")
+/// always stays with the assistant turn it precedes; replaying either apart
+/// from its partner fails the request. Returns an empty `to_summarize` when
+/// the history is small enough that compaction would gain nothing.
+pub fn split(history: &[ChatMessage], context_window: u64) -> (Vec<ChatMessage>, Vec<ChatMessage>) {
+    let keep = keep_recent_tokens(context_window);
     let mut accumulated = 0u64;
     let mut cut = 0usize;
     for (i, message) in history.iter().enumerate().rev() {
         accumulated += estimate_tokens(message);
-        if accumulated >= KEEP_RECENT_TOKENS {
+        if accumulated >= keep {
             // The nearest valid cut at or after the overrun point: not on a
             // tool result, and not between a reasoning block and the
             // assistant message whose signature it carries.
@@ -95,13 +113,36 @@ pub fn split(history: &[ChatMessage]) -> (Vec<ChatMessage>, Vec<ChatMessage>) {
 
 /// One request, one summary. Errors are the provider's message, verbatim.
 pub async fn summarize(model: Model, history: &[ChatMessage]) -> Result<String, String> {
+    // The transcript itself must fit the model being asked to summarize it —
+    // the history that triggered compaction by definition nearly filled the
+    // window, so an unbudgeted flatten could fail with a context overflow at
+    // the only moment compaction is needed. Budget to half the window
+    // (chars/4 heuristic), dropping the oldest segments first: the recent
+    // ones carry the state the continuation depends on.
+    let budget_chars = (model.context_window.saturating_mul(4) / 2).max(4_096) as usize;
+    let segments = transcript_segments(history);
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 0usize;
+    for segment in segments.iter().rev() {
+        if used + segment.len() > budget_chars && !kept.is_empty() {
+            break;
+        }
+        used += segment.len();
+        kept.push(segment);
+    }
+    let dropped = segments.len() - kept.len();
+    kept.reverse();
+    let mut flattened = String::new();
+    if dropped > 0 {
+        flattened.push_str(&format!(
+            "[{dropped} earlier messages omitted — they no longer fit the summarization request]\n\n"
+        ));
+    }
+    flattened.push_str(&kept.join(""));
     let request = Request {
         model,
         system: SYSTEM.into(),
-        messages: vec![ChatMessage::user(format!(
-            "{}\n\n{INSTRUCTION}",
-            transcript(history)
-        ))],
+        messages: vec![ChatMessage::user(format!("{flattened}\n\n{INSTRUCTION}"))],
         effort: None,
         tools: Vec::new(),
     };
@@ -128,9 +169,11 @@ pub fn seed(summary: &str) -> String {
     )
 }
 
-/// Role-labeled plain text of the given history, tool results trimmed.
-fn transcript(history: &[ChatMessage]) -> String {
-    let mut out = String::new();
+/// Role-labeled plain text of the given history, one segment per message,
+/// tool results trimmed. Segments let the caller drop the oldest whole
+/// messages when the flatten must fit a budget.
+fn transcript_segments(history: &[ChatMessage]) -> Vec<String> {
+    let mut out = Vec::new();
     for message in history {
         let content = message.content.trim();
         if message.role == "reasoning" {
@@ -143,17 +186,18 @@ fn transcript(history: &[ChatMessage]) -> String {
             } else {
                 ""
             };
-            out.push_str(&format!("tool result:\n{kept}{marker}\n\n"));
+            out.push(format!("tool result:\n{kept}{marker}\n\n"));
             continue;
         }
         if content.is_empty() && message.tool_calls.is_empty() {
             continue;
         }
-        out.push_str(&format!("{}:\n{content}\n", message.role));
+        let mut segment = format!("{}:\n{content}\n", message.role);
         for call in &message.tool_calls {
-            out.push_str(&format!("[called {} {}]\n", call.name, call.arguments));
+            segment.push_str(&format!("[called {} {}]\n", call.name, call.arguments));
         }
-        out.push('\n');
+        segment.push('\n');
+        out.push(segment);
     }
     out
 }

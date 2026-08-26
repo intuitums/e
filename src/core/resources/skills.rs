@@ -18,6 +18,9 @@ pub struct Skill {
     pub body: String,
     /// When true, only the user may invoke it (`$name`), never the model.
     pub disable_model_invocation: bool,
+    /// The skill's own folder: a body that references bundled files
+    /// (references, templates, scripts) is useless without it.
+    pub dir: std::path::PathBuf,
 }
 
 /// Global skills plus, when `cwd` is trusted, its own `.e/skills/`; on a
@@ -70,6 +73,7 @@ fn load(path: &Path) -> Option<Skill> {
         description,
         body: body.trim().to_string(),
         disable_model_invocation: disable,
+        dir: path.parent()?.to_path_buf(),
     })
 }
 

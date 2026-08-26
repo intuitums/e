@@ -21,6 +21,12 @@ and working in trusted repositories. A repository's `AGENTS.md`, code
 comments, or skill files can trivially prompt-inject any coding agent; this
 cannot be fully protected against and is out of scope.
 
+Directory trust (`/trust`) gates **context injection, not execution**: an
+untrusted directory's `AGENTS.md`, `.e/skills/`, and `.e/prompts/` are not
+loaded, but the model still runs tools — including bash — without a gate
+there. Trust decides what steers the agent, not what the agent may do;
+containment of what it does is the sandbox's job, per the paragraphs above.
+
 What e **does** promise — the lines whose crossing is a vulnerability — is
 pinned in `scripts/guard.sh` and enforced in CI:
 

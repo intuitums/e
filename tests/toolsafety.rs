@@ -102,6 +102,67 @@ fn live_bash_output_reassembles_utf8_split_across_reads() {
 }
 
 #[test]
+fn edit_fails_when_the_file_changed_on_disk_since_e_saw_it() {
+    let ws = workspace("stale");
+    let file = ws.join("config.txt");
+    std::fs::write(&file, "alpha = 1\n").unwrap();
+
+    // e reads the file (recording its on-disk state)…
+    let read = tools::run("read", r#"{"path":"config.txt"}"#, &ws);
+    assert!(!read.is_error());
+
+    // …then something else rewrites it behind e's back.
+    std::fs::write(&file, "alpha = 1\nbeta = 2\n").unwrap();
+
+    let stale = tools::run(
+        "edit",
+        r#"{"path":"config.txt","old_string":"alpha = 1","new_string":"alpha = 9"}"#,
+        &ws,
+    );
+    assert!(stale.is_error(), "a stale edit must not clobber the file");
+    assert!(stale.content.contains("changed on disk"));
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "alpha = 1\nbeta = 2\n",
+        "the external change survives"
+    );
+
+    // Re-reading refreshes the record and the edit goes through.
+    let reread = tools::run("read", r#"{"path":"config.txt"}"#, &ws);
+    assert!(!reread.is_error());
+    let edit = tools::run(
+        "edit",
+        r#"{"path":"config.txt","old_string":"alpha = 1","new_string":"alpha = 9"}"#,
+        &ws,
+    );
+    assert!(
+        !edit.is_error(),
+        "after a re-read the edit proceeds: {}",
+        edit.content
+    );
+    assert!(std::fs::read_to_string(&file)
+        .unwrap()
+        .contains("alpha = 9"));
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[cfg(unix)]
+#[test]
+fn search_tools_survive_a_symlink_cycle() {
+    let ws = workspace("symlink");
+    std::fs::write(ws.join("real.txt"), "needle\n").unwrap();
+    // A directory symlink pointing back at its parent: following it would
+    // recurse forever.
+    std::os::unix::fs::symlink(&ws, ws.join("cycle")).unwrap();
+
+    let grep = tools::run("grep", r#"{"pattern":"needle"}"#, &ws);
+    assert_eq!(grep.summary, "1 matches", "{}", grep.content);
+    let find = tools::run("find", r#"{"pattern":"*.txt"}"#, &ws);
+    assert!(find.content.contains("real.txt"));
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn grep_searches_an_explicitly_requested_dotfile() {
     let ws = workspace("dotgrep");
     std::fs::write(ws.join(".env"), "SECRET_NAME=needle\n").unwrap();

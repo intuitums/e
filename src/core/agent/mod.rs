@@ -24,34 +24,54 @@ use crate::core::providers::{
 use crate::core::session::Session;
 use crate::core::tools;
 
-/// Append a message to history and to the session log, creating the log on
-/// the first message. The in-memory turn always proceeds; a persistence
-/// failure comes back as the error so the caller can surface it — silently
-/// losing history is the one thing this must never do.
-fn commit(
-    history: &Arc<Mutex<Vec<ChatMessage>>>,
-    session: &Arc<Mutex<Option<Session>>>,
-    cwd: &std::path::Path,
-    model: &Model,
-    message: ChatMessage,
-    session_name: &Arc<Mutex<Option<String>>>,
-) -> std::io::Result<()> {
-    history.lock().unwrap().push(message.clone());
-    let mut guard = session.lock().unwrap();
-    if guard.is_none() {
-        let mut created = Session::create(cwd, &slug(model))?;
-        // A pending name applies before the first record. It is best-effort:
-        // failing here must not discard the freshly created log — dropping it
-        // would make the next commit open a different file and strand every
-        // message already in memory outside any session.
-        if let Some(name) = session_name.lock().unwrap().clone() {
-            let _ = created.set_name(&name);
-        }
-        *guard = Some(created);
+/// Steps (provider requests, tool batches between them) one turn may run
+/// before it stops and asks to be continued. A backstop against a model
+/// stuck calling tools forever — set far above any legitimate turn.
+const MAX_STEPS: u32 = 256;
+
+/// One handle for everything a commit needs — history, the session log, and
+/// the persistence-warning latch — so the turn loop appends a message with
+/// one call instead of threading six parameters through every site.
+#[derive(Clone)]
+struct TurnLog {
+    history: Arc<Mutex<Vec<ChatMessage>>>,
+    session: Arc<Mutex<Option<Session>>>,
+    cwd: PathBuf,
+    model: Model,
+    session_name: Arc<Mutex<Option<String>>>,
+    persist_warned: Arc<AtomicBool>,
+    events: mpsc::Sender<SessionEvent>,
+}
+
+impl TurnLog {
+    /// Append a message to history and to the session log, creating the log
+    /// on the first message. The in-memory turn always proceeds; a
+    /// persistence failure warns once per episode (see `note_persist`) —
+    /// silently losing history is the one thing this must never do.
+    fn commit(&self, message: ChatMessage) {
+        let result = self.append(message);
+        note_persist(&self.persist_warned, result, &self.events);
     }
-    match guard.as_mut() {
-        Some(s) => s.append(&message),
-        None => Ok(()),
+
+    fn append(&self, message: ChatMessage) -> std::io::Result<()> {
+        self.history.lock().unwrap().push(message.clone());
+        let mut guard = self.session.lock().unwrap();
+        if guard.is_none() {
+            let mut created = Session::create(&self.cwd, &slug(&self.model))?;
+            // A pending name applies before the first record. It is
+            // best-effort: failing here must not discard the freshly created
+            // log — dropping it would make the next commit open a different
+            // file and strand every message already in memory outside any
+            // session.
+            if let Some(name) = self.session_name.lock().unwrap().clone() {
+                let _ = created.set_name(&name);
+            }
+            *guard = Some(created);
+        }
+        match guard.as_mut() {
+            Some(s) => s.append(&message),
+            None => Ok(()),
+        }
     }
 }
 
@@ -145,6 +165,12 @@ pub enum SessionEvent {
         outcome: tools::ToolOutcome,
         summary: String,
         content: String,
+    },
+    /// Cumulative bytes of tool-call argument JSON streamed so far this
+    /// step. Argument assembly is the one long stream phase with no other
+    /// event — without this the UI freezes while the turn is alive.
+    ToolCallAssembly {
+        bytes: u64,
     },
     /// An extension tool named the session.
     Named(String),
@@ -295,19 +321,25 @@ impl Agent {
         self.history.lock().unwrap().clear();
     }
 
+    /// The commit handle over this agent's history, session, and warning
+    /// latch — the one way messages enter the record.
+    fn log(&self) -> TurnLog {
+        TurnLog {
+            history: self.history.clone(),
+            session: self.session.clone(),
+            cwd: self.cwd.clone(),
+            model: self.model.clone(),
+            session_name: self.session_name.clone(),
+            persist_warned: self.persist_warned.clone(),
+            events: self.events.clone(),
+        }
+    }
+
     /// Commit a user-visible fact into history and the session log without
     /// starting a turn — the `!` shell passthrough records its output this way
     /// so the model sees what the user ran.
     pub fn record_user(&self, text: String) {
-        let result = commit(
-            &self.history,
-            &self.session,
-            &self.cwd,
-            &self.model,
-            ChatMessage::user(text),
-            &self.session_name,
-        );
-        note_persist(&self.persist_warned, result, &self.events);
+        self.log().commit(ChatMessage::user(text));
     }
 
     /// Replace the history with the compaction seed plus the kept recent
@@ -404,15 +436,7 @@ impl Agent {
             self.pending.lock().unwrap().push(text);
             return true;
         }
-        let result = commit(
-            &self.history,
-            &self.session,
-            &self.cwd,
-            &self.model,
-            ChatMessage::user(text),
-            &self.session_name,
-        );
-        note_persist(&self.persist_warned, result, &self.events);
+        self.log().commit(ChatMessage::user(text));
         self.start(system);
         false
     }
@@ -420,6 +444,7 @@ impl Agent {
     fn start(&mut self, system: String) {
         self.running = true;
         self.cancel.store(false, Ordering::SeqCst);
+        let log = self.log();
         let events = self.events.clone();
         let history = self.history.clone();
 
@@ -427,32 +452,40 @@ impl Agent {
         let model = self.model.clone();
         let cwd = self.cwd.clone();
         let effort = self.effort();
-        let session = self.session.clone();
         let pending = self.pending.clone();
         let host = self.host.clone();
-        let session_name = self.session_name.clone();
-        let persist_warned = self.persist_warned.clone();
         let tool_seq = self.tool_seq.clone();
 
         tokio::spawn(async move {
             let _ = events.send(SessionEvent::TurnStart).await;
+            // One free retry for a blank success per turn: an empty stream is
+            // the most transient failure there is, and ending the turn on the
+            // first one traded a 1s pause for a dead turn.
+            let mut empty_retried = false;
+            // Steps this turn has run (one request each). The cap is a
+            // runaway backstop far above real work, not a working budget.
+            let mut steps = 0u32;
+            // Context size after the latest step, from real usage; 0 until a
+            // provider reports one.
+            let mut last_context = 0u64;
             let aborted = 'turn: loop {
                 if cancel.load(Ordering::SeqCst) {
                     break true;
+                }
+                steps += 1;
+                if steps > MAX_STEPS {
+                    let _ = events
+                        .send(SessionEvent::Warning(format!(
+                            "turn stopped after {MAX_STEPS} steps — send a message to continue"
+                        )))
+                        .await;
+                    break false;
                 }
                 // Steer: fold any pending messages into this turn between steps.
                 let steered: Vec<String> = { pending.lock().unwrap().drain(..).collect() };
                 for message in steered {
                     let _ = events.send(SessionEvent::Steered(message.clone())).await;
-                    let result = commit(
-                        &history,
-                        &session,
-                        &cwd,
-                        &model,
-                        ChatMessage::user(message),
-                        &session_name,
-                    );
-                    note_persist(&persist_warned, result, &events);
+                    log.commit(ChatMessage::user(message));
                 }
 
                 let messages = { history.lock().unwrap().clone() };
@@ -483,6 +516,17 @@ impl Agent {
                 // thoughts on screen) and a thinking-only stream ending
                 // without text would be called an empty response.
                 let mut reasoning_streamed = false;
+                // Latest usage frame this step; emitted once after the stream
+                // ends. Dialects may report usage cumulatively mid-stream
+                // (Gemini sends usageMetadata per chunk), so forwarding every
+                // frame would let a consumer that sums per-step usage count
+                // the same tokens more than once.
+                let mut step_usage: Option<(u64, u64, u64)> = None;
+                // Cumulative argument bytes this attempt, for the liveness
+                // row. Deliberately not part of the retry-safety check: a
+                // partial call never left the dialect, so replaying the
+                // request commits nothing twice.
+                let mut assembly_bytes = 0u64;
                 let mut errored = false;
                 // True once this attempt has streamed anything at all — the
                 // signal both for "recovered" (first content after a retry)
@@ -492,12 +536,18 @@ impl Agent {
                 // prior `while let Some(event) = rx.recv()` only checked Esc
                 // after the next byte arrived, so a stalled SSE left the
                 // spinner running and Esc inert until the socket moved.
+                // Esc mid-stream falls through to the partial-commit path
+                // below instead of breaking the turn here: text the user
+                // watched stream must reach history, or the next turn's model
+                // has no memory of words the user is replying to.
+                let mut stream_cancelled = false;
                 'stream: loop {
                     let event = tokio::select! {
                         event = rx.recv() => event,
                         _ = wait_cancelled(&cancel) => {
                             handle.abort();
-                            break 'turn true;
+                            stream_cancelled = true;
+                            break 'stream;
                         }
                     };
                     let Some(event) = event else {
@@ -530,6 +580,14 @@ impl Agent {
                             reasoning_streamed = true;
                             let _ = events.send(SessionEvent::ReasoningDelta(d)).await;
                         }
+                        ProviderEvent::ToolCallDelta { bytes } => {
+                            assembly_bytes += bytes;
+                            let _ = events
+                                .send(SessionEvent::ToolCallAssembly {
+                                    bytes: assembly_bytes,
+                                })
+                                .await;
+                        }
                         ProviderEvent::ToolCall(call) => calls.push(call),
                         ProviderEvent::ReasoningItem(item) => reasoning_items.push(item),
                         ProviderEvent::Usage {
@@ -537,13 +595,7 @@ impl Agent {
                             output,
                             cache_read,
                         } => {
-                            let _ = events
-                                .send(SessionEvent::Usage {
-                                    input,
-                                    output,
-                                    cache_read,
-                                })
-                                .await;
+                            step_usage = Some((input, output, cache_read));
                         }
                         ProviderEvent::Error(err) => {
                             // Safe to retry only when the cause itself is
@@ -579,6 +631,9 @@ impl Agent {
                                 let (nrx, nhandle) = providers::stream(clone_request(&request));
                                 rx = nrx;
                                 handle = nhandle;
+                                // A fresh attempt streams its arguments from
+                                // scratch; the liveness counter follows.
+                                assembly_bytes = 0;
                                 continue 'stream;
                             }
                             // Distinguish genuine exhaustion (the cause was
@@ -637,21 +692,84 @@ impl Agent {
                         }
                     }
                 }
-                if errored {
-                    break false;
+                // One Usage per step, the stream's final frame: `input` is
+                // this request's full context, `output` what this step alone
+                // generated. Emitted even when the stream then errored — the
+                // tokens were still consumed.
+                if let Some((input, output, cache_read)) = step_usage {
+                    last_context = input + output;
+                    let _ = events
+                        .send(SessionEvent::Usage {
+                            input,
+                            output,
+                            cache_read,
+                        })
+                        .await;
+                }
+                // A cancelled or failed stream still commits what it already
+                // produced: the user watched that text arrive, and a history
+                // missing it would have the model contradict its own visible
+                // words next turn. Calls that never ran get a synthetic
+                // result — a dangling tool_use without its tool_result fails
+                // the next request on every dialect.
+                if stream_cancelled || errored {
+                    if !text.is_empty() || !calls.is_empty() {
+                        for item in reasoning_items.drain(..) {
+                            log.commit(ChatMessage::reasoning(item));
+                        }
+                        let (note, outcome, summary) = if stream_cancelled {
+                            (
+                                "not executed — the turn was cancelled before this call ran",
+                                tools::ToolOutcome::Cancelled,
+                                "cancelled",
+                            )
+                        } else {
+                            (
+                                "not executed — the provider stream failed before this call ran",
+                                tools::ToolOutcome::Failed,
+                                "error",
+                            )
+                        };
+                        let unrun = calls.clone();
+                        log.commit(ChatMessage::assistant(std::mem::take(&mut text), calls));
+                        for call in unrun {
+                            log.commit(ChatMessage::tool_result_with_meta(
+                                call.id, note, outcome, summary,
+                            ));
+                        }
+                    }
+                    break stream_cancelled;
                 }
 
                 // A stream that ends with no text, no calls, no reasoning,
                 // and no error is a blank success — committing it would strand
-                // the turn in silence. Abnormal finishes and skipped frames
-                // were already surfaced as warnings above; here we guarantee
-                // the user at least sees that something went wrong.
+                // the turn in silence. It is also the most transient failure
+                // a provider produces, so it gets one quiet re-request per
+                // turn before the error. Abnormal finishes and skipped frames
+                // were already surfaced as warnings above; past the retry we
+                // guarantee the user at least sees that something went wrong.
                 if text.is_empty()
                     && calls.is_empty()
                     && reasoning_items.is_empty()
                     && !reasoning_streamed
                     && pending.lock().unwrap().is_empty()
                 {
+                    if !empty_retried {
+                        empty_retried = true;
+                        let _ = events
+                            .send(SessionEvent::Retry {
+                                attempt: 2,
+                                limit: retry::MAX_ATTEMPTS,
+                                delay_secs: 1,
+                                cause: FailureCause::ProviderUnavailable,
+                                reason: "empty response".into(),
+                            })
+                            .await;
+                        if !sleep_cancellable(Duration::from_secs(1), &cancel).await {
+                            break 'turn true;
+                        }
+                        continue 'turn;
+                    }
                     let _ = events
                         .send(SessionEvent::Error(
                             "the model returned an empty response".into(),
@@ -663,32 +781,10 @@ impl Agent {
                 // Reasoning items commit first — the dialect that produced
                 // them must replay them ahead of the assistant turn.
                 for item in reasoning_items.drain(..) {
-                    let result = commit(
-                        &history,
-                        &session,
-                        &cwd,
-                        &model,
-                        ChatMessage {
-                            role: "reasoning".into(),
-                            content: item,
-                            tool_calls: Vec::new(),
-                            tool_call_id: None,
-                            tool_meta: None,
-                        },
-                        &session_name,
-                    );
-                    note_persist(&persist_warned, result, &events);
+                    log.commit(ChatMessage::reasoning(item));
                 }
                 // Commit the assistant turn (text + any calls).
-                let result = commit(
-                    &history,
-                    &session,
-                    &cwd,
-                    &model,
-                    ChatMessage::assistant(text, calls.clone()),
-                    &session_name,
-                );
-                note_persist(&persist_warned, result, &events);
+                log.commit(ChatMessage::assistant(text, calls.clone()));
 
                 if calls.is_empty() {
                     // A plain reply would end the turn — but a message that
@@ -754,7 +850,9 @@ impl Agent {
                                     id,
                                     outcome: output.outcome,
                                     summary: output.summary.clone(),
-                                    content: output.content.clone(),
+                                    // The viewer gets the rich detail (full
+                                    // diffs); history keeps the lean content.
+                                    content: output.display_text().to_string(),
                                 })
                                 .await;
                             output
@@ -775,6 +873,7 @@ impl Agent {
                                 content: "tool panicked".into(),
                                 outcome: tools::ToolOutcome::Failed,
                                 summary: "error".into(),
+                                display: None,
                             },
                         },
                         _ = wait_cancelled(&cancel) => tools::ToolOutput {
@@ -785,25 +884,42 @@ impl Agent {
                                 .into(),
                             outcome: tools::ToolOutcome::Cancelled,
                             summary: "cancelled".into(),
+                            display: None,
                         },
                     };
-                    let result = commit(
-                        &history,
-                        &session,
-                        &cwd,
-                        &model,
-                        ChatMessage::tool_result_with_meta(
-                            call.id,
-                            output.content,
-                            output.outcome,
-                            output.summary,
-                        ),
-                        &session_name,
-                    );
-                    note_persist(&persist_warned, result, &events);
+                    log.commit(ChatMessage::tool_result_with_meta(
+                        call.id,
+                        output.content,
+                        output.outcome,
+                        output.summary,
+                    ));
                 }
                 if cancel.load(Ordering::SeqCst) {
                     break 'turn true;
+                }
+                // Context guard: a long tool loop grows the context fastest
+                // exactly where compaction (which runs between turns) can't
+                // reach it, and the next request past the window dies on a
+                // rejected 400 with the work half-done. When real usage says
+                // the reserve is spent, end the turn cleanly instead — the
+                // frontend compacts at TurnEnd — and queue a continuation so
+                // the task resumes in the fresh context.
+                if last_context > 0 && compact::should_compact(last_context, model.context_window) {
+                    let _ = events
+                        .send(SessionEvent::Warning(
+                            "context nearly full — pausing to compact, then continuing".into(),
+                        ))
+                        .await;
+                    // Worded so it stays true even if the compaction the
+                    // frontend runs at TurnEnd fails — it must not claim a
+                    // compaction that may not have happened.
+                    pending.lock().unwrap().insert(
+                        0,
+                        "The turn was paused because the context ran low. Continue the task \
+                         from where it left off."
+                            .into(),
+                    );
+                    break 'turn false;
                 }
             };
             let _ = events.send(SessionEvent::TurnEnd { aborted }).await;
@@ -857,6 +973,7 @@ async fn run_tool(
                     content: "tool cancelled".into(),
                     outcome: tools::ToolOutcome::Cancelled,
                     summary: "cancelled".into(),
+                    display: None,
                 };
             }
         };
@@ -865,43 +982,43 @@ async fn run_tool(
                 content: format!("Tool call blocked by extension: {reason}"),
                 outcome: tools::ToolOutcome::Blocked,
                 summary: "blocked".into(),
+                display: None,
             };
         }
         if h.owns_tool(name) {
-            let call = h.call_tool(name, arguments);
-            tokio::pin!(call);
-            loop {
-                tokio::select! {
-                    result = &mut call => {
-                        // An extension tool may name the session as a side
-                        // effect; the UI applies it on SessionEvent::Named.
-                        if let Some(new_name) = result.session_name.clone() {
-                            let _ = events
-                                .send(SessionEvent::Named(new_name))
-                                .await;
-                        }
-                        let outcome = if result.is_error {
-                            tools::ToolOutcome::Failed
-                        } else {
-                            tools::ToolOutcome::Completed
-                        };
-                        return tools::ToolOutput {
-                            content: result.content,
-                            outcome,
-                            summary: if outcome.is_error() { "error".into() } else { "done".into() },
-                        };
-                    }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                        if cancel.load(Ordering::SeqCst) {
-                            return tools::ToolOutput {
-                                content: "extension tool cancelled".into(),
-                                outcome: tools::ToolOutcome::Cancelled,
-                                summary: "cancelled".into(),
-                            };
-                        }
-                    }
+            // Same race as the hook above: the call against the cancel flag,
+            // through the one shared helper — not a second hand-rolled poll.
+            let result = tokio::select! {
+                result = h.call_tool(name, arguments) => result,
+                _ = wait_cancelled(&cancel) => {
+                    return tools::ToolOutput {
+                        content: "extension tool cancelled".into(),
+                        outcome: tools::ToolOutcome::Cancelled,
+                        summary: "cancelled".into(),
+                        display: None,
+                    };
                 }
+            };
+            // An extension tool may name the session as a side effect; the
+            // UI applies it on SessionEvent::Named.
+            if let Some(new_name) = result.session_name.clone() {
+                let _ = events.send(SessionEvent::Named(new_name)).await;
             }
+            let outcome = if result.is_error {
+                tools::ToolOutcome::Failed
+            } else {
+                tools::ToolOutcome::Completed
+            };
+            return tools::ToolOutput {
+                content: result.content,
+                outcome,
+                summary: if outcome.is_error() {
+                    "error".into()
+                } else {
+                    "done".into()
+                },
+                display: None,
+            };
         }
     }
     let name = name.to_string();
@@ -923,5 +1040,6 @@ async fn run_tool(
         content: "tool panicked".into(),
         outcome: tools::ToolOutcome::Failed,
         summary: "error".into(),
+        display: None,
     })
 }
