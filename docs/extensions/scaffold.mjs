@@ -23,7 +23,8 @@
  *                            parsed values of your typed flag declarations
  *                            (see flag() below).
  *   command({name, args})  — {"notice": …} | {"prompt": …} | {"session_name": …}
- *   tool({name, arguments})— {"content": …, "is_error"?: bool, "session_name"?: …}
+ *   tool({name, arguments}, {update}) — result object; `update(chunk,
+ *                            stream?)` streams stdout/stderr progress first
  *   hookToolCall({name, arguments}) — {"block": true, "reason": …} | {"block": false}
  *   hookInput({text})      — {"consume": true} | {"replace": …} | {"notice": …} | {}
  *
@@ -118,7 +119,18 @@ export function connect({ manifest = {}, ...handlers } = {}) {
     }[method];
     if (typeof handler !== "function") return; // not ours; stay quiet
     try {
-      answer(id, handler(params));
+      const context = {
+        update(chunk, stream = "stdout") {
+          if (method !== "tool_call" || chunk === undefined || chunk === null) return;
+          process.stdout.write(
+            JSON.stringify({
+              method: "tool.update",
+              params: { id, stream, chunk: String(chunk) },
+            }) + "\n"
+          );
+        },
+      };
+      answer(id, handler(params, context));
     } catch (error) {
       fail(id, error);
     }

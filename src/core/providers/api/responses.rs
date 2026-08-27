@@ -9,26 +9,17 @@
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::core::auth::{self, login, Credential};
+use crate::core::providers::runtime::Authorization;
 use crate::core::providers::{
     http, require_success, send_request, Event, FailureCause, FinishReason, ProviderError, Request,
     SseStream, StreamEnd, ToolCall,
 };
 
-pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEnd, ProviderError> {
-    // A plain API key means the standard platform mount (`{base}/responses`,
-    // bearer only); OAuth means the ChatGPT backend (`{base}/codex/responses`
-    // plus the account header), with lazy refresh.
-    let (access, account) = match auth::load().get(request.model.provider.as_str()) {
-        Some(Credential::ApiKey { key }) => (key.clone(), None),
-        _ => {
-            let (access, account) = login::codex_access(&request.model.provider)
-                .await
-                .map_err(ProviderError::auth)?;
-            (access, Some(account))
-        }
-    };
-
+pub async fn run(
+    request: &Request,
+    authorization: &Authorization,
+    tx: &mpsc::Sender<Event>,
+) -> Result<StreamEnd, ProviderError> {
     // Responses-API items: messages, function calls, and their outputs.
     let mut input: Vec<serde_json::Value> = Vec::new();
     for m in &request.messages {
@@ -63,10 +54,21 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                 "call_id": m.tool_call_id.clone().unwrap_or_default(),
                 "output": m.content,
             })),
-            role => input.push(json!({
-                "type": "message", "role": role,
-                "content": [{"type": "input_text", "text": m.content}],
-            })),
+            role => {
+                let mut content = Vec::new();
+                if !m.content.is_empty() {
+                    content.push(json!({"type": "input_text", "text": m.content}));
+                }
+                content.extend(
+                    m.images
+                        .iter()
+                        .map(|image| json!({"type": "input_image", "image_url": image.data_url()})),
+                );
+                input.push(json!({
+                    "type": "message", "role": role,
+                    "content": content,
+                }));
+            }
         }
     }
 
@@ -104,12 +106,15 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
         body["tools"] = json!(tools);
     }
 
-    let mut builder = match &account {
+    let mut builder = match request.model.responses_mount {
         // `prompt_cache_key` and the session headers are ChatGPT-backend
         // (codex) idioms: plain-key providers on `{base}/responses` neither
         // need the account-dependent body field nor accept an unknown
         // parameter from a strict upstream.
-        Some(account) => {
+        crate::core::providers::registry::ResponsesMount::Codex => {
+            let account = authorization.account_id.as_deref().ok_or_else(|| {
+                ProviderError::auth("Codex Responses authorization has no account id")
+            })?;
             let session_id = uuid::Uuid::new_v4().to_string();
             body["prompt_cache_key"] = json!(session_id);
             http()
@@ -120,16 +125,19 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                 .header("session-id", &session_id)
                 .header("x-client-request-id", &session_id)
         }
-        None => http().post(format!("{}/responses", request.model.base_url)),
+        crate::core::providers::registry::ResponsesMount::Platform => {
+            http().post(format!("{}/responses", request.model.base_url))
+        }
     };
     builder = builder
-        .bearer_auth(&access)
+        .bearer_auth(&authorization.bearer)
         .header("accept", "text/event-stream");
     let response = require_success(send_request(builder.json(&body)).await?).await?;
 
     let mut sse = SseStream::new(response.bytes_stream());
     // function_call items accumulate argument deltas keyed by item id.
     let mut pending: std::collections::BTreeMap<String, ToolCall> = Default::default();
+    let mut streamed_arguments: std::collections::BTreeMap<String, String> = Default::default();
     loop {
         let payload = sse.next().await?;
         {
@@ -162,6 +170,17 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                             .or(item["call_id"].as_str())
                             .unwrap_or("")
                             .to_string();
+                        let _ = tx.send(Event::ToolCallStart { key: key.clone() }).await;
+                        let arguments = item["arguments"].as_str().unwrap_or("");
+                        if !arguments.is_empty() {
+                            streamed_arguments.insert(key.clone(), arguments.into());
+                            let _ = tx
+                                .send(Event::ToolArgumentsDelta {
+                                    key: key.clone(),
+                                    delta: arguments.into(),
+                                })
+                                .await;
+                        }
                         pending.insert(
                             key,
                             ToolCall {
@@ -180,9 +199,14 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                         call.arguments.push_str(delta);
                     }
                     if !delta.is_empty() {
+                        streamed_arguments
+                            .entry(key.clone())
+                            .or_default()
+                            .push_str(delta);
                         let _ = tx
-                            .send(Event::ToolCallDelta {
-                                bytes: delta.len() as u64,
+                            .send(Event::ToolArgumentsDelta {
+                                key,
+                                delta: delta.to_string(),
                             })
                             .await;
                     }
@@ -200,6 +224,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                             .or(item["call_id"].as_str())
                             .unwrap_or("")
                             .to_string();
+                        let was_pending = pending.contains_key(&key);
                         let mut call = pending.remove(&key).unwrap_or(ToolCall {
                             id: String::new(),
                             name: String::new(),
@@ -219,6 +244,25 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                             }
                         }
                         if !call.name.is_empty() {
+                            if !was_pending {
+                                let _ = tx.send(Event::ToolCallStart { key: key.clone() }).await;
+                            }
+                            if call.arguments.is_empty() {
+                                call.arguments = "{}".into();
+                            }
+                            if streamed_arguments
+                                .remove(&key)
+                                .is_none_or(|arguments| arguments.is_empty())
+                                && call.arguments != "{}"
+                            {
+                                let _ = tx
+                                    .send(Event::ToolArgumentsDelta {
+                                        key: key.clone(),
+                                        delta: call.arguments.clone(),
+                                    })
+                                    .await;
+                            }
+                            let _ = tx.send(Event::ToolCallEnd { key }).await;
                             let _ = tx.send(Event::ToolCall(call)).await;
                         }
                     }

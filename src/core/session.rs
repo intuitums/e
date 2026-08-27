@@ -15,9 +15,9 @@
 //! visible: pick an earlier point and continue, and the new messages chain
 //! onto that point's id instead of the file's last line, growing a second
 //! branch in the same file. The abandoned tail is never touched — `nodes`
-//! reads every branch a file holds, `Session::load` (plain resume) still
-//! walks the file top to bottom, which for an un-branched session is the
-//! same thing. Records written before branching existed carry neither
+//! reads every branch a file holds, while `Session::load` follows parents
+//! from the most recently appended node and restores only that active path.
+//! Records written before branching existed carry neither
 //! field; `nodes` synthesizes both positionally so an old session still
 //! resumes onto its real tail instead of quietly starting a second root.
 
@@ -293,26 +293,46 @@ impl Session {
     /// common artifact an append-only log ever shows, and refusing to resume
     /// the whole session over it turns a lost record into a lost session.
     pub fn load(path: &Path) -> std::io::Result<Vec<ChatMessage>> {
-        let reader = BufReader::new(File::open(path)?);
-        let lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>()?;
-        let last_nonempty = lines.iter().rposition(|l| !l.trim().is_empty());
-        let mut messages = Vec::new();
-        for (index, line) in lines.iter().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<Entry>(line) {
-                Ok(Entry::Message { message, .. }) => messages.push(message),
-                Ok(_) => {}
-                Err(_) if Some(index) == last_nonempty => break,
-                Err(e) => {
-                    return Err(std::io::Error::other(format!(
-                        "corrupt session record at line {}: {e}",
-                        index + 1
-                    )))
-                }
+        let nodes = Session::nodes(path)?;
+        let mut by_id = std::collections::HashMap::new();
+        for (index, node) in nodes.iter().enumerate() {
+            if by_id.insert(node.id.as_str(), index).is_some() {
+                return Err(std::io::Error::other(format!(
+                    "corrupt session tree: duplicate message id `{}`",
+                    node.id
+                )));
             }
         }
+
+        // The last appended message is the active head. A rewind leaves the
+        // abandoned tail earlier in the file and appends the replacement
+        // branch afterward, so walking parent links is the durable head
+        // marker without another mutable metadata record.
+        let mut path_indexes = Vec::new();
+        let mut cursor = nodes.last().map(|node| node.id.as_str());
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = cursor {
+            if !seen.insert(id) {
+                return Err(std::io::Error::other(format!(
+                    "corrupt session tree: cycle at message `{id}`"
+                )));
+            }
+            let Some(index) = by_id.get(id).copied() else {
+                return Err(std::io::Error::other(format!(
+                    "corrupt session tree: missing parent message `{id}`"
+                )));
+            };
+            path_indexes.push(index);
+            cursor = nodes[index].parent.as_deref();
+        }
+        path_indexes.reverse();
+        drop(seen);
+        drop(by_id);
+        let mut nodes: Vec<Option<Node>> = nodes.into_iter().map(Some).collect();
+        let mut messages = path_indexes
+            .into_iter()
+            .map(|index| nodes[index].take().expect("validated node index").message)
+            .collect();
         repair_tail(&mut messages);
         Ok(messages)
     }
@@ -523,6 +543,52 @@ fn title_of(content: &str) -> String {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_restores_only_the_most_recent_branch() {
+        let path = std::env::temp_dir().join(format!(
+            "e-session-branch-{}-{}.jsonl",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let entries = [
+            Entry::Message {
+                id: "root".into(),
+                parent: None,
+                message: ChatMessage::user("root"),
+            },
+            Entry::Message {
+                id: "abandoned".into(),
+                parent: Some("root".into()),
+                message: ChatMessage::assistant("old tail", Vec::new()),
+            },
+            Entry::Message {
+                id: "branch".into(),
+                parent: Some("root".into()),
+                message: ChatMessage::user("new branch"),
+            },
+            Entry::Message {
+                id: "head".into(),
+                parent: Some("branch".into()),
+                message: ChatMessage::assistant("new answer", Vec::new()),
+            },
+        ];
+        let body = entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, format!("{body}\n")).unwrap();
+
+        let loaded = Session::load(&path).unwrap();
+        let content = loaded
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(content, vec!["root", "new branch", "new answer"]);
+
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn a_log_is_retired_when_a_failed_append_cannot_be_rolled_back() {

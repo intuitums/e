@@ -102,10 +102,17 @@ pub fn test_model(provider: &str, port: u16, api: Api) -> Model {
         id: "test".into(),
         base_url: format!("http://127.0.0.1:{port}"),
         api,
+        catalog: e::core::providers::registry::CatalogStrategy::Openai,
+        responses_mount: e::core::providers::registry::ResponsesMount::Platform,
+        provider_supports_tools: true,
+        provider_image_input: false,
         efforts: vec!["low".into(), "medium".into(), "high".into()],
         thinking: Thinking::Manual,
         context_window: 200_000,
         max_output: None,
+        supports_tools: true,
+        image_input: false,
+        pricing: None,
     }
 }
 

@@ -5,15 +5,11 @@ This file tracks work that has not shipped. Completed work belongs in
 
 ## Next
 
-- **Session branching** — add parent relationships to session entries and a
-  way to rewind or branch from an earlier point.
-- **Cost tracking** — allow models to declare token prices and show the cost of
-  a turn.
 - **Import** — provide an explicit command for copying selected credentials or
   sessions from another tool.
-- **Extension protocol** — add lifecycle events, streamed tool updates,
-  resource contributions, and provider registration when an extension has a
-  concrete need for them.
+- **Extension resources** — add resource contributions and provider
+  registration when an extension has a concrete need for them. Lifecycle
+  events and streamed tool updates already ship.
 
 - **More wire dialects** — Vertex and Bedrock need cloud-auth plumbing
   (GCP tokens, SigV4) beyond the API-key path; a native Mistral
@@ -29,5 +25,5 @@ This file tracks work that has not shipped. Completed work belongs in
 ## Not planned
 
 An embedded scripting runtime, a terminal daemon, telemetry, and accounts are
-not planned. MCP and subagents may be supplied by extensions, but are not
-planned as built-in subsystems.
+not planned. MCP and subagents ship as extension examples, not built-in
+subsystems.

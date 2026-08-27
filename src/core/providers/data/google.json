@@ -3,6 +3,9 @@
 	"display": "Google",
 	"base_url": "https://generativelanguage.googleapis.com/v1beta",
 	"api": "google-generative-ai",
+	"tier": "native",
+	"image_input": true,
+	"catalog": "google",
 	"auth": {
 		"key": true,
 		"key_env": "GEMINI_API_KEY",

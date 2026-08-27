@@ -23,17 +23,43 @@ pub(super) fn remote_overlay(models: &mut Vec<Model>) {
         // Transport from an existing model of the provider (models.json
         // overrides included), else from the registry — a keyless local's
         // whole catalog is this overlay, so it has no model to copy from.
-        let Some((base, api)) = models
-            .iter()
-            .find(|m| m.provider == provider)
-            .map(|m| (m.base_url.clone(), m.api))
-            .or_else(|| {
-                crate::core::providers::registry::find(&provider)
-                    .map(|p| (p.base_url.clone(), p.api()))
-            })
+        let Some((base, api, catalog_strategy, responses_mount, supports_tools, image_input)) =
+            models
+                .iter()
+                .find(|m| m.provider == provider)
+                .map(|m| {
+                    (
+                        m.base_url.clone(),
+                        m.api,
+                        m.catalog,
+                        m.responses_mount,
+                        m.provider_supports_tools,
+                        m.provider_image_input,
+                    )
+                })
+                .or_else(|| {
+                    crate::core::providers::registry::find(&provider).map(|p| {
+                        (
+                            p.base_url.clone(),
+                            p.api(),
+                            p.catalog,
+                            p.responses_mount,
+                            p.supports_tools,
+                            p.image_input,
+                        )
+                    })
+                })
         else {
             continue; // only providers e knows how to speak to
         };
+        if catalog_strategy == crate::core::providers::registry::CatalogStrategy::None {
+            // The provider's live discovery is off. A cache entry can
+            // outlive that setting (written before it changed, or left
+            // over from a prior config) — never resurrect it into the
+            // catalog, or `catalog: "none"` would not actually disable
+            // discovered models.
+            continue;
+        }
         let listed = entry.get("models").and_then(|v| v.as_array()).cloned();
         let legacy = entry.get("ids").and_then(|v| v.as_array()).map(|ids| {
             ids.iter()
@@ -62,10 +88,20 @@ pub(super) fn remote_overlay(models: &mut Vec<Model>) {
                     id: id.to_string(),
                     base_url: base.clone(),
                     api,
+                    catalog: catalog_strategy,
+                    responses_mount,
+                    provider_supports_tools: supports_tools,
+                    provider_image_input: image_input,
                     efforts: Vec::new(),
                     thinking: Thinking::Manual,
                     context_window: item["context_window"].as_u64().unwrap_or(200_000),
                     max_output: None,
+                    // The endpoint reports only id/window, so inherit the
+                    // deployment-wide defaults retained independently from
+                    // any declared sibling model's override.
+                    supports_tools,
+                    image_input,
+                    pricing: None,
                 }),
             }
         }
@@ -94,22 +130,43 @@ pub async fn refresh_remote_within(max_age_ms: u64) {
     // kind; catalog entries first so models.json base_url overrides win.
     // Registry providers follow so a keyless local with an empty seed list
     // (its models come only from this refresh) still gets polled.
-    let mut providers: Vec<(String, String)> = Vec::new();
+    let mut providers: Vec<(
+        String,
+        String,
+        super::Api,
+        crate::core::providers::registry::CatalogStrategy,
+        crate::core::providers::registry::ResponsesMount,
+    )> = Vec::new();
     for m in catalog() {
         if crate::core::auth::signed_in(&auth, &m.provider)
-            && !providers.iter().any(|(p, _)| *p == m.provider)
+            && !providers.iter().any(|(p, _, _, _, _)| *p == m.provider)
         {
-            providers.push((m.provider.clone(), m.base_url.clone()));
+            providers.push((
+                m.provider.clone(),
+                m.base_url.clone(),
+                m.api,
+                m.catalog,
+                m.responses_mount,
+            ));
         }
     }
     for p in crate::core::providers::registry::all() {
         if crate::core::auth::signed_in(&auth, &p.name)
-            && !providers.iter().any(|(name, _)| *name == p.name)
+            && !providers.iter().any(|(name, _, _, _, _)| *name == p.name)
         {
-            providers.push((p.name.clone(), p.base_url.clone()));
+            providers.push((
+                p.name.clone(),
+                p.base_url.clone(),
+                p.api(),
+                p.catalog,
+                p.responses_mount,
+            ));
         }
     }
-    for (provider, base) in providers {
+    for (provider, base, api, catalog_strategy, responses_mount) in providers {
+        if catalog_strategy == crate::core::providers::registry::CatalogStrategy::None {
+            continue;
+        }
         let fresh = stored
             .get(&provider)
             .and_then(|e| e.get("checked_at"))
@@ -119,7 +176,9 @@ pub async fn refresh_remote_within(max_age_ms: u64) {
         if fresh {
             continue;
         }
-        if let Some(models) = fetch_models(&provider, &base).await {
+        if let Some(models) =
+            fetch_models(&provider, &base, api, catalog_strategy, responses_mount).await
+        {
             let listed: Vec<serde_json::Value> = models
                 .iter()
                 .map(|(id, window)| match window {
@@ -177,21 +236,21 @@ fn dated_alias_of(id: &str) -> Option<&str> {
 /// `GET {base}/models` with the provider's credential — (id, window?) per
 /// listed model; None on any failure. Google lists at the same path but with
 /// its own auth header and payload shape (`models[].name`, not `data[].id`).
-async fn fetch_models(provider: &str, base: &str) -> Option<Vec<(String, Option<u64>)>> {
-    let auth = crate::core::auth::load();
-    let key = match auth.get(provider) {
-        Some(crate::core::auth::Credential::ApiKey { key }) => Some(key.clone()),
-        Some(crate::core::auth::Credential::OAuth { access, .. }) => Some(access.clone()),
-        // Keyless local backends list their models with no header at all.
-        None if crate::core::providers::registry::find(provider).is_some_and(|p| p.auth.none) => {
-            None
-        }
-        None => return None,
-    };
+async fn fetch_models(
+    provider: &str,
+    base: &str,
+    api: super::Api,
+    catalog_strategy: crate::core::providers::registry::CatalogStrategy,
+    responses_mount: crate::core::providers::registry::ResponsesMount,
+) -> Option<Vec<(String, Option<u64>)>> {
+    let authorization =
+        crate::core::providers::runtime::authorize_provider(provider, api, responses_mount)
+            .await
+            .ok()?;
     // Anthropic declares the bare host as its base (the dialect appends
     // /v1 for /v1/messages); the list endpoint lives under /v1 too, so
     // fetching `{base}/models` would 404 silently on every refresh.
-    let url = if provider == "anthropic" {
+    let url = if catalog_strategy == crate::core::providers::registry::CatalogStrategy::Anthropic {
         format!("{base}/v1/models")
     } else {
         format!("{base}/models")
@@ -199,16 +258,24 @@ async fn fetch_models(provider: &str, base: &str) -> Option<Vec<(String, Option<
     let mut request = crate::core::providers::http()
         .get(url)
         .timeout(std::time::Duration::from_secs(15));
-    request = match &key {
-        Some(key) if provider == "anthropic" => request
-            .header("x-api-key", key)
+    request = match (authorization.credentialed, catalog_strategy) {
+        (false, _) => request,
+        (true, crate::core::providers::registry::CatalogStrategy::Anthropic) => request
+            .header("x-api-key", &authorization.bearer)
             .header("anthropic-version", "2023-06-01"),
-        Some(key) if provider == "google" => request.header("x-goog-api-key", key),
-        Some(key) => request.bearer_auth(key),
-        None => request,
+        (true, crate::core::providers::registry::CatalogStrategy::Google) => {
+            request.header("x-goog-api-key", &authorization.bearer)
+        }
+        (true, _) => {
+            let request = request.bearer_auth(&authorization.bearer);
+            match authorization.account_id {
+                Some(account) => request.header("chatgpt-account-id", account),
+                None => request,
+            }
+        }
     };
     let body: serde_json::Value = request.send().await.ok()?.json().await.ok()?;
-    let google = provider == "google";
+    let google = catalog_strategy == crate::core::providers::registry::CatalogStrategy::Google;
     let entries = if google {
         body["models"].as_array()
     } else {
@@ -268,5 +335,86 @@ async fn fetch_models(provider: &str, base: &str) -> Option<Vec<(String, Option<
         None
     } else {
         Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::providers::catalog::{Api, Model};
+    use crate::core::providers::registry::{CatalogStrategy, ResponsesMount};
+
+    // E_HOME is process-global; serialize tests that set it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn seeded_model(provider: &str, catalog: CatalogStrategy) -> Model {
+        Model {
+            provider: provider.into(),
+            id: "seed".into(),
+            base_url: "https://example.invalid".into(),
+            api: Api::Completions,
+            catalog,
+            responses_mount: ResponsesMount::Platform,
+            provider_supports_tools: true,
+            provider_image_input: false,
+            efforts: Vec::new(),
+            thinking: Thinking::Manual,
+            context_window: 200_000,
+            max_output: None,
+            supports_tools: true,
+            image_input: false,
+            pricing: None,
+        }
+    }
+
+    fn with_temp_home(name: &str, body: impl FnOnce(&std::path::Path)) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "e-remote-overlay-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("E_HOME", &dir);
+        body(&dir);
+        std::env::remove_var("E_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn catalog_none_ignores_a_cached_model_the_overlay_would_otherwise_merge() {
+        with_temp_home("none", |dir| {
+            std::fs::write(
+                dir.join("models-store.json"),
+                r#"{"acme":{"models":[{"id":"stale-model","context_window":128000}]}}"#,
+            )
+            .unwrap();
+
+            let mut models = vec![seeded_model("acme", CatalogStrategy::None)];
+            remote_overlay(&mut models);
+            assert_eq!(
+                models.len(),
+                1,
+                "catalog: none must not resurrect a cached model"
+            );
+        });
+    }
+
+    #[test]
+    fn a_normal_catalog_strategy_still_merges_cached_models() {
+        with_temp_home("openai", |dir| {
+            std::fs::write(
+                dir.join("models-store.json"),
+                r#"{"acme":{"models":[{"id":"discovered-model","context_window":128000}]}}"#,
+            )
+            .unwrap();
+
+            let mut models = vec![seeded_model("acme", CatalogStrategy::Openai)];
+            remote_overlay(&mut models);
+            assert!(
+                models.iter().any(|m| m.id == "discovered-model"),
+                "a provider without catalog: none should still pick up cached models"
+            );
+        });
     }
 }

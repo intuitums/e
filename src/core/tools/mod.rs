@@ -7,6 +7,8 @@
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+use crate::core::cli::ToolMode;
+
 mod bash;
 mod edit;
 mod fs;
@@ -29,7 +31,8 @@ impl ToolOutcome {
 }
 
 /// Which command pipe produced a progress chunk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OutputStream {
     Stdout,
     Stderr,
@@ -101,6 +104,19 @@ pub fn truncate_with_notice(mut body: String, notice: &str) -> String {
 /// the Responses dialect reshapes them at send time).
 pub fn schemas() -> Vec<Value> {
     SPECS.iter().map(|s| (s.schema)()).collect()
+}
+
+/// Apply a run's safety mode after built-in and extension schemas have been
+/// merged. Execution independently enforces the same policy.
+pub fn filter_schemas(schemas: Vec<Value>, mode: ToolMode) -> Vec<Value> {
+    schemas
+        .into_iter()
+        .filter(|schema| {
+            schema["function"]["name"]
+                .as_str()
+                .is_some_and(|name| mode.allows(name))
+        })
+        .collect()
 }
 
 /// Labels and category used to project one tool through its lifecycle.
@@ -564,7 +580,22 @@ fn schema_object(name: &str, description: &str, properties: Value, required: &[&
 
 #[cfg(test)]
 mod tests {
-    use super::stable_path_key;
+    use super::{filter_schemas, schemas, stable_path_key};
+    use crate::core::cli::ToolMode;
+
+    fn names(mode: ToolMode) -> Vec<String> {
+        filter_schemas(schemas(), mode)
+            .into_iter()
+            .filter_map(|schema| schema["function"]["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn safety_modes_filter_the_model_visible_contract() {
+        assert_eq!(names(ToolMode::ReadOnly), vec!["read", "grep"]);
+        assert!(names(ToolMode::None).is_empty());
+        assert_eq!(names(ToolMode::All).len(), schemas().len());
+    }
 
     #[test]
     fn new_file_aliases_have_one_lock_key() {

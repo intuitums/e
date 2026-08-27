@@ -26,6 +26,15 @@ pub enum Api {
 }
 
 impl Api {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completions => "openai-completions",
+            Self::Responses => "openai-responses",
+            Self::Anthropic => "anthropic-messages",
+            Self::Google => "google-generative-ai",
+        }
+    }
+
     /// Parse a dialect name from provider JSON / models.json. Unknown strings
     /// are `None` — callers decide whether to panic (built-ins) or fall back
     /// (user file).
@@ -63,12 +72,44 @@ impl Thinking {
     }
 }
 
+/// Optional USD rates per million tokens. Pricing changes independently of
+/// protocol support, so built-ins may omit it; users and gateways can declare
+/// authoritative rates in models.json without waiting for an e release.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq)]
+pub struct Pricing {
+    pub input_per_million: f64,
+    pub output_per_million: f64,
+    #[serde(default)]
+    pub cache_read_per_million: Option<f64>,
+}
+
+impl Pricing {
+    pub fn estimate(&self, input: u64, output: u64, cache_read: u64) -> f64 {
+        let cached = cache_read.min(input);
+        let uncached = input.saturating_sub(cached);
+        let cached_rate = self
+            .cache_read_per_million
+            .unwrap_or(self.input_per_million);
+        (uncached as f64 * self.input_per_million
+            + cached as f64 * cached_rate
+            + output as f64 * self.output_per_million)
+            / 1_000_000.0
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Model {
     pub provider: String,
     pub id: String,
     pub base_url: String,
     pub api: Api,
+    pub catalog: crate::core::providers::registry::CatalogStrategy,
+    pub responses_mount: crate::core::providers::registry::ResponsesMount,
+    /// Provider-wide defaults retained separately from per-model overrides,
+    /// so a remotely discovered id never inherits an arbitrary sibling's
+    /// narrower compatibility declaration.
+    pub provider_supports_tools: bool,
+    pub provider_image_input: bool,
     /// Effort values the backend accepts for its reasoning knob, if any.
     pub efforts: Vec<String>,
     /// Which thinking wire shape the backend accepts for this model.
@@ -79,6 +120,12 @@ pub struct Model {
     /// Output ceiling in tokens, when the model's own limit is below the
     /// dialect's default. `None` leaves the dialect's own constant in force.
     pub max_output: Option<u64>,
+    /// Whether tool schemas/calls are supported for this model deployment.
+    pub supports_tools: bool,
+    /// Whether this model accepts image input (the frontend also needs an
+    /// image-capable message path before it advertises an attachment).
+    pub image_input: bool,
+    pub pricing: Option<Pricing>,
 }
 
 pub fn slug(model: &Model) -> String {
@@ -96,10 +143,17 @@ pub fn builtin_catalog() -> Vec<Model> {
                 id: decl.id.clone(),
                 base_url: provider.base_url.clone(),
                 api: provider.api(),
+                catalog: provider.catalog,
+                responses_mount: provider.responses_mount,
+                provider_supports_tools: provider.supports_tools,
+                provider_image_input: provider.image_input,
                 efforts: decl.efforts.clone(),
                 thinking: Thinking::from_decl(decl.thinking.as_deref()),
                 context_window: decl.context_window,
                 max_output: decl.max_output,
+                supports_tools: decl.supports_tools && provider.supports_tools,
+                image_input: decl.image_input || provider.image_input,
+                pricing: decl.pricing.clone(),
             })
         })
         .collect()
@@ -117,6 +171,10 @@ struct ProviderEntry {
     #[serde(default)]
     api: Option<String>,
     #[serde(default)]
+    catalog: Option<crate::core::providers::registry::CatalogStrategy>,
+    #[serde(default)]
+    responses_mount: Option<crate::core::providers::registry::ResponsesMount>,
+    #[serde(default)]
     efforts: Option<Vec<String>>,
     /// Default window for this provider's models; each model may override.
     #[serde(default)]
@@ -127,6 +185,12 @@ struct ProviderEntry {
     /// override.
     #[serde(default)]
     max_output: Option<u64>,
+    #[serde(default)]
+    supports_tools: Option<bool>,
+    #[serde(default)]
+    image_input: Option<bool>,
+    #[serde(default)]
+    pricing: Option<Pricing>,
     #[serde(default)]
     models: Vec<ModelEntry>,
 }
@@ -147,6 +211,12 @@ enum ModelEntry {
         thinking: Option<String>,
         #[serde(default)]
         max_output: Option<u64>,
+        #[serde(default)]
+        supports_tools: Option<bool>,
+        #[serde(default)]
+        image_input: Option<bool>,
+        #[serde(default)]
+        pricing: Option<Pricing>,
     },
 }
 
@@ -176,7 +246,6 @@ pub fn config_warnings() -> Vec<String> {
 /// the same rule as themes: never override what the user declared.
 pub fn catalog() -> Vec<Model> {
     let mut models = builtin_catalog();
-    remote_overlay(&mut models);
     if let Ok(json) = std::fs::read_to_string(home::home().join("models.json")) {
         if let Ok(file) = serde_json::from_str::<ModelsFile>(&json) {
             for (provider, entry) in file.providers {
@@ -193,6 +262,22 @@ pub fn catalog() -> Vec<Model> {
                     }),
                     None => builtin.map(|p| p.api()).unwrap_or(Api::Completions),
                 };
+                let catalog_strategy = entry
+                    .catalog
+                    .or_else(|| builtin.map(|provider| provider.catalog))
+                    .unwrap_or_default();
+                let responses_mount = entry
+                    .responses_mount
+                    .or_else(|| builtin.map(|provider| provider.responses_mount))
+                    .unwrap_or_default();
+                let provider_supports_tools = entry
+                    .supports_tools
+                    .or_else(|| builtin.map(|provider| provider.supports_tools))
+                    .unwrap_or(true);
+                let provider_image_input = entry
+                    .image_input
+                    .or_else(|| builtin.map(|provider| provider.image_input))
+                    .unwrap_or(false);
                 let Some(base) = entry
                     .base_url
                     .clone()
@@ -200,16 +285,55 @@ pub fn catalog() -> Vec<Model> {
                 else {
                     continue;
                 };
+                // Provider fields describe one deployment and apply to its
+                // built-in seed models too. Per-model declarations below can
+                // still narrow capabilities without changing what newly
+                // discovered sibling ids inherit.
+                for existing in models.iter_mut().filter(|m| m.provider == provider) {
+                    existing.base_url = base.clone();
+                    existing.api = api;
+                    existing.catalog = catalog_strategy;
+                    existing.responses_mount = responses_mount;
+                    existing.provider_supports_tools = provider_supports_tools;
+                    existing.provider_image_input = provider_image_input;
+                    if let Some(supports_tools) = entry.supports_tools {
+                        existing.supports_tools = supports_tools;
+                    }
+                    if let Some(image_input) = entry.image_input {
+                        existing.image_input = image_input;
+                    }
+                }
                 for model in entry.models {
-                    let (id, window, efforts, thinking, max_output) = match model {
-                        ModelEntry::Id(id) => (id, None, Vec::new(), None, None),
+                    let (
+                        id,
+                        window,
+                        efforts,
+                        thinking,
+                        max_output,
+                        supports_tools,
+                        image_input,
+                        pricing,
+                    ) = match model {
+                        ModelEntry::Id(id) => (id, None, Vec::new(), None, None, None, None, None),
                         ModelEntry::Detailed {
                             id,
                             context_window,
                             efforts,
                             thinking,
                             max_output,
-                        } => (id, context_window, efforts, thinking, max_output),
+                            supports_tools,
+                            image_input,
+                            pricing,
+                        } => (
+                            id,
+                            context_window,
+                            efforts,
+                            thinking,
+                            max_output,
+                            supports_tools,
+                            image_input,
+                            pricing,
+                        ),
                     };
                     let declared = builtin.and_then(|p| p.models.iter().find(|decl| decl.id == id));
                     let resolved = Model {
@@ -217,6 +341,10 @@ pub fn catalog() -> Vec<Model> {
                         id,
                         base_url: base.clone(),
                         api,
+                        catalog: catalog_strategy,
+                        responses_mount,
+                        provider_supports_tools,
+                        provider_image_input,
                         efforts: match (&entry.efforts, &efforts) {
                             // Per-model declaration wins…
                             (None, e) if !e.is_empty() => e.clone(),
@@ -245,6 +373,22 @@ pub fn catalog() -> Vec<Model> {
                         max_output: max_output
                             .or(entry.max_output)
                             .or_else(|| declared.and_then(|d| d.max_output)),
+                        supports_tools: supports_tools
+                            .or(entry.supports_tools)
+                            .or_else(|| declared.map(|d| d.supports_tools))
+                            .unwrap_or(true),
+                        image_input: image_input
+                            .or(entry.image_input)
+                            .or_else(|| {
+                                builtin.map(|provider| {
+                                    provider.image_input
+                                        || declared.is_some_and(|model| model.image_input)
+                                })
+                            })
+                            .unwrap_or(false),
+                        pricing: pricing
+                            .or_else(|| entry.pricing.clone())
+                            .or_else(|| declared.and_then(|d| d.pricing.clone())),
                     };
                     models.retain(|m| !(m.provider == resolved.provider && m.id == resolved.id));
                     models.push(resolved);
@@ -366,4 +510,21 @@ pub fn display_name(provider: &str) -> String {
     crate::core::providers::registry::find(provider)
         .map(|p| p.display.clone())
         .unwrap_or_else(|| provider.to_string())
+}
+
+#[cfg(test)]
+mod pricing_tests {
+    use super::Pricing;
+
+    #[test]
+    fn cached_input_uses_its_own_rate_without_double_charging() {
+        let pricing = Pricing {
+            input_per_million: 2.0,
+            output_per_million: 8.0,
+            cache_read_per_million: Some(0.5),
+        };
+        // 750k uncached + 250k cached + 100k output.
+        let cost = pricing.estimate(1_000_000, 100_000, 250_000);
+        assert!((cost - 2.425).abs() < f64::EPSILON);
+    }
 }

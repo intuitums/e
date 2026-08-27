@@ -10,8 +10,8 @@ use common::{clear_env_keys, env_lock, read_tool, request_json, serve_sse, test_
 
 use e::core::providers::catalog::{self, Api, Model, Thinking};
 use e::core::providers::{
-    self, ChatMessage, Event, FailureCause, FinishReason, Request, SseSplitter, SseStream,
-    ToolCall, MAX_SSE_EVENT_BYTES,
+    self, ChatMessage, Event, FailureCause, FinishReason, ImageInput, Request, SseSplitter,
+    SseStream, ToolCall, MAX_SSE_EVENT_BYTES,
 };
 
 // ---------------------------------------------------------------------------
@@ -397,6 +397,10 @@ async fn collect_stream(
     let mut calls = Vec::new();
     let mut usage = None;
     let mut finish = None;
+    let mut starts = std::collections::BTreeSet::new();
+    let mut ends = std::collections::BTreeSet::new();
+    let mut deltas: std::collections::BTreeMap<String, String> = Default::default();
+    let mut end_order = Vec::new();
     while let Some(event) = rx.recv().await {
         match event {
             Event::TextDelta(d) => text.push_str(&d),
@@ -413,11 +417,86 @@ async fn collect_stream(
                 break;
             }
             Event::ReasoningItem(_) => {}
-            // Liveness progress; the accumulated call itself is asserted on.
-            Event::ToolCallDelta { .. } => {}
+            Event::ToolCallStart { key } => {
+                assert!(starts.insert(key), "duplicate tool-call start");
+            }
+            Event::ToolArgumentsDelta { key, delta } => {
+                assert!(starts.contains(&key), "arguments arrived before start");
+                assert!(!ends.contains(&key), "arguments arrived after end");
+                deltas.entry(key).or_default().push_str(&delta);
+            }
+            Event::ToolCallEnd { key } => {
+                assert!(starts.contains(&key), "tool-call end arrived before start");
+                assert!(ends.insert(key.clone()), "duplicate tool-call end");
+                end_order.push(key);
+            }
         }
     }
+    assert_eq!(starts, ends, "every semantic tool-call start must end");
+    assert_eq!(
+        starts.len(),
+        calls.len(),
+        "one lifecycle per completed call"
+    );
+    for (key, call) in end_order.iter().zip(&calls) {
+        assert_eq!(
+            deltas.get(key).map(String::as_str).unwrap_or_default(),
+            call.arguments,
+            "semantic deltas must reconstruct completed arguments for {key}"
+        );
+    }
     (text, reasoning, calls, usage, finish)
+}
+
+/// Chat Completions may interleave fragments for parallel calls. Progress
+/// must retain a stable per-call key; one anonymous byte counter cannot prove
+/// that fragments were attributed or assembled correctly.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn semantic_tool_progress_preserves_interleaved_call_identity() {
+    let _lock = env_lock();
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"pa\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"function\":{\"name\":\"grep\",\"arguments\":\"{\\\"qu\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"th\\\":\\\"a\\\"}\"}},{\"index\":1,\"function\":{\"arguments\":\"ery\\\":\\\"b\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, server) = serve_sse(&[body]);
+    let home = Home::new("semantic-tool-progress");
+    home.auth(r#"{"openai":{"key":"test"}}"#);
+    let request = Request {
+        model: test_model("openai", port, Api::Completions),
+        system: "sys".into(),
+        messages: vec![ChatMessage::user("use two tools")],
+        effort: None,
+        tools: vec![read_tool()],
+    };
+    let (mut rx, _handle) = providers::stream(request);
+    let mut starts = Vec::new();
+    let mut deltas: std::collections::BTreeMap<String, String> = Default::default();
+    let mut ends = Vec::new();
+    let mut calls = Vec::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            Event::ToolCallStart { key } => starts.push(key),
+            Event::ToolArgumentsDelta { key, delta } => {
+                deltas.entry(key).or_default().push_str(&delta)
+            }
+            Event::ToolCallEnd { key } => ends.push(key),
+            Event::ToolCall(call) => calls.push(call),
+            Event::Error(error) => panic!("stream errored: {}", error.message),
+            Event::Done(_) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(starts, vec!["0", "1"]);
+    assert_eq!(ends, vec!["0", "1"]);
+    assert_eq!(deltas["0"], r#"{"path":"a"}"#);
+    assert_eq!(deltas["1"], r#"{"query":"b"}"#);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].arguments, deltas["0"]);
+    assert_eq!(calls[1].arguments, deltas["1"]);
+    server.join().unwrap();
 }
 
 // The env lock is held across awaits: E_HOME must stay ours and each
@@ -453,6 +532,67 @@ async fn each_dialect_streams_text_tools_and_usage() {
         let sent = server.join().unwrap();
         assert_eq!(sent.len(), 1, "{}", case.name);
         assert_wire(case.name, &sent[0]);
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn each_dialect_translates_the_same_image_message() {
+    let _lock = env_lock();
+    for case in dialects() {
+        let (port, server) = serve_sse(&[case.sse]);
+        let home = Home::new(&format!("image-{}", case.name));
+        home.auth(case.auth);
+        let request = Request {
+            model: test_model(case.provider, port, case.api),
+            system: "sys".into(),
+            messages: vec![ChatMessage::user_with_images(
+                "describe",
+                vec![ImageInput {
+                    media_type: "image/png".into(),
+                    data: "AA==".into(),
+                }],
+            )],
+            effort: case.effort.map(str::to_string),
+            tools: vec![read_tool()],
+        };
+        let _ = collect_stream(request).await;
+        let sent = server.join().unwrap();
+        let body = request_json(&sent[0]);
+        match case.api {
+            Api::Completions => {
+                assert_eq!(body["messages"][1]["content"][1]["type"], "image_url");
+                assert_eq!(
+                    body["messages"][1]["content"][1]["image_url"]["url"],
+                    "data:image/png;base64,AA=="
+                );
+            }
+            Api::Responses => {
+                assert_eq!(body["input"][0]["content"][1]["type"], "input_image");
+                assert_eq!(
+                    body["input"][0]["content"][1]["image_url"],
+                    "data:image/png;base64,AA=="
+                );
+            }
+            Api::Anthropic => {
+                assert_eq!(body["messages"][0]["content"][1]["type"], "image");
+                assert_eq!(
+                    body["messages"][0]["content"][1]["source"]["media_type"],
+                    "image/png"
+                );
+                assert_eq!(body["messages"][0]["content"][1]["source"]["data"], "AA==");
+            }
+            Api::Google => {
+                assert_eq!(
+                    body["contents"][0]["parts"][1]["inlineData"]["mimeType"],
+                    "image/png"
+                );
+                assert_eq!(
+                    body["contents"][0]["parts"][1]["inlineData"]["data"],
+                    "AA=="
+                );
+            }
+        }
     }
 }
 
@@ -503,6 +643,7 @@ async fn responses_codex_oauth_mount_sends_prompt_cache_key() {
 
     let mut model = test_model(case.provider, port, case.api);
     model.thinking = case.thinking;
+    model.responses_mount = e::core::providers::registry::ResponsesMount::Codex;
     let request = Request {
         model,
         system: "sys".into(),
@@ -526,6 +667,34 @@ async fn responses_codex_oauth_mount_sends_prompt_cache_key() {
         body["prompt_cache_key"].is_string(),
         "the codex OAuth mount must send the cache key: {body}"
     );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn responses_platform_mount_is_not_inferred_from_oauth_credentials() {
+    let _lock = env_lock();
+    let case = dialects()
+        .into_iter()
+        .find(|case| case.name == "responses")
+        .unwrap();
+    let (port, server) = serve_sse(&[case.sse]);
+    let home = Home::new("responses-platform-oauth");
+    home.auth(
+        r#"{"openai":{"access":"acc-test","refresh":"ref-test","expires":9999999999999,"account_id":"acct-1"}}"#,
+    );
+    let request = Request {
+        model: test_model(case.provider, port, case.api),
+        system: "sys".into(),
+        messages: history_messages(&case.history),
+        effort: case.effort.map(str::to_string),
+        tools: vec![read_tool()],
+    };
+
+    collect_stream(request).await;
+    let sent = server.join().unwrap();
+    assert!(sent[0].starts_with("POST /responses "));
+    assert!(!sent[0].contains("chatgpt-account-id"));
+    assert!(request_json(&sent[0]).get("prompt_cache_key").is_none());
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -636,6 +805,7 @@ async fn signed_thinking_blocks_are_captured_and_replayed() {
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 tool_meta: None,
+                images: Vec::new(),
             },
             ChatMessage::assistant("", calls.clone()),
             ChatMessage::tool_result("tu_1", "contents"),
@@ -1112,6 +1282,67 @@ fn registry_and_catalog_match_the_embedded_data() {
 }
 
 #[test]
+fn native_support_tier_is_explicit_and_narrow() {
+    use e::core::providers::registry::SupportTier;
+    let native = e::core::providers::registry::all()
+        .iter()
+        .filter(|provider| provider.tier == SupportTier::Native)
+        .map(|provider| provider.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        native,
+        ["anthropic", "google", "openai", "openai-codex"]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
+fn image_input_uses_magic_bytes_not_a_trusting_extension() {
+    let root = std::env::temp_dir().join(format!(
+        "e-image-input-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let image_path = root.join("image.data");
+    std::fs::write(&image_path, b"\x89PNG\r\n\x1a\nrest").unwrap();
+    let image = ImageInput::from_path(&image_path).unwrap();
+    let cloned = image.clone();
+    assert_eq!(image.media_type, "image/png");
+    assert!(image.data_url().starts_with("data:image/png;base64,"));
+    assert!(std::sync::Arc::ptr_eq(&image.data, &cloned.data));
+
+    let fake = root.join("not-really.png");
+    std::fs::write(&fake, b"plain text").unwrap();
+    assert!(ImageInput::from_path(&fake)
+        .unwrap_err()
+        .contains("unsupported image data"));
+
+    let too_many = vec!["unused".to_string(); 11];
+    assert!(ImageInput::from_paths(&too_many)
+        .unwrap_err()
+        .contains("at most 10"));
+
+    let mut aggregate = Vec::new();
+    for index in 0..3 {
+        let path = root.join(format!("large-{index}.png"));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(14 * 1024 * 1024)
+            .unwrap();
+        aggregate.push(path.display().to_string());
+    }
+    assert!(ImageInput::from_paths(&aggregate)
+        .unwrap_err()
+        .contains("40 MiB"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn models_json_windows_and_overrides() {
     let _lock = env_lock();
     let catalog = catalog_with_models_json(
@@ -1371,7 +1602,7 @@ async fn provider_reported_models_appear_without_a_release() {
     home.write(
         "models.json",
         format!(
-            r#"{{"providers":{{"mock":{{"base_url":"http://127.0.0.1:{port}","api":"anthropic","models":["small"]}}}}}}"#
+            r#"{{"providers":{{"mock":{{"base_url":"http://127.0.0.1:{port}","api":"anthropic","supports_tools":false,"image_input":true,"models":["small"]}}}}}}"#
         ),
     );
 
@@ -1387,6 +1618,8 @@ async fn provider_reported_models_appear_without_a_release() {
         .expect("gateway model appears");
     assert_eq!(fresh.context_window, 64_000);
     assert_eq!(fresh.api, Api::Anthropic);
+    assert!(!fresh.supports_tools);
+    assert!(fresh.image_input);
     let known = catalog
         .iter()
         .find(|m| m.provider == "mock" && m.id == "small")

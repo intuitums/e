@@ -3,6 +3,9 @@
 	"display": "OpenAI Codex",
 	"base_url": "https://chatgpt.com/backend-api",
 	"api": "codex-responses",
+	"responses_mount": "codex",
+	"tier": "native",
+	"image_input": true,
 	"auth": {
 		"oauth": "codex",
 		"oauth_hint": "ChatGPT \u2014 opens the browser"

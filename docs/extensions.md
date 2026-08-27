@@ -15,12 +15,12 @@ Extensions can:
 - **observe events** (`turn_end`) and **notify** the transcript at any time
 - **handle startup arguments** and request a same-binary relaunch in another directory
 
-## Wire protocol (version 1)
+## Wire protocol (version 1 + capabilities)
 
 e → extension, requests (each carries an `id` to answer with):
 
 ```
-{"id":1,"method":"initialize","params":{"protocol":1,"e_version":"dogfood","cwd":"/path","extensions_config":{…}}}
+{"id":1,"method":"initialize","params":{"protocol":1,"capabilities":["tool.update"],"e_version":"dogfood","cwd":"/path","extensions_config":{…}}}
 {"id":2,"method":"hook.startup","params":{"cwd":"/path","argv":["--worktree","feature"],"flags":{"worktree":"feature"}}}
 {"id":3,"method":"tool_call","params":{"name":"greet","arguments":{...}}}
 {"id":4,"method":"command","params":{"name":"ping","args":"rest of the line"}}
@@ -41,6 +41,7 @@ extension → e:
 {"id":1,"result":{...}}                        answer a request
 {"id":2,"error":"what went wrong"}             or fail it
 {"method":"notify","params":{"message":"hi"}}  a transcript notice, any time
+{"method":"tool.update","params":{"id":3,"stream":"stdout","chunk":"working\n"}}
 ```
 
 ## Results by method
@@ -86,7 +87,20 @@ command line, regardless of default. The raw protocol gets
 `{"method":"flags","params":{"flags":{…}}}`.
 
 **tool_call** → `{"content":"text the model sees","is_error":false,
-"session_name":"optional new session name"}`
+"session_name":"optional new session name"}`. Before that final response,
+an extension may emit any number of `tool.update` notifications. Their `id`
+must be the active tool-call request id, `stream` is `stdout` or `stderr`, and
+`chunk` is displayed through the same ordered tool-output stream as built-in
+commands. Version-1 extensions remain compatible; they simply never emit an
+update. The scaffold passes tool handlers a second `{update}` argument:
+
+```js
+async tool({ arguments }, { update }) {
+  update("starting\n");
+  update("a warning\n", "stderr");
+  return { content: "done" };
+}
+```
 
 **command** → `{"notice":"line for the transcript"}` and/or
 `{"prompt":"text submitted as the user"}`, and optionally
@@ -142,7 +156,10 @@ docs/extensions/
   scaffold.mjs   the wire-protocol helper (copy next to your extension)
   hello.mjs      every surface at once, on the scaffold
   gate.mjs       the tool_call hook as a fail-open guard
+  protected.mjs  the tool_call hook denying credential-shaped paths
   worktree.mjs   a minimal startup-hook launcher (e -w)
+  subagent.mjs   bounded delegated e turns as a tool
+  mcp.mjs        one MCP stdio server's tools as extension tools
 ```
 
 **`scaffold.mjs`** is the shared plumbing every extension needs: the
@@ -158,8 +175,22 @@ own directory) it runs as a named no-op extension and stays silent.
 - **`gate.mjs`** — the `tool_call` hook as a guard, in e's fail-open
   shape: only an explicit block stops a call; a slow or crashed
   extension never blocks the agent.
+- **`protected.mjs`** — the `tool_call` hook denying any call (`read`,
+  `write`, `edit`, `grep`, `bash`) that touches a credential-shaped path —
+  `~/.ssh`, `~/.aws`, `~/.gnupg`, `.env*`, `*.pem`, `*.key` — whether that's
+  the tool's `path` argument or a bash command mentioning one. Unlike
+  `gate.mjs`'s destructive-command denylist, this one is about what gets
+  read into context or written to disk, not just what bash runs. See
+  [`docs/sandboxing.md`](sandboxing.md) for e's trust model and where a
+  hook like this fits.
 - **`worktree.mjs`** — the startup-hook launcher on the scaffold:
   `e -w [branch]` creates a Git worktree and relaunches e there.
+- **`subagent.mjs`** — a `delegate` tool that runs an isolated `e ask
+  --json --no-save --no-extensions` child. It defaults to read-only and can
+  select a model or effort without creating a recursive extension chain.
+- **`mcp.mjs`** — a dependency-free bridge from one configured MCP stdio
+  server's `tools/list` / `tools/call` surface into e extension tools. It
+  forwards MCP progress through the additive `tool.update` capability.
 
 Copy any of them to `~/.e/extensions/` (with `scaffold.mjs` beside
 them), `chmod +x`, and restart e.
@@ -183,6 +214,39 @@ done
 ```
 
 Restart e, type `/ping`, get `pong`.
+
+## MCP tools
+
+Copy `mcp.mjs` into `~/.e/extensions/`, make it executable, then configure
+the stdio server e should own in `~/.e/settings.json`:
+
+```json
+{
+  "extensions": {
+    "mcp": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/safe/root"]
+    }
+  }
+}
+```
+
+The bridge intentionally maps only MCP tools. Prompts, resources, sampling,
+elicitation, and authorization stay out of e's core and out of this example.
+It uses the 2025-11-25 initialize/initialized stdio lifecycle supported by
+current SDK legacy/default mode, newline-delimited JSON-RPC, paginated
+`tools/list`, and `tools/call`. See the [MCP lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle),
+[transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports),
+and [tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
+specifications.
+
+## Delegated turns
+
+Copy both `subagent.mjs` and `scaffold.mjs`, make the former executable, and
+restart. The model gains a `delegate` tool. Each delegation is a fresh child
+turn in the same working directory; it is ephemeral, extension-free, and
+read-only unless the caller explicitly selects another `tool_mode`. Set
+`E_BIN` when the child should use an e binary other than the one on `PATH`.
 
 ## What startup hooks are for
 

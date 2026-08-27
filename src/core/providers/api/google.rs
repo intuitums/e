@@ -12,7 +12,7 @@
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::core::auth::login;
+use crate::core::providers::runtime::Authorization;
 use crate::core::providers::{
     http, require_success, send_request, Event, FinishReason, ProviderError, Request, SseStream,
     StreamEnd, ToolCall,
@@ -25,11 +25,11 @@ fn synthesize_call_id(name: &str) -> String {
     format!("{name}-{}", uuid::Uuid::new_v4())
 }
 
-pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEnd, ProviderError> {
-    let key = login::access_token(request.model.provider.as_str())
-        .await
-        .map_err(ProviderError::auth)?;
-
+pub async fn run(
+    request: &Request,
+    authorization: &Authorization,
+    tx: &mpsc::Sender<Event>,
+) -> Result<StreamEnd, ProviderError> {
     // History → contents. Assistant turns replay their function calls with
     // thought signatures; tool results ride user turns as functionResponse
     // parts, consecutive results joining one turn to mirror the batch.
@@ -104,7 +104,17 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                 // buffered thought text; replaying it elsewhere would fail
                 // the signature check.
                 pending_thoughts.clear();
-                contents.push(json!({"role": "user", "parts": [{"text": m.content}]}));
+                let mut parts = Vec::new();
+                if !m.content.is_empty() {
+                    parts.push(json!({"text": m.content}));
+                }
+                parts.extend(m.images.iter().map(|image| {
+                    json!({"inlineData": {
+                        "mimeType": image.media_type,
+                        "data": image.data,
+                    }})
+                }));
+                contents.push(json!({"role": "user", "parts": parts}));
             }
         }
     }
@@ -141,7 +151,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                     "{}/models/{}:streamGenerateContent?alt=sse",
                     request.model.base_url, request.model.id
                 ))
-                .header("x-goog-api-key", &key)
+                .header("x-goog-api-key", &authorization.bearer)
                 .header("accept", "text/event-stream")
                 .json(&body),
         )
@@ -202,6 +212,17 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                         signature: part["thoughtSignature"].as_str().map(String::from),
                     };
                     if !call.name.is_empty() {
+                        let key = call.id.clone();
+                        let _ = tx.send(Event::ToolCallStart { key: key.clone() }).await;
+                        if !call.arguments.is_empty() {
+                            let _ = tx
+                                .send(Event::ToolArgumentsDelta {
+                                    key: key.clone(),
+                                    delta: call.arguments.clone(),
+                                })
+                                .await;
+                        }
+                        let _ = tx.send(Event::ToolCallEnd { key }).await;
                         let _ = tx.send(Event::ToolCall(call)).await;
                     }
                 }

@@ -59,6 +59,52 @@ async fn agent_folds_provider_events_into_one_session_stream() {
     assert!(!kinds.contains(&"error"));
 }
 
+// A resumed session or a mid-session model switch can carry image-bearing
+// history from an earlier, image-capable model forward to one that isn't.
+// Unstripped, the whole turn gets rejected by a backend that doesn't
+// understand image content — this pins that the agent turn loop actually
+// calls the strip (not just that the pure function works in isolation).
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn historical_images_are_stripped_for_a_model_that_cannot_accept_them() {
+    let _lock = env_lock();
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, server) = serve_sse(&[body]);
+    let _home = mock_home();
+
+    let model = test_model("mock", port, Api::Completions); // image_input: false
+    let (mut agent, mut rx) = Agent::new(model);
+    agent.load_history(vec![e::core::providers::ChatMessage::user_with_images(
+        "look at this",
+        vec![e::core::providers::ImageInput {
+            media_type: "image/png".into(),
+            data: std::sync::Arc::from("aGVsbG8="),
+        }],
+    )]);
+    agent.submit("continue".into(), "sys".into());
+
+    while let Some(event) = rx.recv().await {
+        if matches!(event, SessionEvent::TurnEnd { .. }) {
+            break;
+        }
+    }
+
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !requests[0].contains("aGVsbG8="),
+        "a historical image must not reach a model that can't accept it"
+    );
+    assert!(
+        requests[0].contains("is not declared image-capable"),
+        "history should note that an image was omitted, not just silently drop it"
+    );
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_reports_errors_and_still_ends_the_turn_exactly_once() {

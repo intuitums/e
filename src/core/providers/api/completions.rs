@@ -6,17 +6,17 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
-use crate::core::auth::login;
+use crate::core::providers::runtime::Authorization;
 use crate::core::providers::{
     http, require_success, retry_after_seconds, send_request, Event, FinishReason, ProviderError,
     Request, SseStream, StreamEnd, ToolCall,
 };
 
-pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEnd, ProviderError> {
-    let key = login::access_token(request.model.provider.as_str())
-        .await
-        .map_err(ProviderError::auth)?;
-
+pub async fn run(
+    request: &Request,
+    authorization: &Authorization,
+    tx: &mpsc::Sender<Event>,
+) -> Result<StreamEnd, ProviderError> {
     let mut messages = vec![json!({"role": "system", "content": request.system})];
     for m in &request.messages {
         match m.role.as_str() {
@@ -42,7 +42,23 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
             })),
             // Responses-dialect reasoning items mean nothing here.
             "reasoning" => {}
-            role => messages.push(json!({"role": role, "content": m.content})),
+            role => {
+                if m.images.is_empty() {
+                    messages.push(json!({"role": role, "content": m.content}));
+                } else {
+                    let mut content = Vec::new();
+                    if !m.content.is_empty() {
+                        content.push(json!({"type": "text", "text": m.content}));
+                    }
+                    content.extend(m.images.iter().map(|image| {
+                        json!({
+                            "type": "image_url",
+                            "image_url": {"url": image.data_url()},
+                        })
+                    }));
+                    messages.push(json!({"role": role, "content": content}));
+                }
+            }
         }
     }
 
@@ -60,7 +76,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
         send_request(
             http()
                 .post(format!("{}/chat/completions", request.model.base_url))
-                .bearer_auth(&key)
+                .bearer_auth(&authorization.bearer)
                 .header("accept", "text/event-stream")
                 .json(body),
         )
@@ -87,11 +103,16 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
     // Tool-call fragments accumulate per stream index until [DONE].
     let mut pending: BTreeMap<u64, ToolCall> = BTreeMap::new();
     let flush = |pending: &mut BTreeMap<u64, ToolCall>, tx: &mpsc::Sender<Event>| {
-        let calls: Vec<ToolCall> = std::mem::take(pending).into_values().collect();
+        let calls: Vec<(u64, ToolCall)> = std::mem::take(pending).into_iter().collect();
         let tx = tx.clone();
         async move {
-            for call in calls {
+            for (index, call) in calls {
                 if !call.name.is_empty() {
+                    let _ = tx
+                        .send(Event::ToolCallEnd {
+                            key: index.to_string(),
+                        })
+                        .await;
                     let _ = tx.send(Event::ToolCall(call)).await;
                 }
             }
@@ -130,6 +151,13 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                 if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
                     for fragment in calls {
                         let index = fragment["index"].as_u64().unwrap_or(0);
+                        if !pending.contains_key(&index) {
+                            let _ = tx
+                                .send(Event::ToolCallStart {
+                                    key: index.to_string(),
+                                })
+                                .await;
+                        }
                         let entry = pending.entry(index).or_insert_with(|| ToolCall {
                             id: String::new(),
                             name: String::new(),
@@ -146,8 +174,9 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                             entry.arguments.push_str(args);
                             if !args.is_empty() {
                                 let _ = tx
-                                    .send(Event::ToolCallDelta {
-                                        bytes: args.len() as u64,
+                                    .send(Event::ToolArgumentsDelta {
+                                        key: index.to_string(),
+                                        delta: args.to_string(),
                                     })
                                     .await;
                             }

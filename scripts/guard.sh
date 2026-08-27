@@ -10,12 +10,30 @@ fail=0
 say() { printf '%s\n' "$*"; }
 bad() { fail=1; say "FAIL: $*"; }
 
+# Production-only view of a Rust source tree: truncate each file at its
+# first #[cfg(test)] marker before scanning. A test module is always the
+# last item in a file — CI denies clippy::items_after_test_module — so
+# nothing shipped can follow it. Without this, test fixtures (a placeholder
+# host like example.invalid, a scratch File::write into a temp dir) trip
+# boundaries these checks mean for the shipped binary, not its tests.
+prod_rs() {
+  for f in "$@"; do
+    awk -v file="$f" '
+      /^#\[cfg\(test\)\]/ { exit }
+      { print file":"FNR":"$0 }
+    ' "$f"
+  done
+}
+
 # 1. Network surface. e talks to its sign-in and model providers and nothing
 #    else — in the shipped binary (src/) or its dev tooling (scripts/). A new
 #    host means a new place user data can go — add it here deliberately or
 #    the build fails.
 allowed_hosts="localhost models.dev auth.openai.com api.openai.com chatgpt.com opencode.ai auth.x.ai api.x.ai api.anthropic.com api.github.com github.com ai-gateway.vercel.sh generativelanguage.googleapis.com api.groq.com api.mistral.ai api.deepseek.com api.cerebras.ai openrouter.ai api.together.xyz api.fireworks.ai"
-found_hosts=$(grep -rhoE 'https?://[A-Za-z0-9.-]+' src/ scripts/ 2>/dev/null | sed -E 's#https?://##' | sort -u)
+found_hosts=$(
+  { prod_rs $(find src -name '*.rs' 2>/dev/null); find scripts -type f 2>/dev/null | xargs cat 2>/dev/null; } |
+    grep -ohE 'https?://[A-Za-z0-9.-]+' | sed -E 's#https?://##' | sort -u
+)
 for host in $found_hosts; do
   case " $allowed_hosts " in
     *" $host "*) ;;
@@ -40,7 +58,7 @@ fi
 # 4. Config and credential writes go through core/store.rs — the merge-write
 #    path that never wipes unknown keys and chmods auth to 0600. Direct write
 #    APIs in core are limited to the files that own a format.
-if out=$(grep -rnE 'fs::write|File::create|OpenOptions' src/core/ --include='*.rs' |
+if out=$(prod_rs $(find src/core -name '*.rs' 2>/dev/null) | grep -E 'fs::write|File::create|OpenOptions' |
     grep -v '^src/core/config/store.rs:' | grep -v '^src/core/session.rs:' |
     grep -v '^src/core/config/home.rs:' | grep -v '^src/core/tools/' |
     grep -v '^src/core/update.rs:'); then

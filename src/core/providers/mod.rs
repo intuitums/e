@@ -1,19 +1,127 @@
 //! The provider seam: one request contract, one normalized event stream.
 //!
 //! Everything above this module sees `Event`s; everything below is a wire
-//! dialect. Three dialects ship: chat-completions, Responses-API, and
-//! Anthropic Messages (see `api/`). Providers are data (`data/*.json`);
+//! dialect. Four dialects ship: chat-completions, Responses, Anthropic
+//! Messages, and Gemini (see `api/`). Providers are data (`data/*.json`);
 //! OAuth refresh lives in `auth::login`. SSE framing is handled here — one
 //! small splitter, tested, shared.
 
 pub mod api;
 pub mod catalog;
+pub mod diagnostics;
 pub mod registry;
+pub mod runtime;
 
 use serde::Serialize;
 use tokio::sync::mpsc;
 
 use crate::core::providers::catalog::{Api, Model};
+
+const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_IMAGE_COUNT: usize = 10;
+const MAX_TOTAL_IMAGE_BYTES: u64 = 40 * 1024 * 1024;
+
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct ImageInput {
+    pub media_type: String,
+    /// Base64 without a data-URL prefix. Sessions retain the bytes so resume
+    /// does not depend on the original file still existing or staying still.
+    pub data: std::sync::Arc<str>,
+}
+
+impl ImageInput {
+    pub fn from_path(path: &std::path::Path) -> Result<Self, String> {
+        Self::from_path_with_size(path).map(|(image, _)| image)
+    }
+
+    /// Load a bounded first-turn attachment batch. Keeping count, aggregate,
+    /// file-type, and race-safe byte checks here gives the TUI, ask, and RPC
+    /// paths one definition of a valid image batch.
+    pub fn from_paths(paths: &[String]) -> Result<Vec<Self>, String> {
+        if paths.len() > MAX_IMAGE_COUNT {
+            return Err(format!(
+                "at most {MAX_IMAGE_COUNT} --image attachments are allowed"
+            ));
+        }
+        let declared_total = paths.iter().try_fold(0u64, |total, path| {
+            let metadata = std::fs::metadata(path).map_err(|error| format!("{path}: {error}"))?;
+            total
+                .checked_add(metadata.len())
+                .ok_or_else(|| "image attachment sizes overflowed".to_string())
+        })?;
+        if declared_total > MAX_TOTAL_IMAGE_BYTES {
+            return Err("image attachments exceed 40 MiB in total".into());
+        }
+
+        let mut actual_total = 0u64;
+        let mut images = Vec::with_capacity(paths.len());
+        for path in paths {
+            let (image, size) = Self::from_path_with_size(std::path::Path::new(path))?;
+            actual_total = actual_total
+                .checked_add(size)
+                .ok_or_else(|| "image attachment sizes overflowed".to_string())?;
+            if actual_total > MAX_TOTAL_IMAGE_BYTES {
+                return Err("image attachments exceed 40 MiB in total".into());
+            }
+            images.push(image);
+        }
+        Ok(images)
+    }
+
+    fn from_path_with_size(path: &std::path::Path) -> Result<(Self, u64), String> {
+        use base64::Engine as _;
+        let metadata =
+            std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(format!("{}: not a regular file", path.display()));
+        }
+        if metadata.len() > MAX_IMAGE_BYTES {
+            return Err(format!("{}: image exceeds 20 MiB", path.display()));
+        }
+        // The file can change size between metadata() and here — grow after a
+        // small reported size, or never end at all (a fifo, a procfs entry).
+        // Read through a bounded reader so such a file cannot be pulled into
+        // memory in full before the length check below ever runs.
+        use std::io::Read as _;
+        let file =
+            std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let mut bytes = Vec::new();
+        file.take(MAX_IMAGE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        if bytes.len() as u64 > MAX_IMAGE_BYTES {
+            return Err(format!("{}: image exceeds 20 MiB", path.display()));
+        }
+        let media_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            "image/png"
+        } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+            "image/jpeg"
+        } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+            "image/gif"
+        } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+            "image/webp"
+        } else {
+            return Err(format!(
+                "{}: unsupported image data (use png, jpg, gif, or webp)",
+                path.display()
+            ));
+        };
+        let size = bytes.len() as u64;
+        Ok((
+            ImageInput {
+                media_type: media_type.into(),
+                data: base64::engine::general_purpose::STANDARD
+                    .encode(bytes)
+                    .into(),
+            },
+            size,
+        ))
+    }
+
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.data)
+    }
+}
 
 /// One requested tool invocation, as the model asked for it.
 #[derive(Clone, Debug, serde::Deserialize, Serialize)]
@@ -47,6 +155,8 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_meta: Option<ToolResultMeta>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageInput>,
 }
 
 impl ChatMessage {
@@ -57,6 +167,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_meta: None,
+            images: Vec::new(),
         }
     }
     pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
@@ -66,6 +177,7 @@ impl ChatMessage {
             tool_calls,
             tool_call_id: None,
             tool_meta: None,
+            images: Vec::new(),
         }
     }
     /// A dialect-owned reasoning item (signed thinking block, Responses
@@ -77,6 +189,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_meta: None,
+            images: Vec::new(),
         }
     }
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
@@ -86,6 +199,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
             tool_meta: None,
+            images: Vec::new(),
         }
     }
 
@@ -104,7 +218,41 @@ impl ChatMessage {
                 outcome,
                 summary: summary.into(),
             }),
+            images: Vec::new(),
         }
+    }
+
+    pub fn user_with_images(content: impl Into<String>, images: Vec<ImageInput>) -> Self {
+        let mut message = Self::user(content);
+        message.images = images;
+        message
+    }
+}
+
+/// Drop images the selected model can't accept from a request's message
+/// history — a resumed session, or a mid-session model switch, can carry
+/// image-bearing turns from an earlier, image-capable model forward to one
+/// that isn't. `load_images` already refuses a *new* attachment against an
+/// incompatible model; this is the historical case, where sending the
+/// request unchanged would get the whole turn rejected by a backend that
+/// doesn't understand image content at all. Never touches the session's
+/// own stored history — callers pass their own copy of it (the agent turn
+/// loop's `messages`, cloned fresh from `history` each step).
+pub fn strip_incompatible_images(messages: &mut [ChatMessage], model: &Model) {
+    if model.image_input {
+        return;
+    }
+    for message in messages.iter_mut() {
+        if message.images.is_empty() {
+            continue;
+        }
+        let count = message.images.len();
+        message.images.clear();
+        message.content.push_str(&format!(
+            "\n\n[{count} image{} omitted: {} is not declared image-capable]",
+            if count == 1 { "" } else { "s" },
+            catalog::slug(model)
+        ));
     }
 }
 
@@ -307,11 +455,23 @@ pub enum Event {
     TextDelta(String),
     ReasoningDelta(String),
     /// Bytes of tool-call argument JSON just streamed. Argument assembly is
-    /// the one long phase with no visible text — a model writing a 20KB
-    /// `write` call streams for tens of seconds — so without this the UI
-    /// (and its live token estimate) sits frozen while the turn is alive.
-    ToolCallDelta {
-        bytes: u64,
+    /// A provider began streaming one tool request. `key` is stable within
+    /// this response even when the provider has not supplied the call id yet
+    /// (for example, a chat-completions tool index).
+    ToolCallStart {
+        key: String,
+    },
+    /// One exact argument fragment for a particular in-flight call. Keeping
+    /// identity and content here makes interleaved calls testable and lets
+    /// frontends show useful progress without parsing provider wire frames.
+    ToolArgumentsDelta {
+        key: String,
+        delta: String,
+    },
+    /// Argument streaming for this key is complete. Execution still begins
+    /// only after the following validated `ToolCall` event.
+    ToolCallEnd {
+        key: String,
     },
     /// A completed tool request (dialects accumulate the argument deltas).
     ToolCall(ToolCall),
@@ -349,11 +509,14 @@ pub struct Request {
 pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(64);
     let handle = tokio::spawn(async move {
-        let result = match request.model.api {
-            Api::Completions => api::completions::run(&request, &tx).await,
-            Api::Responses => api::responses::run(&request, &tx).await,
-            Api::Anthropic => api::anthropic::run(&request, &tx).await,
-            Api::Google => api::google::run(&request, &tx).await,
+        let result = match runtime::authorize(&request.model).await {
+            Ok(authorization) => match request.model.api {
+                Api::Completions => api::completions::run(&request, &authorization, &tx).await,
+                Api::Responses => api::responses::run(&request, &authorization, &tx).await,
+                Api::Anthropic => api::anthropic::run(&request, &authorization, &tx).await,
+                Api::Google => api::google::run(&request, &authorization, &tx).await,
+            },
+            Err(error) => Err(error),
         };
         match result {
             Ok(end) => {
@@ -692,5 +855,112 @@ mod tests {
         assert_eq!(err.short, "504 Gateway Timeout");
         assert!(err.message.starts_with("504 Gateway Timeout: xxx"));
         assert!(err.message.len() < body.len());
+    }
+
+    fn temp_image_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "e-image-test-{}-{}-{name}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn a_valid_image_under_the_cap_loads() {
+        let path = temp_image_path("small.png");
+        let content = b"\x89PNG\r\n\x1a\nrest of a tiny file";
+        std::fs::write(&path, content).unwrap();
+        let (image, size) = ImageInput::from_path_with_size(&path).unwrap();
+        assert_eq!(image.media_type, "image/png");
+        assert_eq!(size, content.len() as u64);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // from_path_with_size reads through take(MAX_IMAGE_BYTES + 1) rather
+    // than std::fs::read, so the post-read length check below can never be
+    // reached by pulling an arbitrarily large file fully into memory
+    // first. This test pins the still-correct outward behavior (reject,
+    // with this exact message) after that change; it can't observe memory
+    // use directly, but a regression back to an unbounded read would fail
+    // this the same way it fails the fifo-style "must fail fast, not
+    // block" tests elsewhere in this suite — by taking a very long time
+    // or exhausting memory instead of returning promptly.
+    #[test]
+    fn an_oversized_image_is_rejected_without_reading_past_the_cap() {
+        let path = temp_image_path("big.png");
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.resize(MAX_IMAGE_BYTES as usize + 1, 0);
+        std::fs::write(&path, &bytes).unwrap();
+        let error = ImageInput::from_path_with_size(&path).unwrap_err();
+        assert!(error.contains("exceeds 20 MiB"), "{error}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn image_incapable_model() -> Model {
+        Model {
+            provider: "test".into(),
+            id: "test".into(),
+            base_url: "https://example.invalid".into(),
+            api: Api::Completions,
+            catalog: crate::core::providers::registry::CatalogStrategy::Openai,
+            responses_mount: crate::core::providers::registry::ResponsesMount::Platform,
+            provider_supports_tools: true,
+            provider_image_input: false,
+            efforts: Vec::new(),
+            thinking: crate::core::providers::catalog::Thinking::Manual,
+            context_window: 200_000,
+            max_output: None,
+            supports_tools: true,
+            image_input: false,
+            pricing: None,
+        }
+    }
+
+    #[test]
+    fn strip_incompatible_images_clears_history_the_model_cannot_accept() {
+        let mut messages = vec![
+            ChatMessage::user("plain text, no images"),
+            ChatMessage::user_with_images(
+                "an old image",
+                vec![ImageInput {
+                    media_type: "image/png".into(),
+                    data: std::sync::Arc::from("data"),
+                }],
+            ),
+        ];
+        strip_incompatible_images(&mut messages, &image_incapable_model());
+        assert!(messages[0].images.is_empty());
+        assert_eq!(messages[0].content, "plain text, no images");
+        assert!(messages[1].images.is_empty(), "the image must be removed");
+        assert!(
+            messages[1]
+                .content
+                .contains("is not declared image-capable"),
+            "the omission should be noted, not silent: {}",
+            messages[1].content
+        );
+    }
+
+    #[test]
+    fn strip_incompatible_images_leaves_a_capable_model_untouched() {
+        let mut model = image_incapable_model();
+        model.image_input = true;
+        let mut messages = vec![ChatMessage::user_with_images(
+            "an image",
+            vec![ImageInput {
+                media_type: "image/png".into(),
+                data: std::sync::Arc::from("data"),
+            }],
+        )];
+        strip_incompatible_images(&mut messages, &model);
+        assert_eq!(
+            messages[0].images.len(),
+            1,
+            "capable models keep their images"
+        );
+        assert_eq!(messages[0].content, "an image");
     }
 }

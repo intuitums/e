@@ -5,8 +5,9 @@
 
 use crossterm::terminal;
 
-use e::core::agent::{Agent, SessionEvent};
-use e::core::providers::catalog::{self as model};
+use e::core::agent::{Agent, AgentOptions, SessionEvent};
+use e::core::cli::{self, Options};
+use e::core::providers::catalog::{self as model, Model};
 use e::tui::app;
 
 fn auth_status_requested(args: &[String]) -> Result<bool, &'static str> {
@@ -23,7 +24,7 @@ fn auth_status_requested(args: &[String]) -> Result<bool, &'static str> {
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--version" || a == "-v") {
+    if cli::has_flag(&args, &["--version", "-v"]) {
         println!("e {}", e::VERSION);
         return Ok(());
     }
@@ -31,18 +32,36 @@ async fn main() -> std::io::Result<()> {
     // consume custom flags and safely relaunch this same binary in a new cwd,
     // and so --help can list the flags and commands extensions declare.
     let (jobs_tx, jobs_rx) = tokio::sync::mpsc::channel::<String>(256);
-    let host = e::core::api::ExtensionHost::start(jobs_tx.clone()).await;
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    let host = if cli::extensions_disabled(&args) {
+        e::core::api::ExtensionHost::empty()
+    } else {
+        e::core::api::ExtensionHost::start(jobs_tx.clone()).await
+    };
+    if cli::has_flag(&args, &["--help", "-h"]) {
         println!(
             "e — a coding agent for your terminal\n\n\
 usage:\n  e [message]           start a session (optionally with a first prompt)\n  \
 e -c, --continue      continue this directory's most recent session\n  \
 e -r, --resume        pick a session to resume\n  \
 e ask \"prompt\"        one agent turn, no TUI; plain text when piped\n  \
+e rpc                 JSONL request/response protocol on stdin/stdout\n  \
 e docs [topic]        print a built-in format guide\n  \
 e update              update e to the latest release\n  \
 e auth                show sign-in status\n  \
+e doctor              print paste-safe runtime diagnostics\n  \
+e providers           list provider support and sign-in state\n  \
 e -v, --version"
+        );
+        println!(
+            "\nrun options:\n  \
+--no-extensions, --ne  run without extensions\n  \
+--no-save, --ns        keep the conversation in memory only\n  \
+--read-only, --ro      allow only read and grep tools\n  \
+--no-tools, --nt       expose and run no tools\n  \
+--model, -m <model>    select a model for this process\n  \
+--effort, --ef <level> select reasoning effort for this process\n  \
+--image, -i <path>     attach an image to the first prompt (repeatable)\n  \
+--json, -j             machine output (ask, doctor, providers)"
         );
         let flags = host.flags();
         let commands = host.commands();
@@ -61,6 +80,7 @@ e -v, --version"
         host.shutdown().await;
         return Ok(());
     }
+    let startup_json_requested = cli::has_flag(&args, &["--json", "-j"]);
     match host.startup(args).await {
         Ok(e::core::api::StartupAction::Continue(next)) => args = next,
         Ok(e::core::api::StartupAction::Relaunch { argv, request }) => {
@@ -68,14 +88,38 @@ e -v, --version"
             return app::relaunch_self(&request.cwd, &argv, &request.env);
         }
         Err(message) => {
-            eprintln!("{message}");
+            if startup_json_requested {
+                println!("{}", serde_json::json!({"error": message}));
+            } else {
+                eprintln!("{message}");
+            }
             host.shutdown().await;
             std::process::exit(1);
         }
     }
 
-    match auth_status_requested(&args) {
+    let json_requested = cli::has_flag(&args, &["--json", "-j"]);
+    let options = match cli::parse(args) {
+        Ok(options) => options,
+        Err(message) => {
+            if json_requested {
+                println!("{}", serde_json::json!({"error": message}));
+            } else {
+                eprintln!("{message}");
+            }
+            host.shutdown().await;
+            std::process::exit(2);
+        }
+    };
+    let args = &options.positional;
+
+    match auth_status_requested(args) {
         Ok(true) => {
+            if options.json {
+                eprintln!("--json is supported by `e ask`, `e doctor`, and `e providers`");
+                host.shutdown().await;
+                std::process::exit(2);
+            }
             e::core::auth::login::auth_status();
             host.shutdown().await;
             return Ok(());
@@ -87,8 +131,66 @@ e -v, --version"
             std::process::exit(2);
         }
     }
+    if matches!(
+        args.first().map(String::as_str),
+        Some("doctor" | "providers")
+    ) {
+        let report = e::core::providers::diagnostics::report(&host);
+        if options.json {
+            if args.first().map(String::as_str) == Some("providers") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report.providers).unwrap_or_else(|_| "[]".into())
+                );
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into())
+                );
+            }
+        } else if args.first().map(String::as_str) == Some("providers") {
+            for provider in &report.providers {
+                println!(
+                    "{:<16} {:<10} {:<22} auth={:<8} models={}",
+                    provider.name,
+                    provider.tier,
+                    provider.dialect,
+                    if provider.signed_in {
+                        provider.authentication.as_str()
+                    } else {
+                        "missing"
+                    },
+                    provider.models
+                );
+            }
+        } else {
+            println!("{}", e::core::providers::diagnostics::render(&report));
+        }
+        host.shutdown().await;
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("rpc") {
+        return rpc(host, &options).await;
+    }
     if args.first().map(String::as_str) == Some("ask") {
-        return ask(args[1..].join(" "), host).await;
+        let selected = match resolve_model(&options) {
+            Ok(model) => model,
+            Err(message) => {
+                if options.json {
+                    println!("{}", serde_json::json!({"error": message}));
+                } else {
+                    eprintln!("{message}");
+                }
+                host.shutdown().await;
+                std::process::exit(2);
+            }
+        };
+        return ask(args[1..].join(" "), host, selected, &options).await;
+    }
+    if options.json {
+        eprintln!("--json is supported by `e ask`, `e doctor`, and `e providers`");
+        host.shutdown().await;
+        std::process::exit(2);
     }
     if args.first().map(String::as_str) == Some("update") {
         // Every one-shot exit owes extensions their shutdown notification.
@@ -139,45 +241,395 @@ e -v, --version"
         return Ok(());
     }
 
-    app::run(args, host, jobs_tx, jobs_rx).await
+    let selected = match resolve_model(&options) {
+        Ok(model) => model,
+        Err(message) => {
+            eprintln!("{message}");
+            host.shutdown().await;
+            std::process::exit(2);
+        }
+    };
+    let initial = args.join(" ");
+    if !options.images.is_empty() && initial.trim().is_empty() {
+        eprintln!("--image requires an initial prompt (or use `e ask`)");
+        host.shutdown().await;
+        std::process::exit(2);
+    }
+    let images = match load_images(&options, &selected) {
+        Ok(images) => images,
+        Err(message) => {
+            eprintln!("{message}");
+            host.shutdown().await;
+            std::process::exit(2);
+        }
+    };
+    app::run(
+        app::RunOptions {
+            initial,
+            continue_session: options.continue_session,
+            resume_session: options.resume_session,
+            model: selected,
+            agent: agent_options(&options),
+            images,
+        },
+        host,
+        jobs_tx,
+        jobs_rx,
+    )
+    .await
+}
+
+fn resolve_model(options: &Options) -> Result<Model, String> {
+    let selected = match options.model.as_deref() {
+        Some(query) => model::resolve(query).ok_or_else(|| {
+            format!(
+                "model `{query}` is unavailable; sign in to its provider or choose a model from /model"
+            )
+        })?,
+        None => model::default_model(),
+    };
+    if let Some(effort) = options.effort.as_deref() {
+        if !selected.efforts.iter().any(|level| level == effort) {
+            let supported = if selected.efforts.is_empty() {
+                "none".to_string()
+            } else {
+                selected.efforts.join(", ")
+            };
+            return Err(format!(
+                "model `{}` does not support effort `{effort}` (supported: {supported})",
+                model::slug(&selected)
+            ));
+        }
+    }
+    Ok(selected)
+}
+
+fn agent_options(options: &Options) -> AgentOptions {
+    AgentOptions {
+        save_session: !options.no_save,
+        tool_mode: options.tool_mode,
+        effort_override: options.effort.clone(),
+    }
+}
+
+fn load_images(
+    options: &Options,
+    model: &Model,
+) -> Result<Vec<e::core::providers::ImageInput>, String> {
+    if !options.images.is_empty() && !model.image_input {
+        return Err(format!(
+            "model `{}` is not declared image-capable",
+            model::slug(model)
+        ));
+    }
+    e::core::providers::ImageInput::from_paths(&options.images)
+}
+
+#[derive(serde::Deserialize)]
+struct RpcRequest {
+    prompt: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    tool_mode: Option<String>,
+    #[serde(default)]
+    save: bool,
+    #[serde(default)]
+    images: Vec<String>,
+}
+
+fn rpc_options(defaults: &Options, request: &RpcRequest) -> Result<Options, String> {
+    let requested_tools = match request.tool_mode.as_deref() {
+        None | Some("all") => e::core::cli::ToolMode::All,
+        Some("read_only") | Some("read-only") => e::core::cli::ToolMode::ReadOnly,
+        Some("none") => e::core::cli::ToolMode::None,
+        Some(other) => return Err(format!("unknown tool_mode `{other}`")),
+    };
+    let mut options = defaults.clone();
+    options.model = request.model.clone().or(options.model);
+    options.effort = request.effort.clone().or(options.effort);
+    options.no_save = defaults.no_save || !request.save;
+    options.images = request.images.clone();
+    options.tool_mode = defaults.tool_mode.restrict(requested_tools);
+    Ok(options)
+}
+
+#[derive(Default)]
+struct TurnAccumulator {
+    output: String,
+    error: Option<String>,
+    warnings: Vec<String>,
+    aborted: bool,
+    terminal: bool,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    tool_calls: u64,
+    tool_failures: u64,
+}
+
+impl TurnAccumulator {
+    fn with_warnings(warnings: Vec<String>) -> Self {
+        Self {
+            warnings,
+            ..Self::default()
+        }
+    }
+
+    fn observe(&mut self, event: &SessionEvent) {
+        match event {
+            SessionEvent::TextDelta(delta) => self.output.push_str(delta),
+            SessionEvent::ToolBatchStart { calls } => self.tool_calls += calls.len() as u64,
+            SessionEvent::ToolEnd { outcome, .. } if outcome.is_error() => {
+                self.tool_failures += 1;
+            }
+            SessionEvent::Usage {
+                input,
+                output,
+                cache_read,
+            } => {
+                self.input_tokens = self.input_tokens.saturating_add(*input);
+                self.output_tokens = self.output_tokens.saturating_add(*output);
+                self.cache_read_tokens = self.cache_read_tokens.saturating_add(*cache_read);
+            }
+            SessionEvent::Warning(warning) => self.warnings.push(warning.clone()),
+            SessionEvent::Retry {
+                attempt,
+                limit,
+                delay_secs,
+                cause,
+                reason,
+            } => self.warnings.push(format!(
+                "{} — retrying ({attempt}/{limit}) in {delay_secs}s: {reason}",
+                cause.label()
+            )),
+            SessionEvent::Error(message) => self.error = Some(message.clone()),
+            SessionEvent::TurnEnd { aborted } => {
+                self.aborted = *aborted;
+                self.terminal = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(&mut self) {
+        if !self.terminal && self.error.is_none() {
+            self.error = Some("agent event stream closed before turn completion".into());
+        }
+    }
+
+    fn failed(&self) -> bool {
+        self.error.is_some()
+    }
+
+    fn json(
+        &self,
+        selected_model: &str,
+        effort: Option<&str>,
+        pricing: Option<&e::core::providers::catalog::Pricing>,
+    ) -> serde_json::Value {
+        let final_output = if self.error.is_none() && !self.aborted {
+            self.output.as_str()
+        } else {
+            ""
+        };
+        serde_json::json!({
+            "output": self.output,
+            "final_output": final_output,
+            "model": selected_model,
+            "effort": effort,
+            "aborted": self.aborted,
+            "error": self.error,
+            "warnings": self.warnings,
+            "usage": {
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "cache_read_tokens": self.cache_read_tokens,
+            },
+            "cost_usd": pricing.map(|rates| rates.estimate(
+                self.input_tokens,
+                self.output_tokens,
+                self.cache_read_tokens,
+            )),
+            "tools": {"calls": self.tool_calls, "failures": self.tool_failures},
+        })
+    }
+}
+
+/// Bound on one RPC request line — generous for pasted prompt text (images
+/// travel as file paths, not inline bytes) but never unbounded: an
+/// unterminated or malicious client must not grow this long-lived
+/// process's memory without limit. Matches read_bounded_line's fail-fast
+/// contract: hitting it ends the loop rather than skipping the line, since
+/// a still-growing line with no newline yet cannot be safely resynced past.
+const MAX_RPC_LINE_BYTES: usize = 10 * 1024 * 1024;
+
+/// A deliberately small machine protocol: sequential JSONL requests in,
+/// exactly one JSON object out for each line. The extension host is reused,
+/// while each request gets an isolated Agent and is memory-only by default.
+async fn rpc(
+    host: std::sync::Arc<e::core::api::ExtensionHost>,
+    defaults: &Options,
+) -> std::io::Result<()> {
+    let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+    loop {
+        let line = match e::core::api::read_bounded_line(&mut reader, MAX_RPC_LINE_BYTES).await {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(error) => {
+                // Fatal, same as a too-large extension line is fatal to its
+                // reader: an oversized or unterminated line leaves the
+                // stream mid-line with no safe resync point, so one error
+                // response goes out and the process stops serving rather
+                // than risk parsing the remainder of a giant line as if it
+                // were fresh requests.
+                println!(
+                    "{}",
+                    serde_json::json!({"id": null, "error": format!("invalid request: {error}")})
+                );
+                break;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(error) => {
+                println!(
+                    "{}",
+                    serde_json::json!({"id": null, "error": format!("invalid request: {error}")})
+                );
+                continue;
+            }
+        };
+        let request_id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let request: RpcRequest = match serde_json::from_value(value) {
+            Ok(request) => request,
+            Err(error) => {
+                println!(
+                    "{}",
+                    serde_json::json!({"id": request_id, "error": format!("invalid request: {error}")})
+                );
+                continue;
+            }
+        };
+        let options = match rpc_options(defaults, &request) {
+            Ok(options) => options,
+            Err(error) => {
+                println!("{}", serde_json::json!({"id": request_id, "error": error}));
+                continue;
+            }
+        };
+        if request.prompt.trim().is_empty() {
+            println!(
+                "{}",
+                serde_json::json!({"id": request_id, "error": "prompt is empty"})
+            );
+            continue;
+        }
+        let selected = match resolve_model(&options) {
+            Ok(selected) => selected,
+            Err(error) => {
+                println!("{}", serde_json::json!({"id": request_id, "error": error}));
+                continue;
+            }
+        };
+        let images = match load_images(&options, &selected) {
+            Ok(images) => images,
+            Err(error) => {
+                println!("{}", serde_json::json!({"id": request_id, "error": error}));
+                continue;
+            }
+        };
+        let slug = model::slug(&selected);
+        let pricing = selected.pricing.clone();
+        let (mut agent, mut events) = Agent::with_options(selected, agent_options(&options));
+        let effort = agent.effort();
+        agent.set_host(host.clone());
+        agent.submit_message(
+            e::core::providers::ChatMessage::user_with_images(request.prompt, images),
+            e::core::agent::context::system_prompt_here(),
+        );
+
+        let mut result = TurnAccumulator::with_warnings(model::config_warnings());
+        while let Some(event) = events.recv().await {
+            result.observe(&event);
+            if result.terminal {
+                break;
+            }
+        }
+        result.finish();
+        let mut body = result.json(&slug, effort.as_deref(), pricing.as_ref());
+        body["id"] = request_id;
+        println!("{body}");
+    }
+    host.shutdown().await;
+    Ok(())
 }
 
 /// `e ask "prompt"` — one turn, no TUI. On a terminal the reply renders in
 /// the full styled look once complete (tool activity streams as dim rows);
-/// piped, raw text streams to stdout as it arrives. The session is saved
-/// like any other, so `e -c` picks it up.
+/// piped, raw text streams to stdout as it arrives. `--json` instead emits
+/// one final object, and `--no-save` keeps the turn out of the session log.
 async fn ask(
     prompt: String,
     host: std::sync::Arc<e::core::api::ExtensionHost>,
+    selected: Model,
+    options: &Options,
 ) -> std::io::Result<()> {
     if prompt.trim().is_empty() {
-        eprintln!("usage: e ask \"prompt\"");
+        if options.json {
+            println!("{}", serde_json::json!({"error": "prompt is empty"}));
+        } else {
+            eprintln!("usage: e ask \"prompt\"");
+        }
         host.shutdown().await;
         std::process::exit(2);
     }
-    let tty = e::tui::background::stdout_is_tty();
+    let tty = e::tui::background::stdout_is_tty() && !options.json;
     let theme = e::tui::theme::resolve(&e::core::config::settings::theme(), false);
     let width = terminal::size()
         .map(|(c, _)| c as usize)
         .unwrap_or(80)
         .min(100);
 
-    for warning in model::config_warnings() {
-        eprintln!("warning: {warning}");
+    let warnings = model::config_warnings();
+    if !options.json {
+        for warning in &warnings {
+            eprintln!("warning: {warning}");
+        }
     }
-    let (mut agent, mut events) = Agent::new(model::default_model());
+    let selected_slug = model::slug(&selected);
+    let pricing = selected.pricing.clone();
+    let images = match load_images(options, &selected) {
+        Ok(images) => images,
+        Err(message) => {
+            if options.json {
+                println!("{}", serde_json::json!({"error": message}));
+            } else {
+                eprintln!("{message}");
+            }
+            host.shutdown().await;
+            std::process::exit(2);
+        }
+    };
+    let (mut agent, mut events) = Agent::with_options(selected, agent_options(options));
+    let selected_effort = agent.effort();
     agent.set_host(host.clone());
-    agent.submit(prompt, e::core::agent::context::system_prompt_here());
+    agent.submit_message(
+        e::core::providers::ChatMessage::user_with_images(prompt, images),
+        e::core::agent::context::system_prompt_here(),
+    );
 
     use std::io::Write as _;
-    let mut text = String::new();
-    let mut failed = false;
+    let mut result = TurnAccumulator::with_warnings(warnings);
     while let Some(event) = events.recv().await {
-        match event {
+        match &event {
             SessionEvent::TextDelta(d) => {
-                if tty {
-                    text.push_str(&d);
-                } else {
+                if !tty && !options.json {
                     print!("{d}");
                     let _ = std::io::stdout().flush();
                 }
@@ -219,36 +671,54 @@ async fn ask(
                 cause,
                 reason,
             } => {
-                eprintln!(
+                let message = format!(
                     "{} — retrying ({attempt}/{limit}) in {delay_secs}s: {reason}",
                     cause.label()
                 );
+                if !options.json {
+                    eprintln!("{message}");
+                }
             }
             SessionEvent::Recovered { attempt, limit } => {
-                eprintln!("recovered on attempt {attempt}/{limit}");
+                if !options.json {
+                    eprintln!("recovered on attempt {attempt}/{limit}");
+                }
             }
             SessionEvent::Error(message) => {
-                eprintln!("error: {message}");
-                failed = true;
+                if !options.json {
+                    eprintln!("error: {message}");
+                }
             }
             SessionEvent::Warning(message) => {
-                eprintln!("warning: {message}");
+                if !options.json {
+                    eprintln!("warning: {message}");
+                }
             }
-            SessionEvent::TurnEnd { .. } => break,
+            SessionEvent::TurnEnd { .. } | SessionEvent::Usage { .. } => {}
             _ => {}
         }
+        result.observe(&event);
+        if result.terminal {
+            break;
+        }
     }
-    if tty && !text.is_empty() {
+    result.finish();
+    if tty && !result.output.is_empty() {
         println!();
-        for line in e::tui::markdown::render_markdown(&theme, &text, width) {
+        for line in e::tui::markdown::render_markdown(&theme, &result.output, width) {
             println!("{line}");
         }
     }
-    if !tty {
+    if options.json {
+        println!(
+            "{}",
+            result.json(&selected_slug, selected_effort.as_deref(), pricing.as_ref())
+        );
+    } else if !tty {
         println!();
     }
     host.shutdown().await;
-    if failed {
+    if result.failed() {
         std::process::exit(1);
     }
     Ok(())
@@ -256,6 +726,7 @@ async fn ask(
 
 #[cfg(test)]
 mod tests {
+    use e::core::cli::{Options, ToolMode};
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
     }
@@ -274,5 +745,34 @@ mod tests {
         let error = super::auth_status_requested(&args(&["auth", "openai-codex"])).unwrap_err();
         assert!(error.contains("usage: e auth"));
         assert!(error.contains("/login <provider>"));
+    }
+
+    #[test]
+    fn rpc_cannot_relax_process_safety_flags() {
+        let defaults = Options {
+            no_save: true,
+            tool_mode: ToolMode::None,
+            ..Options::default()
+        };
+        let request = super::RpcRequest {
+            prompt: "hello".into(),
+            model: None,
+            effort: None,
+            tool_mode: Some("all".into()),
+            save: true,
+            images: Vec::new(),
+        };
+        let resolved = super::rpc_options(&defaults, &request).unwrap();
+        assert!(resolved.no_save);
+        assert_eq!(resolved.tool_mode, ToolMode::None);
+    }
+
+    #[test]
+    fn headless_stream_requires_a_terminal_event() {
+        let mut result = super::TurnAccumulator::default();
+        result.observe(&e::core::agent::SessionEvent::TextDelta("partial".into()));
+        result.finish();
+        assert!(result.failed());
+        assert_eq!(result.output, "partial");
     }
 }

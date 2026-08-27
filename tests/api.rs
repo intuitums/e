@@ -6,6 +6,8 @@ use std::sync::Mutex;
 
 use e::core::api::{ExtensionHost, StartupAction};
 
+mod common;
+
 // E_HOME is process-global; serialize the tests that set it.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -212,6 +214,112 @@ async fn empty_host_serves_builtins() {
     assert!(names.contains(&"bash".to_string()));
     let result = host.call_tool("greet", "{}").await;
     assert!(result.is_error);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn extension_tool_updates_stream_before_the_result() {
+    const STREAMING: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) printf '{"id":%s,"result":{"name":"streaming","tools":[{"name":"long_task","parameters":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tool_call"'*)
+      printf '{"method":"tool.update","params":{"id":%s,"stream":"stdout","chunk":"first\\n"}}\n' "$id"
+      printf '{"method":"tool.update","params":{"id":%s,"stream":"stderr","chunk":"second\\n"}}\n' "$id"
+      printf '{"id":%s,"result":{"content":"finished"}}\n' "$id" ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+done
+"#;
+    let _lock = env_lock();
+    let _home = tempdir::TempHome::with_extension("streaming.sh", STREAMING);
+    let (notices, _rx) = tokio::sync::mpsc::channel(4);
+    let host = ExtensionHost::start(notices).await;
+    let (progress, mut updates) = tokio::sync::mpsc::channel(4);
+
+    let result = host.call_tool_streaming("long_task", "{}", progress).await;
+    assert_eq!(result.content, "finished");
+    let first = updates.recv().await.unwrap();
+    let second = updates.recv().await.unwrap();
+    assert_eq!(first.stream, e::core::tools::OutputStream::Stdout);
+    assert_eq!(first.chunk, "first\n");
+    assert_eq!(second.stream, e::core::tools::OutputStream::Stderr);
+    assert_eq!(second.chunk, "second\n");
+
+    let compatibility = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        host.call_tool("long_task", "{}"),
+    )
+    .await
+    .expect("discarding streaming updates must not deadlock call_tool");
+    assert_eq!(compatibility.content, "finished");
+    host.shutdown().await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_orders_extension_updates_before_tool_completion() {
+    const STREAMING: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) printf '{"id":%s,"result":{"name":"streaming-agent","tools":[{"name":"long_task","parameters":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tool_call"'*)
+      printf '{"method":"tool.update","params":{"id":%s,"stream":"stdout","chunk":"first\\n"}}\n' "$id"
+      printf '{"method":"tool.update","params":{"id":%s,"stream":"stderr","chunk":"second\\n"}}\n' "$id"
+      printf '{"id":%s,"result":{"content":"finished"}}\n' "$id" ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+done
+"#;
+    let first = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"long_task\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let second = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let _lock = env_lock();
+    let home = tempdir::TempHome::with_extension("streaming-agent.sh", STREAMING);
+    std::fs::write(home.dir.join("auth.json"), r#"{"mock":{"key":"test"}}"#).unwrap();
+    let (port, server) = common::serve_sse(&[first, second]);
+    let (notices, _rx) = tokio::sync::mpsc::channel(4);
+    let host = ExtensionHost::start(notices).await;
+    let options = e::core::agent::AgentOptions {
+        save_session: false,
+        ..e::core::agent::AgentOptions::default()
+    };
+    let (mut agent, mut events) = e::core::agent::Agent::with_options(
+        common::test_model("mock", port, e::core::providers::catalog::Api::Completions),
+        options,
+    );
+    agent.set_host(host.clone());
+    agent.submit("use the tool".into(), "system".into());
+
+    let mut ordered = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while let Some(event) = events.recv().await {
+            match event {
+                e::core::agent::SessionEvent::ToolOutput { chunk, .. } => {
+                    ordered.push(format!("output:{chunk}"));
+                }
+                e::core::agent::SessionEvent::ToolEnd { .. } => ordered.push("end".into()),
+                e::core::agent::SessionEvent::TurnEnd { .. } => break,
+                e::core::agent::SessionEvent::Error(error) => panic!("agent failed: {error}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("agent turn completes");
+
+    assert_eq!(ordered, ["output:first\n", "output:second\n", "end"]);
+    server.join().unwrap();
+    host.shutdown().await;
 }
 
 #[allow(clippy::await_holding_lock)]

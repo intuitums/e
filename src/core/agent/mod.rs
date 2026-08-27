@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use crate::core::cli::ToolMode;
 use crate::core::providers::catalog::{slug, Model};
 use crate::core::providers::{
     self, ChatMessage, Event as ProviderEvent, FailureCause, FinishReason, Request, ToolCall,
@@ -41,6 +42,7 @@ struct TurnLog {
     session_name: Arc<Mutex<Option<String>>>,
     persist_warned: Arc<AtomicBool>,
     events: mpsc::Sender<SessionEvent>,
+    save_session: bool,
 }
 
 impl TurnLog {
@@ -55,6 +57,9 @@ impl TurnLog {
 
     fn append(&self, message: ChatMessage) -> std::io::Result<()> {
         self.history.lock().unwrap().push(message.clone());
+        if !self.save_session {
+            return Ok(());
+        }
         let mut guard = self.session.lock().unwrap();
         if guard.is_none() {
             let mut created = Session::create(&self.cwd, &slug(&self.model))?;
@@ -229,6 +234,23 @@ pub fn next_effort(levels: &[String], current: &str) -> String {
     levels[(idx + 1) % levels.len()].clone()
 }
 
+#[derive(Clone, Debug)]
+pub struct AgentOptions {
+    pub save_session: bool,
+    pub tool_mode: ToolMode,
+    pub effort_override: Option<String>,
+}
+
+impl Default for AgentOptions {
+    fn default() -> Self {
+        AgentOptions {
+            save_session: true,
+            tool_mode: ToolMode::All,
+            effort_override: None,
+        }
+    }
+}
+
 pub struct Agent {
     pub model: Model,
     /// The extension host; None means built-in tools only.
@@ -252,10 +274,18 @@ pub struct Agent {
     /// events sender, and a per-turn counter would let its stale ToolEnd
     /// collide with (and corrupt) a later turn's row.
     tool_seq: Arc<AtomicU64>,
+    options: AgentOptions,
 }
 
 impl Agent {
     pub fn new(model: Model) -> (Self, mpsc::Receiver<SessionEvent>) {
+        Self::with_options(model, AgentOptions::default())
+    }
+
+    pub fn with_options(
+        model: Model,
+        options: AgentOptions,
+    ) -> (Self, mpsc::Receiver<SessionEvent>) {
         let (events, rx) = mpsc::channel(256);
         let agent = Agent {
             model,
@@ -270,6 +300,7 @@ impl Agent {
             session_name: Arc::new(Mutex::new(None)),
             persist_warned: Arc::new(AtomicBool::new(false)),
             tool_seq: Arc::new(AtomicU64::new(0)),
+            options,
         };
         (agent, rx)
     }
@@ -295,14 +326,19 @@ impl Agent {
     /// supports it, else the model's strong default (`high` when declared,
     /// otherwise its first level).
     pub fn effort(&self) -> Option<String> {
-        effort(
-            &self.model.efforts,
-            crate::core::config::settings::get_string("effort").as_deref(),
-        )
+        let saved = self
+            .options
+            .effort_override
+            .clone()
+            .or_else(|| crate::core::config::settings::get_string("effort"));
+        effort(&self.model.efforts, saved.as_deref())
     }
     /// Advance to the model's next effort level and persist it. None when
     /// the model has no reasoning knob.
     pub fn cycle_effort(&self) -> Option<String> {
+        if self.options.effort_override.is_some() {
+            return self.effort();
+        }
         let levels = self.efforts();
         if levels.is_empty() {
             return None;
@@ -332,6 +368,7 @@ impl Agent {
             session_name: self.session_name.clone(),
             persist_warned: self.persist_warned.clone(),
             events: self.events.clone(),
+            save_session: self.options.save_session,
         }
     }
 
@@ -354,6 +391,11 @@ impl Agent {
         let mut fresh_history = Vec::with_capacity(kept.len() + 1);
         fresh_history.push(seed_message.clone());
         fresh_history.extend(kept);
+
+        if !self.options.save_session {
+            *self.history.lock().unwrap() = fresh_history;
+            return true;
+        }
 
         // Same lock order as `commit`: history before session.
         let mut history_guard = self.history.lock().unwrap();
@@ -388,7 +430,11 @@ impl Agent {
 
     /// Attach a session log; created lazily on the first message when None.
     pub fn set_session(&self, session: Option<Session>) {
-        *self.session.lock().unwrap() = session;
+        *self.session.lock().unwrap() = if self.options.save_session {
+            session
+        } else {
+            None
+        };
     }
 
     /// The active session's file, if a log exists yet — None before the
@@ -421,6 +467,9 @@ impl Agent {
     /// idempotent — the last one wins.
     pub fn set_session_name(&self, name: String) {
         *self.session_name.lock().unwrap() = Some(name);
+        if !self.options.save_session {
+            return;
+        }
         let mut guard = self.session.lock().unwrap();
         if let Some(s) = guard.as_mut() {
             if let Some(name) = self.session_name.lock().unwrap().clone() {
@@ -463,11 +512,18 @@ impl Agent {
     /// and steered into the turn at the next step. Returns true if held,
     /// false if it began a fresh turn.
     pub fn submit(&mut self, text: String, system: String) -> bool {
+        self.submit_message(ChatMessage::user(text), system)
+    }
+
+    /// Submit a normalized user message (used for image attachments).
+    /// Steering remains text-only because a running request cannot safely
+    /// acquire a new binary payload halfway through its provider stream.
+    pub fn submit_message(&mut self, message: ChatMessage, system: String) -> bool {
         if self.running {
-            self.pending.lock().unwrap().push(text);
+            self.pending.lock().unwrap().push(message.content);
             return true;
         }
-        self.log().commit(ChatMessage::user(text));
+        self.log().commit(message);
         self.start(system);
         false
     }
@@ -486,6 +542,16 @@ impl Agent {
         let pending = self.pending.clone();
         let host = self.host.clone();
         let tool_seq = self.tool_seq.clone();
+        let tool_mode = if model.supports_tools {
+            self.options.tool_mode
+        } else {
+            ToolMode::None
+        };
+        let system = match tool_mode {
+            ToolMode::All => system,
+            ToolMode::ReadOnly => format!("{system}\n\n{}", context::read_only_notice()),
+            ToolMode::None => format!("{system}\n\n{}", context::no_tools_notice()),
+        };
 
         tokio::spawn(async move {
             let _ = events.send(SessionEvent::TurnStart).await;
@@ -516,20 +582,37 @@ impl Agent {
                     log.commit(ChatMessage::user(message));
                 }
 
-                let messages = { history.lock().unwrap().clone() };
+                let mut messages = { history.lock().unwrap().clone() };
                 // Some compatible gateways omit usage entirely. Keep a local,
                 // conservative fallback so the mid-turn safety guard still
-                // exists there; a real Usage frame replaces it below.
+                // exists there; a real Usage frame replaces it below. Sized
+                // against history before the image strip below, so it stays
+                // the conservative side of what's actually sent.
                 let mut last_context = compact::estimate_request_tokens(&system, &messages);
+                // A resumed session, or a mid-session model switch, can carry
+                // image-bearing turns forward from an earlier, image-capable
+                // model to one that isn't — this is the one place every
+                // frontend's outgoing request passes through, so it's the one
+                // place that needs to know. This only edits the local copy
+                // just cloned from `history` above; the session's own stored
+                // record keeps its images regardless of what model sends the
+                // next turn.
+                providers::strip_incompatible_images(&mut messages, &model);
                 let request = Request {
                     model: model.clone(),
                     system: system.clone(),
                     messages,
                     effort: effort.clone(),
-                    tools: match &host {
-                        Some(h) => h.merged_tool_schemas(),
-                        None => tools::schemas(),
-                    },
+                    tools: tools::filter_schemas(
+                        match (&host, tool_mode) {
+                            // Restricted modes trust only the built-in read
+                            // surface. An extension overriding a tool named
+                            // `read` must not smuggle writes into --read-only.
+                            (Some(h), ToolMode::All) => h.merged_tool_schemas(),
+                            _ => tools::schemas(),
+                        },
+                        tool_mode,
+                    ),
                 };
 
                 // Total provider requests made for this step, including the
@@ -614,13 +697,15 @@ impl Agent {
                             reasoning_streamed = true;
                             let _ = events.send(SessionEvent::ReasoningDelta(d)).await;
                         }
-                        ProviderEvent::ToolCallDelta { bytes } => {
-                            assembly_bytes += bytes;
+                        ProviderEvent::ToolArgumentsDelta { delta, .. } => {
+                            assembly_bytes += delta.len() as u64;
                             let _ = events
                                 .send(SessionEvent::ToolCallAssembly {
                                     bytes: assembly_bytes,
                                 })
                                 .await;
+                        }
+                        ProviderEvent::ToolCallStart { .. } | ProviderEvent::ToolCallEnd { .. } => {
                         }
                         ProviderEvent::ToolCall(call) => calls.push(call),
                         ProviderEvent::ReasoningItem(item) => reasoning_items.push(item),
@@ -874,13 +959,16 @@ impl Agent {
                         tokio::spawn(async move {
                             let _ = events.send(SessionEvent::ToolStart { id }).await;
                             let output = run_tool(
-                                &host,
+                                ToolRunContext {
+                                    host,
+                                    tool_mode,
+                                    cwd,
+                                    cancel,
+                                    id,
+                                    events: events.clone(),
+                                },
                                 &call.name,
                                 &call.arguments,
-                                &cwd,
-                                cancel,
-                                id,
-                                events.clone(),
                             )
                             .await;
                             let _ = events
@@ -991,16 +1079,40 @@ impl Agent {
 
 /// Dispatch one tool call: extension hooks may block it, an extension that
 /// owns the name serves it, otherwise the built-in runs on a blocking thread.
-async fn run_tool(
-    host: &Option<std::sync::Arc<crate::core::api::ExtensionHost>>,
-    name: &str,
-    arguments: &str,
-    cwd: &std::path::Path,
+struct ToolRunContext {
+    host: Option<std::sync::Arc<crate::core::api::ExtensionHost>>,
+    tool_mode: ToolMode,
+    cwd: PathBuf,
     cancel: Arc<AtomicBool>,
     id: u64,
     events: mpsc::Sender<SessionEvent>,
-) -> tools::ToolOutput {
-    if let Some(h) = host {
+}
+
+async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools::ToolOutput {
+    let ToolRunContext {
+        host,
+        tool_mode,
+        cwd,
+        cancel,
+        id,
+        events,
+    } = context;
+    if !tool_mode.allows(name) {
+        let mode = match tool_mode {
+            ToolMode::ReadOnly => "read-only",
+            ToolMode::None => "no-tools",
+            ToolMode::All => "unavailable",
+        };
+        return tools::ToolOutput {
+            content: format!("tool blocked by {mode} mode: {name}"),
+            outcome: tools::ToolOutcome::Blocked,
+            summary: "blocked".into(),
+            display: None,
+        };
+    }
+    // Restricted modes are a built-in-only surface: extension schemas,
+    // overrides, tools, and hooks all stay out of the execution path.
+    if let (ToolMode::All, Some(h)) = (tool_mode, &host) {
         // The hook chain is bounded per extension, but Esc must not wait out
         // even one silent hook's timeout: race it against the cancel flag.
         // Dropping the hook future also drops its pending-map entry.
@@ -1026,19 +1138,33 @@ async fn run_tool(
             };
         }
         if h.owns_tool(name) {
-            // Same race as the hook above: the call against the cancel flag,
-            // through the one shared helper — not a second hand-rolled poll.
-            let result = tokio::select! {
-                result = h.call_tool(name, arguments) => result,
-                _ = wait_cancelled(&cancel) => {
-                    return tools::ToolOutput {
-                        content: "extension tool cancelled".into(),
-                        outcome: tools::ToolOutcome::Cancelled,
-                        summary: "cancelled".into(),
-                        display: None,
-                    };
+            let (progress, mut updates) = mpsc::channel(64);
+            let call = h.call_tool_streaming(name, arguments, progress);
+            tokio::pin!(call);
+            let result = loop {
+                tokio::select! {
+                    result = &mut call => break result,
+                    update = updates.recv() => {
+                        if let Some(update) = update {
+                            forward_extension_update(&events, id, update).await;
+                        }
+                    }
+                    _ = wait_cancelled(&cancel) => {
+                        return tools::ToolOutput {
+                            content: "extension tool cancelled".into(),
+                            outcome: tools::ToolOutcome::Cancelled,
+                            summary: "cancelled".into(),
+                            display: None,
+                        };
+                    }
                 }
             };
+            // The response and the last queued update can become ready in
+            // the same select tick. Preserve wire order by draining every
+            // update the host accepted before publishing the final result.
+            while let Ok(update) = updates.try_recv() {
+                forward_extension_update(&events, id, update).await;
+            }
             // An extension tool may name the session as a side effect; the
             // UI applies it on SessionEvent::Named.
             if let Some(new_name) = result.session_name.clone() {
@@ -1063,7 +1189,6 @@ async fn run_tool(
     }
     let name = name.to_string();
     let arguments = arguments.to_string();
-    let cwd = cwd.to_path_buf();
     tokio::task::spawn_blocking(move || {
         tools::run_streaming(&name, &arguments, &cwd, &cancel, |stream, chunk| {
             let chunk = tools::sanitize_display(chunk);
@@ -1082,4 +1207,65 @@ async fn run_tool(
         summary: "error".into(),
         display: None,
     })
+}
+
+async fn forward_extension_update(
+    events: &mpsc::Sender<SessionEvent>,
+    id: u64,
+    update: crate::core::api::ToolProgress,
+) {
+    let chunk = tools::sanitize_display(&update.chunk);
+    if !chunk.is_empty() {
+        let _ = events
+            .send(SessionEvent::ToolOutput {
+                id,
+                stream: update.stream,
+                chunk,
+            })
+            .await;
+    }
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+
+    #[test]
+    fn no_save_commits_to_memory_without_opening_a_session() {
+        let (agent, _events) = Agent::with_options(
+            crate::core::providers::catalog::default_model(),
+            AgentOptions {
+                save_session: false,
+                ..AgentOptions::default()
+            },
+        );
+        agent
+            .log()
+            .append(ChatMessage::user("kept in memory"))
+            .unwrap();
+
+        assert_eq!(agent.history_snapshot().len(), 1);
+        assert!(agent.session.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn execution_policy_blocks_a_disallowed_call_even_if_requested() {
+        let (events, _rx) = mpsc::channel(1);
+        let output = run_tool(
+            ToolRunContext {
+                host: None,
+                tool_mode: ToolMode::ReadOnly,
+                cwd: std::path::PathBuf::from("."),
+                cancel: Arc::new(AtomicBool::new(false)),
+                id: 1,
+                events,
+            },
+            "bash",
+            r#"{"command":"touch should-not-exist"}"#,
+        )
+        .await;
+
+        assert_eq!(output.outcome, tools::ToolOutcome::Blocked);
+        assert!(output.content.contains("read-only"));
+    }
 }

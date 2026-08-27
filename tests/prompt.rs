@@ -1,7 +1,7 @@
 //! The system prompt: the reference's structure, the settings override,
 //! layered context.
 
-use e::core::agent::context::system_prompt;
+use e::core::agent::context::{no_tools_notice, read_only_notice, system_prompt};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -78,6 +78,28 @@ fn settings_prompt_replaces_the_base() {
         // contract).
         assert!(!prompt.contains("Available tools:"));
         assert!(prompt.contains("Current working directory: /tmp/proj"));
+    });
+}
+
+#[test]
+fn tool_mode_notices_default_to_the_built_in_wording() {
+    with_home("mode-notices-default", || {
+        assert!(read_only_notice().contains("read-only"));
+        assert!(no_tools_notice().contains("no tools"));
+    });
+}
+
+#[test]
+fn tool_mode_notices_are_file_backed_overrides() {
+    with_home("mode-notices-override", || {
+        let home = std::env::var("E_HOME").unwrap();
+        std::fs::write(
+            format!("{home}/settings.json"),
+            r#"{"read_only_notice":"Custom read-only wording.","no_tools_notice":"Custom no-tools wording."}"#,
+        )
+        .unwrap();
+        assert_eq!(read_only_notice(), "Custom read-only wording.");
+        assert_eq!(no_tools_notice(), "Custom no-tools wording.");
     });
 }
 

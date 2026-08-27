@@ -3,6 +3,8 @@
 	"display": "OpenAI",
 	"base_url": "https://api.openai.com/v1",
 	"api": "openai-responses",
+	"tier": "native",
+	"image_input": true,
 	"auth": {
 		"key": true,
 		"key_env": "OPENAI_API_KEY",

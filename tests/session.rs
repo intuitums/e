@@ -64,10 +64,17 @@ fn session_name_sets_reads_and_clears() {
         id: "model".into(),
         base_url: "http://127.0.0.1:1".into(),
         api: Api::Completions,
+        catalog: e::core::providers::registry::CatalogStrategy::Openai,
+        responses_mount: e::core::providers::registry::ResponsesMount::Platform,
+        provider_supports_tools: true,
+        provider_image_input: false,
         efforts: Vec::new(),
         thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 1_000,
         max_output: None,
+        supports_tools: true,
+        image_input: false,
+        pricing: None,
     };
     let (agent, _events) = Agent::new(model);
 
@@ -94,10 +101,17 @@ fn opening_e_does_not_count_as_a_session() {
         id: "model".into(),
         base_url: "http://127.0.0.1:1".into(),
         api: Api::Completions,
+        catalog: e::core::providers::registry::CatalogStrategy::Openai,
+        responses_mount: e::core::providers::registry::ResponsesMount::Platform,
+        provider_supports_tools: true,
+        provider_image_input: false,
         efforts: Vec::new(),
         thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 1_000,
         max_output: None,
+        supports_tools: true,
+        image_input: false,
+        pricing: None,
     };
     let (_agent, _events) = Agent::new(model);
     assert!(
@@ -457,10 +471,17 @@ async fn persistence_failure_warns_once_not_silently() {
         id: "m".into(),
         base_url: "http://127.0.0.1:1".into(),
         api: Api::Completions,
+        catalog: e::core::providers::registry::CatalogStrategy::Openai,
+        responses_mount: e::core::providers::registry::ResponsesMount::Platform,
+        provider_supports_tools: true,
+        provider_image_input: false,
         efforts: Vec::new(),
         thinking: e::core::providers::catalog::Thinking::Manual,
         context_window: 200_000,
         max_output: None,
+        supports_tools: true,
+        image_input: false,
+        pricing: None,
     };
     let (agent, mut rx) = Agent::new(model);
     agent.record_user("first".into());
@@ -546,11 +567,15 @@ fn set_head_grows_a_branch_without_touching_the_old_tail() {
         children_of_root, 2,
         "root now has two children — a branch point"
     );
-    // Plain load() still walks the file top to bottom: both branches, in
-    // append order, exactly as an append-only reader always saw it.
+    // Plain load follows the durable active head (the last appended node)
+    // back through its parents. The abandoned branch remains available to
+    // /tree through nodes(), but must not be replayed into the resumed model.
     let loaded = Session::load(&path).unwrap();
-    assert_eq!(loaded.len(), 4);
-    assert_eq!(loaded[2].content, "branch B");
+    assert_eq!(loaded.len(), 3);
+    assert_eq!(loaded[1].content, "branch B");
+    assert!(!loaded
+        .iter()
+        .any(|message| message.content == "branch A reply"));
 
     let _ = std::fs::remove_dir_all(&home);
 }

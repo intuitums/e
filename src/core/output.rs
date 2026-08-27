@@ -27,6 +27,15 @@ pub fn format_duration(ms: u64) -> String {
     format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60)
 }
 
+/// Compact USD estimate without rounding a small non-zero turn to `$0.00`.
+pub fn format_cost(usd: f64) -> String {
+    if usd < 0.01 {
+        format!("${usd:.4}")
+    } else {
+        format!("${usd:.2}")
+    }
+}
+
 /// `anthropic/claude-opus-4.7` → `opus 4.7`; anything else keeps its bare id.
 pub fn compact_model_label(model: &str) -> String {
     let bare = model.rsplit('/').next().unwrap_or(model);

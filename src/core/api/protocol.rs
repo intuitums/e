@@ -2,7 +2,7 @@
 //! extension process's stdin/stdout.
 //!
 //! e → extension requests (each expects a response with the same `id`):
-//!   {"id":1,"method":"initialize","params":{"protocol":1,"e_version":"…","cwd":"…","config":{…}}}
+//!   {"id":1,"method":"initialize","params":{"protocol":1,"capabilities":["tool.update"],"e_version":"…","cwd":"…","config":{…}}}
 //!   {"id":7,"method":"tool_call","params":{"name":"…","arguments":{…}}}
 //!   {"id":9,"method":"command","params":{"name":"…","args":"…"}}
 //!   {"id":2,"method":"hook.startup","params":{"cwd":"…","argv":[…]}}
@@ -14,6 +14,7 @@
 //! extension → e:
 //!   {"id":1,"result":{…}} | {"id":1,"error":"message"}
 //!   {"method":"notify","params":{"message":"…"}}          (any time)
+//!   {"method":"tool.update","params":{"id":7,"stream":"stdout","chunk":"…"}}
 //!
 //! The initialize result is the manifest:
 //!   {"name":"…","version":"…",
@@ -32,6 +33,10 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::Value;
 
+/// The original request/response contract remains version 1. New optional
+/// behavior is advertised as initialize capabilities so strict v1
+/// extensions are never forced onto a different protocol for an additive
+/// notification they may simply ignore.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The manifest an extension returns from `initialize`.
@@ -194,6 +199,11 @@ pub enum Incoming {
     Notify {
         message: String,
     },
+    ToolUpdate {
+        id: u64,
+        stream: crate::core::tools::OutputStream,
+        chunk: String,
+    },
 }
 
 pub fn parse_incoming(line: &str) -> Option<Incoming> {
@@ -224,6 +234,14 @@ pub fn parse_incoming(line: &str) -> Option<Incoming> {
             return Some(Incoming::Notify { message });
         }
     }
+    if value.get("method").and_then(Value::as_str) == Some("tool.update") {
+        let id = value["params"]["id"].as_u64()?;
+        let stream = serde_json::from_value(value["params"]["stream"].clone()).ok()?;
+        let chunk = value["params"]["chunk"].as_str()?.to_string();
+        if !chunk.is_empty() {
+            return Some(Incoming::ToolUpdate { id, stream, chunk });
+        }
+    }
     None
 }
 
@@ -243,5 +261,21 @@ mod tests {
         let bare: FlagDecl = serde_json::from_str(r#"{"name":"dry"}"#).unwrap();
         assert_eq!(bare.default, None);
         assert_eq!(bare.flag_type, "boolean");
+    }
+
+    #[test]
+    fn tool_updates_are_typed_and_correlated() {
+        let parsed = parse_incoming(
+            r#"{"method":"tool.update","params":{"id":7,"stream":"stderr","chunk":"working\n"}}"#,
+        )
+        .unwrap();
+        match parsed {
+            Incoming::ToolUpdate { id, stream, chunk } => {
+                assert_eq!(id, 7);
+                assert_eq!(stream, crate::core::tools::OutputStream::Stderr);
+                assert_eq!(chunk, "working\n");
+            }
+            other => panic!("unexpected incoming message: {other:?}"),
+        }
     }
 }

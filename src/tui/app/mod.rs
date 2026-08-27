@@ -13,7 +13,7 @@ use futures::StreamExt;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use crate::core::agent::{Agent, SessionEvent};
+use crate::core::agent::{Agent, AgentOptions, SessionEvent};
 use crate::core::output::{format_duration, format_tokens};
 use crate::core::providers::catalog::{self as model, Model};
 use crate::tui::authpanel::{self, AuthStage};
@@ -49,6 +49,9 @@ struct ActiveTurn {
     tool_blocks: std::collections::HashMap<u64, usize>,
     /// Batch members not yet terminal, including serially pending calls.
     pending_tools: usize,
+    /// Accumulated provider-billed estimate for this turn, when the model
+    /// declares rates. Unlike the context gauge, every request step counts.
+    cost_usd: Option<f64>,
 }
 
 /// The ctrl+o full-detail screen: one stored output at a time, scrollable,
@@ -66,9 +69,13 @@ enum AppJob {
     /// A prompt an extension command asked to submit as the user.
     Prompt { text: String, epoch: u64 },
     /// An input hook's verdict on a submitted line: consume/replace/notice.
+    /// `images` rides along only for the initial launch prompt (`-i`); a
+    /// hook never sees or handles them, but they still attach once the
+    /// verdict lands on whatever text is actually submitted.
     InputVerdict {
         sequence: u64,
         text: String,
+        images: Option<Vec<crate::core::providers::ImageInput>>,
         verdict: crate::core::api::InputVerdict,
     },
     /// An extension named the session (command result). Tagged with the
@@ -114,11 +121,17 @@ fn input_route(awaiting_api_key: bool, has_input_hook: bool) -> InputRoute {
 /// Input hooks run concurrently so a slow extension does not block the frame,
 /// but their verdicts must be applied in submission order. Otherwise a fast
 /// second line can overtake a slow first one and reverse the conversation.
+type InputVerdictItem = (
+    String,
+    Option<Vec<crate::core::providers::ImageInput>>,
+    crate::core::api::InputVerdict,
+);
+
 #[derive(Default)]
 struct PendingInputVerdicts {
     next_sequence: u64,
     next_to_apply: u64,
-    ready: std::collections::BTreeMap<u64, (String, crate::core::api::InputVerdict)>,
+    ready: std::collections::BTreeMap<u64, InputVerdictItem>,
 }
 
 impl PendingInputVerdicts {
@@ -132,9 +145,10 @@ impl PendingInputVerdicts {
         &mut self,
         sequence: u64,
         text: String,
+        images: Option<Vec<crate::core::providers::ImageInput>>,
         verdict: crate::core::api::InputVerdict,
-    ) -> Vec<(String, crate::core::api::InputVerdict)> {
-        self.ready.insert(sequence, (text, verdict));
+    ) -> Vec<InputVerdictItem> {
+        self.ready.insert(sequence, (text, images, verdict));
         let mut ordered = Vec::new();
         while let Some(item) = self.ready.remove(&self.next_to_apply) {
             ordered.push(item);
@@ -213,6 +227,7 @@ struct App {
     /// A command-line prompt held until the first-visit trust choice is
     /// persisted, so its system prompt reflects that choice.
     pending_initial: Option<String>,
+    pending_initial_images: Vec<crate::core::providers::ImageInput>,
     /// Transcript index of the running `!` block, updated on completion.
     shell_block: Option<usize>,
     /// A /reload is restarting the extension host; prompts are held.
@@ -451,8 +466,15 @@ impl App {
         for m in messages {
             match m.role.as_str() {
                 "user" => {
-                    self.transcript
-                        .push(Block::new(Kind::User, m.content.clone()));
+                    let mut content = m.content.clone();
+                    if !m.images.is_empty() {
+                        content.push_str(&format!(
+                            "\n[attached {} image{}]",
+                            m.images.len(),
+                            if m.images.len() == 1 { "" } else { "s" }
+                        ));
+                    }
+                    self.transcript.push(Block::new(Kind::User, content));
                 }
                 "assistant" => {
                     if !m.content.trim().is_empty() {
@@ -561,7 +583,7 @@ impl App {
         // A -r launch prompt waits for this selection; deliver it against
         // the loaded history.
         if let Some(initial) = self.pending_initial.take() {
-            self.submit(initial);
+            self.submit_initial(initial);
         }
     }
 
@@ -690,6 +712,7 @@ impl App {
                     .send(AppJob::InputVerdict {
                         sequence,
                         text,
+                        images: None,
                         verdict,
                     })
                     .await;
@@ -699,20 +722,35 @@ impl App {
         self.submit_direct(trimmed);
     }
 
-    fn apply_input_verdict(&mut self, text: String, verdict: crate::core::api::InputVerdict) {
+    fn apply_input_verdict(
+        &mut self,
+        text: String,
+        images: Option<Vec<crate::core::providers::ImageInput>>,
+        verdict: crate::core::api::InputVerdict,
+    ) {
         if let Some(notice) = verdict.notice.filter(|n| !n.trim().is_empty()) {
             self.notice(notice);
         }
         if verdict.consume {
-            // Swallowed entirely — nothing reaches the agent.
+            // Swallowed entirely — nothing reaches the agent. Images that
+            // rode along with a consumed initial prompt are dropped with
+            // it; there is no accepted text left to attach them to.
         } else if let Some(replace) = verdict.replace {
             // The extension rewrote the line; it already saw the original, so
             // no second hook pass.
-            self.submit_direct(replace);
+            match images {
+                Some(images) if !images.is_empty() => {
+                    self.submit_initial_with_images(replace, images)
+                }
+                _ => self.submit_direct(replace),
+            }
         } else {
             // Allowed through — the hook already saw the text, so submit
             // directly. Re-running submit() here would loop through the hook.
-            self.submit_direct(text);
+            match images {
+                Some(images) if !images.is_empty() => self.submit_initial_with_images(text, images),
+                _ => self.submit_direct(text),
+            }
         }
     }
 
@@ -858,8 +896,63 @@ impl App {
     fn release_initial_prompt(&mut self) {
         if self.trust.is_none() {
             if let Some(initial) = self.pending_initial.take() {
-                self.submit(initial);
+                self.submit_initial(initial);
             }
+        }
+    }
+
+    fn submit_initial(&mut self, text: String) {
+        if self.pending_initial_images.is_empty() {
+            self.submit(text);
+            return;
+        }
+        // Images travel with the initial launch prompt only, so this can't
+        // just call submit(): the hook contract is "sees the text before
+        // anything else does," and a plain submit() has no way to carry
+        // images through to the eventual submission. Route the text through
+        // the same hook decision submit() makes, and attach the images to
+        // whatever text is actually accepted (see apply_input_verdict).
+        let route = input_route(self.pending_key.is_some(), self.host.has_input_hook());
+        if route == InputRoute::Hook {
+            let host = self.host.clone();
+            let results = self.results.clone();
+            let sequence = self.input_verdicts.reserve();
+            let images = std::mem::take(&mut self.pending_initial_images);
+            tokio::spawn(async move {
+                let verdict = host.hook_input(&text).await;
+                let _ = results
+                    .send(AppJob::InputVerdict {
+                        sequence,
+                        text,
+                        images: Some(images),
+                        verdict,
+                    })
+                    .await;
+            });
+            return;
+        }
+        let images = std::mem::take(&mut self.pending_initial_images);
+        self.submit_initial_with_images(text, images);
+    }
+
+    fn submit_initial_with_images(
+        &mut self,
+        text: String,
+        images: Vec<crate::core::providers::ImageInput>,
+    ) {
+        let count = images.len();
+        let held = self.agent.submit_message(
+            crate::core::providers::ChatMessage::user_with_images(text.clone(), images),
+            system_prompt(),
+        );
+        if !held {
+            self.transcript.push(Block::new(
+                Kind::User,
+                format!(
+                    "{text}\n[attached {count} image{}]",
+                    if count == 1 { "" } else { "s" }
+                ),
+            ));
         }
     }
 
@@ -1370,12 +1463,29 @@ fn key_of(event: &KeyEvent, keymap: &crate::core::config::keybindings::Keymap) -
 
 /// Open the interactive session. `args` are already past the extension
 /// startup hook (flags rewritten, cwd possibly changed).
+pub struct RunOptions {
+    pub initial: String,
+    pub continue_session: bool,
+    pub resume_session: bool,
+    pub model: Model,
+    pub agent: AgentOptions,
+    pub images: Vec<crate::core::providers::ImageInput>,
+}
+
 pub async fn run(
-    args: Vec<String>,
+    options: RunOptions,
     host: std::sync::Arc<crate::core::api::ExtensionHost>,
     jobs_tx: tokio::sync::mpsc::Sender<String>,
     mut jobs_rx: tokio::sync::mpsc::Receiver<String>,
 ) -> std::io::Result<()> {
+    let RunOptions {
+        initial,
+        continue_session,
+        resume_session,
+        model,
+        agent: agent_options,
+        images,
+    } = options;
     // A panic mid-frame must not strand the shell in raw mode with a hidden
     // cursor or kitty keyboard flags — restore the terminal first, then
     // report as usual. (\x1b[<u pops the keyboard enhancement stack.)
@@ -1414,7 +1524,7 @@ pub async fn run(
 
     let (mut cols, mut rows) = terminal::size()?;
     let mut painter = Painter::spawn(cols, rows);
-    let (mut agent, mut session_events) = Agent::new(model::default_model());
+    let (mut agent, mut session_events) = Agent::with_options(model, agent_options.clone());
     let (logins_tx, mut logins_rx) =
         tokio::sync::mpsc::channel::<crate::core::auth::login::Outcome>(4);
     let (results_tx, mut results_rx) = tokio::sync::mpsc::channel::<AppJob>(16);
@@ -1448,6 +1558,7 @@ pub async fn run(
         held_prompts: Vec::new(),
         trust: None,
         pending_initial: None,
+        pending_initial_images: images,
         shell_block: None,
         reloading: false,
         reload_block: None,
@@ -1465,6 +1576,18 @@ pub async fn run(
         .push(Block::new(Kind::Banner, crate::VERSION));
     for warning in model::config_warnings() {
         app.notice(format!("warning: {warning}"));
+    }
+    if !agent_options.save_session {
+        app.notice("session saving disabled for this run".into());
+    }
+    match agent_options.tool_mode {
+        crate::core::cli::ToolMode::ReadOnly => {
+            app.notice("read-only mode — only read and grep are available".into())
+        }
+        crate::core::cli::ToolMode::None => {
+            app.notice("no-tools mode — provider requests contain no tool schemas".into())
+        }
+        crate::core::cli::ToolMode::All => {}
     }
     if crate::core::config::trust::status(&app.agent.cwd()).is_none() {
         app.trust = Some(TrustStage { selected: 0 });
@@ -1500,38 +1623,10 @@ pub async fn run(
             ));
         }
     }
-    // -c continues this workspace's most recent session. Only the flags e
-    // actually knows are removed from the prompt — a word like `-O2` is
-    // prompt content, and `--` ends flag parsing entirely.
-    let mut continue_flag = false;
-    let mut resume_flag = false;
-    let mut message_args: Vec<&str> = Vec::new();
-    let mut past_flags = false;
-    for arg in &args {
-        if !past_flags {
-            match arg.as_str() {
-                "--" => {
-                    past_flags = true;
-                    continue;
-                }
-                "-c" | "--continue" => {
-                    continue_flag = true;
-                    continue;
-                }
-                "-r" | "--resume" => {
-                    resume_flag = true;
-                    continue;
-                }
-                _ => {}
-            }
-        }
-        message_args.push(arg);
-    }
-    let initial: String = message_args.join(" ");
-    if resume_flag {
+    if resume_session {
         // The reference behavior: launch straight into the session picker.
         app.open_resume_menu();
-    } else if continue_flag {
+    } else if continue_session {
         app.resume_recent();
     }
 
@@ -1551,9 +1646,9 @@ pub async fn run(
 
     // A -r launch prompt must wait for the session pick, or it would start a
     // turn whose reply splices into whichever session gets selected.
-    let hold_initial = app.trust.is_some() || (resume_flag && app.menu.is_some());
+    let hold_initial = app.trust.is_some() || (resume_session && app.menu.is_some());
     if let Some(initial) = stage_initial_prompt(initial, hold_initial, &mut app.pending_initial) {
-        app.submit(initial);
+        app.submit_initial(initial);
     }
     painter.frame(app.frame(cols as usize));
 
@@ -1647,7 +1742,7 @@ pub async fn run(
                                             // session pick then refuses.
                                             if app.menu.is_none() {
                                                 if let Some(initial) = app.pending_initial.take() {
-                                                    app.submit(initial);
+                                                    app.submit_initial(initial);
                                                 }
                                             }
                                         }
@@ -1831,14 +1926,14 @@ pub async fn run(
                             );
                         }
                     }
-                    Some(AppJob::InputVerdict { sequence, text, verdict }) => {
+                    Some(AppJob::InputVerdict { sequence, text, images, verdict }) => {
                         // A later hook may finish first; hold it until every
                         // earlier submission has a verdict, then apply the
                         // contiguous ordered prefix.
-                        for (text, verdict) in
-                            app.input_verdicts.complete(sequence, text, verdict)
+                        for (text, images, verdict) in
+                            app.input_verdicts.complete(sequence, text, images, verdict)
                         {
-                            app.apply_input_verdict(text, verdict);
+                            app.apply_input_verdict(text, images, verdict);
                         }
                     }
                     Some(AppJob::Rename { name, epoch }) => {
@@ -2301,6 +2396,7 @@ mod tests {
         let later = pending.complete(
             second,
             "second".into(),
+            None,
             crate::core::api::InputVerdict::default(),
         );
         assert!(later.is_empty(), "a later verdict must wait");
@@ -2308,16 +2404,62 @@ mod tests {
         let ordered = pending.complete(
             first,
             "first".into(),
+            None,
             crate::core::api::InputVerdict::default(),
         );
         assert_eq!(
             ordered
                 .into_iter()
-                .map(|(text, _)| text)
+                .map(|(text, _, _)| text)
                 .collect::<Vec<_>>(),
             vec!["first", "second"]
         );
     }
+
+    /// The initial launch prompt (`-i image.png "..."`) carries images
+    /// through the same hook-ordering machinery as plain text so an input
+    /// hook still sees it (the fix for the reported hook bypass) — this
+    /// pins that the images stay attached to the right sequence entry, not
+    /// dropped or swapped, once a hook actually sits in front of it.
+    #[test]
+    fn input_hook_verdicts_carry_images_with_the_right_sequence_entry() {
+        let mut pending = PendingInputVerdicts::default();
+        let text_only = pending.reserve();
+        let with_images = pending.reserve();
+
+        let image = crate::core::providers::ImageInput {
+            media_type: "image/png".into(),
+            data: std::sync::Arc::from(""),
+        };
+
+        // Completed out of order: the images-bearing one first.
+        let none_ready = pending.complete(
+            with_images,
+            "with images".into(),
+            Some(vec![image]),
+            crate::core::api::InputVerdict::default(),
+        );
+        assert!(none_ready.is_empty(), "text_only hasn't completed yet");
+
+        let ordered = pending.complete(
+            text_only,
+            "text only".into(),
+            None,
+            crate::core::api::InputVerdict::default(),
+        );
+        assert_eq!(ordered.len(), 2);
+        let (first_text, first_images, _) = &ordered[0];
+        assert_eq!(first_text, "text only");
+        assert!(first_images.is_none());
+        let (second_text, second_images, _) = &ordered[1];
+        assert_eq!(second_text, "with images");
+        assert_eq!(
+            second_images.as_ref().map(Vec::len),
+            Some(1),
+            "the image must still be attached to its own text, not lost or moved"
+        );
+    }
+
     #[tokio::test]
     async fn active_login_guard_cancels_on_drop() {
         let cancellation = crate::core::auth::login::LoginCancellation::default();
@@ -2341,10 +2483,17 @@ mod tests {
             id: "m".into(),
             base_url: "http://localhost".into(),
             api: crate::core::providers::catalog::Api::Completions,
+            catalog: crate::core::providers::registry::CatalogStrategy::Openai,
+            responses_mount: crate::core::providers::registry::ResponsesMount::Platform,
+            provider_supports_tools: true,
+            provider_image_input: false,
             efforts: Vec::new(),
             thinking: crate::core::providers::catalog::Thinking::Manual,
             context_window: 200_000,
             max_output: None,
+            supports_tools: true,
+            image_input: false,
+            pricing: None,
         });
         let (jobs, _) = tokio::sync::mpsc::channel(1);
         let (logins, _) = tokio::sync::mpsc::channel(1);
@@ -2377,6 +2526,7 @@ mod tests {
             held_prompts: Vec::new(),
             trust: None,
             pending_initial: None,
+            pending_initial_images: Vec::new(),
             shell_block: None,
             reloading: false,
             reload_block: None,

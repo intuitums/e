@@ -78,7 +78,9 @@ pub fn estimate_message_tokens(message: &ChatMessage) -> u64 {
     for call in &message.tool_calls {
         chars += call.name.chars().count() + call.arguments.chars().count();
     }
-    (chars as u64).div_ceil(4)
+    (chars as u64)
+        .div_ceil(4)
+        .saturating_add(message.images.len() as u64 * 1_000)
 }
 
 /// Provider-independent fallback for gateways that omit usage. It is visibly
@@ -205,6 +207,13 @@ fn transcript_segments(history: &[ChatMessage]) -> Vec<String> {
             continue;
         }
         let mut segment = format!("{}:\n{content}\n", message.role);
+        if !message.images.is_empty() {
+            segment.push_str(&format!(
+                "[{} image attachment{}]\n",
+                message.images.len(),
+                if message.images.len() == 1 { "" } else { "s" }
+            ));
+        }
         for call in &message.tool_calls {
             let arguments: String = call.arguments.chars().take(TOOL_CALL_KEEP).collect();
             let marker = if call.arguments.chars().count() > TOOL_CALL_KEEP {

@@ -9,8 +9,8 @@
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::core::auth::login;
 use crate::core::providers::catalog::Thinking;
+use crate::core::providers::runtime::Authorization;
 use crate::core::providers::{
     http, require_success, send_request, Event, FailureCause, FinishReason, ProviderError, Request,
     SseStream, StreamEnd, ToolCall,
@@ -33,11 +33,11 @@ fn thinking_budget(effort: &str) -> u64 {
     }
 }
 
-pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEnd, ProviderError> {
-    let key = login::access_token(request.model.provider.as_str())
-        .await
-        .map_err(ProviderError::auth)?;
-
+pub async fn run(
+    request: &Request,
+    authorization: &Authorization,
+    tx: &mpsc::Sender<Event>,
+) -> Result<StreamEnd, ProviderError> {
     // History → content blocks. Tool results ride user turns. Signed
     // thinking blocks committed as "reasoning" messages replay verbatim at
     // the head of the assistant turn they preceded — the API requires them
@@ -85,10 +85,21 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                 // buffered thinking; replaying it elsewhere would fail the
                 // signature check.
                 pending_thinking.clear();
-                messages.push(json!({
-                    "role": "user",
-                    "content": [{"type": "text", "text": m.content}],
+                let mut content = Vec::new();
+                if !m.content.is_empty() {
+                    content.push(json!({"type": "text", "text": m.content}));
+                }
+                content.extend(m.images.iter().map(|image| {
+                    json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image.media_type,
+                            "data": image.data,
+                        }
+                    })
                 }));
+                messages.push(json!({"role": "user", "content": content}));
             }
         }
     }
@@ -170,7 +181,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
         send_request(
             http()
                 .post(format!("{}/v1/messages", request.model.base_url))
-                .header("x-api-key", &key)
+                .header("x-api-key", &authorization.bearer)
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .header("accept", "text/event-stream")
                 .json(&body),
@@ -181,7 +192,7 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
 
     let mut sse = SseStream::new(response.bytes_stream());
     // Tool input JSON streams in fragments per content block index.
-    let mut open_tool: Option<(ToolCall, usize)> = None;
+    let mut open_tools: std::collections::BTreeMap<usize, ToolCall> = Default::default();
     // A thinking block accumulates text and its opaque signature; on stop it
     // becomes a replayable reasoning item.
     let mut open_thinking: Option<(String, String)> = None;
@@ -212,15 +223,20 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                     let block = &value["content_block"];
                     match block["type"].as_str().unwrap_or("") {
                         "tool_use" => {
-                            open_tool = Some((
+                            open_tools.insert(
+                                index,
                                 ToolCall {
                                     id: block["id"].as_str().unwrap_or("").to_string(),
                                     name: block["name"].as_str().unwrap_or("").to_string(),
                                     arguments: String::new(),
                                     signature: None,
                                 },
-                                index,
-                            ));
+                            );
+                            let _ = tx
+                                .send(Event::ToolCallStart {
+                                    key: index.to_string(),
+                                })
+                                .await;
                         }
                         "thinking" => open_thinking = Some((String::new(), String::new())),
                         // Arrives complete, no deltas; preserved verbatim.
@@ -250,13 +266,15 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                         }
                     }
                     "input_json_delta" => {
-                        if let Some((call, _)) = &mut open_tool {
+                        let index = value["index"].as_u64().unwrap_or(0) as usize;
+                        if let Some(call) = open_tools.get_mut(&index) {
                             let partial = value["delta"]["partial_json"].as_str().unwrap_or("");
                             call.arguments.push_str(partial);
                             if !partial.is_empty() {
                                 let _ = tx
-                                    .send(Event::ToolCallDelta {
-                                        bytes: partial.len() as u64,
+                                    .send(Event::ToolArgumentsDelta {
+                                        key: index.to_string(),
+                                        delta: partial.to_string(),
                                     })
                                     .await;
                             }
@@ -265,10 +283,16 @@ pub async fn run(request: &Request, tx: &mpsc::Sender<Event>) -> Result<StreamEn
                     _ => {}
                 },
                 "content_block_stop" => {
-                    if let Some((mut call, _)) = open_tool.take() {
+                    let index = value["index"].as_u64().unwrap_or(0) as usize;
+                    if let Some(mut call) = open_tools.remove(&index) {
                         if call.arguments.is_empty() {
                             call.arguments = "{}".into();
                         }
+                        let _ = tx
+                            .send(Event::ToolCallEnd {
+                                key: index.to_string(),
+                            })
+                            .await;
                         let _ = tx.send(Event::ToolCall(call)).await;
                     }
                     if let Some((thinking, signature)) = open_thinking.take() {

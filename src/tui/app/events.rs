@@ -19,6 +19,7 @@ impl App {
                     error: None,
                     tool_blocks: std::collections::HashMap::new(),
                     pending_tools: 0,
+                    cost_usd: self.agent.model.pricing.as_ref().map(|_| 0.0),
                 });
                 // Seed the token counters from request size so the activity
                 // row shows ↑ from the first second, like the reference.
@@ -196,13 +197,18 @@ impl App {
             SessionEvent::Usage {
                 input,
                 output,
-                cache_read: _,
+                cache_read,
             } => {
                 // `input` is the inclusive prompt total per the Usage
                 // contract — adding the cached subset again would double
                 // count and trigger compaction early.
                 self.context_tokens = input + output;
                 if let Some(s) = &mut self.active {
+                    if let (Some(total), Some(pricing)) =
+                        (&mut s.cost_usd, &self.agent.model.pricing)
+                    {
+                        *total += pricing.estimate(input, output, cache_read);
+                    }
                     // Every step resends the whole context, so `input` is the
                     // latest request's size, not new work — summing it across
                     // steps re-counted the same tokens once per step and
@@ -301,12 +307,18 @@ impl App {
                             format_tokens(s.turn.output)
                         )
                     };
+                    let cost = s
+                        .cost_usd
+                        .filter(|cost| *cost > 0.0)
+                        .map(|cost| format!(" {}", crate::core::output::format_cost(cost)))
+                        .unwrap_or_default();
                     self.transcript.push(Block::new(
                         Kind::Summary,
                         format!(
-                            "{}{}",
+                            "{}{}{}",
                             format_duration(s.started.elapsed().as_millis() as u64),
-                            tokens
+                            tokens,
+                            cost
                         ),
                     ));
                 }

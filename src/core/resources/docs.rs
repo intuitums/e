@@ -17,6 +17,10 @@ pub const TOPICS: &[(&str, &str)] = &[
         "models.json: extra models, context windows, dialects",
     ),
     (
+        "automation",
+        "JSON output and the long-lived JSONL RPC protocol",
+    ),
+    (
         "prompt-templates",
         "/name templates with bash-style arguments",
     ),
@@ -28,6 +32,7 @@ pub const TOPICS: &[(&str, &str)] = &[
         "keybindings",
         "keybindings.json: override the composer's editing keys",
     ),
+    ("sandboxing", "e's trust model and how to isolate a session"),
     (
         "theme-dark",
         "the built-in dark theme, verbatim (a starting point)",
@@ -40,9 +45,11 @@ pub fn body(topic: &str) -> Option<&'static str> {
         "extensions" => include_str!("../../../docs/extensions.md"),
         "themes" => include_str!("../../../docs/themes.md"),
         "models" => include_str!("../../../docs/models.md"),
+        "automation" => include_str!("../../../docs/automation.md"),
         "prompt-templates" => include_str!("../../../docs/prompt-templates.md"),
         "skills" => include_str!("../../../docs/skills.md"),
         "keybindings" => include_str!("../../../docs/keybindings.md"),
+        "sandboxing" => include_str!("../../../docs/sandboxing.md"),
         "theme-dark" => crate::tui::theme::DARK_JSON,
         "theme-light" => crate::tui::theme::LIGHT_JSON,
         _ => return None,

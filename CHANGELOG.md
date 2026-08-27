@@ -8,6 +8,43 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- Launch and automation have one tested contract. Canonical flags keep their
+  descriptive names and gain compact aliases: `--no-extensions`/`--ne`,
+  `--no-save`/`--ns`, `--read-only`/`--ro`, `--no-tools`/`--nt`, plus
+  process-scoped `--model`/`-m`, `--effort`/`--ef`, repeatable
+  `--image`/`-i`, and `--json`/`-j`. Restricted modes filter schemas and
+  independently block execution; read-only mode never dispatches an
+  extension override masquerading as `read`. `e ask --json` returns final
+  output, errors, warnings, usage, cost, and tool counts, while `e rpc`
+  provides the same result as a persistent one-request/one-response JSONL
+  protocol that defaults to memory-only turns.
+- Provider handling is split into explicit definitions, credential runtime,
+  catalog strategy, inference dialect, and per-model profile. Auth is
+  resolved/refreshed once before an adapter runs; live catalog shape is no
+  longer inferred from the inference dialect. Providers declare a
+  native/compatible/experimental support tier, and `e doctor` / `e providers`
+  produce paste-safe text or JSON diagnostics without credential values.
+  The deterministic dialect harness now requires semantic tool-call
+  start/argument/end identity (including interleaved calls), and an ignored
+  `E_LIVE_MODEL` canary verifies a paid end-to-end tool loop on demand.
+- Model profiles can declare tool and image capabilities plus optional USD
+  rates per million input/output/cache-read tokens. Cost estimates appear in
+  turn trailers and machine results without double-charging cached input.
+  PNG, JPEG, GIF, and WebP attachments are magic-byte checked, bounded,
+  retained in the session, and translated through all four native dialect
+  request shapes.
+- The extension protocol advertises an additive `tool.update` capability for
+  correlated stdout/stderr chunks while retaining strict protocol-v1 startup
+  compatibility;
+  extension tools now stream through the same ordered ToolOutput lifecycle as
+  built-ins. The dependency-free scaffold exposes an `update()` callback,
+  and worked `mcp.mjs` and `subagent.mjs` examples provide MCP stdio tools and
+  bounded delegated e turns without expanding the harness core.
+- Loading a branched session now follows parent links from the most recently
+  appended head. Resume no longer replays an abandoned branch merely because
+  its records remain earlier in the append-only file; missing parents,
+  duplicate ids, and cycles are reported as corruption.
+
 - Sessions are a tree, not just a line: every message carries an id and its
   parent, in the same file — `/tree` lists this session's earlier user
   turns, and rewinding to one points the next message's parent at it instead
