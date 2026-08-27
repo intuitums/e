@@ -62,6 +62,14 @@ pub enum Thinking {
 }
 
 impl Thinking {
+    fn parse(value: &str) -> Option<Thinking> {
+        match value {
+            "adaptive" => Some(Thinking::Adaptive),
+            "manual" => Some(Thinking::Manual),
+            _ => None,
+        }
+    }
+
     fn from_decl(value: Option<&str>) -> Thinking {
         match value {
             Some("adaptive") => Thinking::Adaptive,
@@ -233,14 +241,41 @@ pub fn config_warnings() -> Vec<String> {
         Ok(file) => file,
         Err(error) => return vec![format!("models.json: invalid configuration: {error}")],
     };
-    file.providers
-        .into_iter()
-        .filter_map(|(provider, entry)| {
-            (entry.base_url.is_none()
-                && crate::core::providers::registry::find(&provider).is_none())
-            .then(|| format!("models.json: provider {provider} requires an explicit base_url"))
-        })
-        .collect()
+    let mut warnings = Vec::new();
+    for (provider, entry) in file.providers {
+        if entry.base_url.is_none() && crate::core::providers::registry::find(&provider).is_none() {
+            warnings.push(format!(
+                "models.json: provider {provider} requires an explicit base_url"
+            ));
+        }
+        if let Some(api) = entry.api.as_deref().filter(|api| Api::parse(api).is_none()) {
+            warnings.push(format!(
+                "models.json: provider {provider}: unknown api dialect `{api}`"
+            ));
+        }
+        if let Some(thinking) = entry
+            .thinking
+            .as_deref()
+            .filter(|thinking| Thinking::parse(thinking).is_none())
+        {
+            warnings.push(format!(
+                "models.json: provider {provider}: unknown thinking mode `{thinking}`"
+            ));
+        }
+        for model in entry.models {
+            if let ModelEntry::Detailed {
+                id,
+                thinking: Some(thinking),
+                ..
+            } = model
+            {
+                if Thinking::parse(&thinking).is_none() {
+                    warnings.push(format!("models.json: provider {provider}, model {id}: unknown thinking mode `{thinking}`"));
+                }
+            }
+        }
+    }
+    warnings
 }
 /// Built-ins plus `~/.e/models.json` — and the file wins on a name clash,
 /// the same rule as themes: never override what the user declared.
@@ -257,9 +292,13 @@ pub fn catalog() -> Vec<Model> {
                 // gateway's Chat Completions endpoint.
                 let builtin = crate::core::providers::registry::find(&provider);
                 let api = match entry.api.as_deref() {
-                    Some(name) => Api::parse(name).unwrap_or_else(|| {
-                        panic!("models.json: provider {provider}: unknown api dialect `{name}`")
-                    }),
+                    Some(name) => match Api::parse(name) {
+                        Some(api) => api,
+                        // Keep the built-in provider intact; an invalid user
+                        // override is a configuration warning, never a
+                        // process-wide panic.
+                        None => continue,
+                    },
                     None => builtin.map(|p| p.api()).unwrap_or(Api::Completions),
                 };
                 let catalog_strategy = entry
@@ -354,12 +393,11 @@ pub fn catalog() -> Vec<Model> {
                             _ => declared.map(|d| d.efforts.clone()).unwrap_or_default(),
                         },
                         thinking: match (&thinking, &entry.thinking) {
-                            (Some(t), _) | (_, Some(t)) => match t.as_str() {
-                                "adaptive" => Thinking::Adaptive,
-                                "manual" => Thinking::Manual,
-                                other => panic!(
-                                    "models.json: provider {provider}: unknown thinking mode `{other}`"
-                                ),
+                            (Some(t), _) | (_, Some(t)) => match Thinking::parse(t) {
+                                Some(thinking) => thinking,
+                                // A malformed per-model declaration should
+                                // not make `doctor` or startup unusable.
+                                None => continue,
                             },
                             // …then the built-in's own declaration.
                             _ => declared
@@ -467,8 +505,8 @@ pub fn scope() -> Option<Vec<String>> {
 }
 
 /// Back to no scope at all: ctrl+p cycles everything again.
-pub fn clear_scope() {
-    crate::core::config::settings::remove("scoped_models");
+pub fn clear_scope() -> std::io::Result<()> {
+    crate::core::config::settings::remove("scoped_models")
 }
 
 /// Sort models for a picker: grouped by provider in registry order (unknown
@@ -488,8 +526,8 @@ pub fn provider_grouped(mut models: Vec<Model>) -> Vec<Model> {
     models
 }
 
-pub fn set_scope(ids: &[String]) {
-    crate::core::config::settings::set_strings("scoped_models", ids);
+pub fn set_scope(ids: &[String]) -> std::io::Result<()> {
+    crate::core::config::settings::set_strings("scoped_models", ids)
 }
 
 /// The models ctrl+p cycles: the scope filtered to what is signed in, or —

@@ -32,31 +32,6 @@ mod events;
 mod login;
 mod menus;
 
-/// Lines the ctrl+o viewer's PageUp/PageDown moves per press.
-const VIEWER_PAGE_SIZE: usize = 20;
-
-/// Lines of a finished `!` shell command's output kept visible inline in
-/// its transcript block; the full output still reaches history and the
-/// ctrl+o viewer (`app.remember_output`).
-const SHELL_BLOCK_TAIL_LINES: usize = 20;
-
-/// `/help`'s command list, ahead of any extension commands — see
-/// `App::help_text`, which appends those.
-const HELP_TEXT: &str = "commands:
-  /login [provider]   sign in (API key or account)
-  /models [name]      list or switch models
-  /scoped-models      choose which models ctrl+p cycles
-  /reload             reload extensions, themes, and config
-  /new                fresh session
-  /resume             resume a saved session
-  /tree               rewind to an earlier point and branch
-  /compact            summarize into a fresh session
-  /trust              trust this directory (loads its AGENTS.md, .e skills and prompts)
-  ! <cmd>              run a shell command; the model sees the output
-  shift+tab           cycle reasoning effort (per model)
-  /version            show the version
-  /quit               exit";
-
 /// Per-turn frontend bookkeeping; the engine state lives in the Agent.
 struct ActiveTurn {
     /// The current assistant text block, if one is streaming.
@@ -110,9 +85,10 @@ enum AppJob {
     Compacted {
         summary: String,
         kept: Vec<crate::core::providers::ChatMessage>,
+        epoch: u64,
     },
     /// A /compact that didn't produce a summary.
-    CompactFailed(String),
+    CompactFailed { message: String, epoch: u64 },
     /// A finished `!` shell command: what ran and what it printed. Tagged
     /// with the session epoch it started in.
     Shell {
@@ -242,6 +218,9 @@ struct App {
     input_verdicts: PendingInputVerdicts,
     /// A /compact summary is being generated; cleared when it lands or fails.
     compacting: bool,
+    /// Identity of the in-flight compaction. Session changes and a later
+    /// compaction invalidate older results before they can replace history.
+    compaction_epoch: u64,
     /// /compact was asked for mid-turn; runs when the turn ends (the
     /// reference behavior — compaction never touches a running turn).
     compact_requested: bool,
@@ -433,7 +412,10 @@ impl App {
         } else {
             (idx + pool.len() - 1) % pool.len()
         };
-        persist_model(&pool[next]);
+        if let Err(error) = persist_model(&pool[next]) {
+            self.notice(format!("could not save model choice: {error}"));
+            return;
+        }
         self.agent.model = pool[next].clone();
         self.refresh_status_cache();
     }
@@ -590,6 +572,7 @@ impl App {
         self.shell_block = None;
         self.held_prompts.clear();
         self.compacting = false;
+        self.compaction_epoch += 1;
         self.compact_requested = false;
         self.rebuild_transcript(&messages);
         self.agent.load_history(messages);
@@ -683,6 +666,7 @@ impl App {
         self.shell_block = None;
         self.held_prompts.clear();
         self.compacting = false;
+        self.compaction_epoch += 1;
         self.compact_requested = false;
         self.rebuild_transcript(&messages);
         self.agent.rewind_to(head, messages);
@@ -780,240 +764,6 @@ impl App {
     }
 
     /// The real submit flow, after the input hook (if any) has had its say.
-    /// Handle one non-release key event, in the same priority order the
-    /// frame loop always dispatched it: whichever modal surface (viewer,
-    /// trust, settings, auth, menu) is open wins over the composer.
-    /// Returns true when the frame loop should exit (ctrl+c confirm-quit,
-    /// ctrl+d on an empty composer).
-    fn handle_key(&mut self, k: KeyEvent) -> bool {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        if self.viewer.is_some() {
-            let close = k.code == KeyCode::Esc || (ctrl && k.code == KeyCode::Char('o'));
-            if close {
-                self.viewer = None;
-            } else if let Some(viewer) = &mut self.viewer {
-                let total = self
-                    .outputs
-                    .get(viewer.index)
-                    .map(|(_, c)| c.lines().count())
-                    .unwrap_or(0);
-                match k.code {
-                    KeyCode::Up => viewer.scroll = viewer.scroll.saturating_sub(1),
-                    KeyCode::Down => {
-                        viewer.scroll = (viewer.scroll + 1).min(total.saturating_sub(1))
-                    }
-                    KeyCode::PageUp => {
-                        viewer.scroll = viewer.scroll.saturating_sub(VIEWER_PAGE_SIZE)
-                    }
-                    KeyCode::PageDown => {
-                        viewer.scroll =
-                            (viewer.scroll + VIEWER_PAGE_SIZE).min(total.saturating_sub(1))
-                    }
-                    KeyCode::Left => {
-                        viewer.index = viewer.index.saturating_sub(1);
-                        viewer.scroll = 0;
-                    }
-                    KeyCode::Right => {
-                        viewer.index = (viewer.index + 1).min(self.outputs.len().saturating_sub(1));
-                        viewer.scroll = 0;
-                    }
-                    _ => {}
-                }
-            }
-        } else if ctrl && k.code == KeyCode::Char('o') {
-            if self.outputs.is_empty() {
-                self.notice("no tool output to view yet".into());
-            } else {
-                self.viewer = Some(Viewer {
-                    index: self.outputs.len() - 1,
-                    scroll: 0,
-                });
-            }
-        } else if let Some(stage) = &mut self.trust {
-            match k.code {
-                KeyCode::Up | KeyCode::Down => stage.selected = 1 - stage.selected,
-                KeyCode::Enter => {
-                    let trusted = stage.selected == 0;
-                    match crate::core::config::trust::set(&self.agent.cwd(), trusted) {
-                        Err(e) => self.notice(format!("trust: {e}")),
-                        Ok(()) => {
-                            self.trust = None;
-                            if !trusted {
-                                self.notice("working untrusted — project AGENTS.md and .e skills/prompts ignored (/trust to allow)".into());
-                            }
-                            // An open -r picker still owns
-                            // the launch prompt; submitting
-                            // it now would start a turn the
-                            // session pick then refuses.
-                            if self.menu.is_none() {
-                                if let Some(initial) = self.pending_initial.take() {
-                                    self.submit_initial(initial);
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        } else if let Some(panel) = &mut self.settings {
-            match k.code {
-                KeyCode::Up => panel.step(-1),
-                KeyCode::Down => panel.step(1),
-                KeyCode::Left => panel.change(-1),
-                KeyCode::Right => panel.change(1),
-                KeyCode::Esc | KeyCode::Enter => self.settings = None,
-                _ => {}
-            }
-            // A theme change applies immediately; settings can
-            // also change what the statusline derives from disk.
-            // The thinking toggle and keymap are file-backed
-            // too — re-read them so a mid-session change
-            // lands this frame.
-            self.apply_theme();
-            self.apply_keymap();
-            self.show_thinking = crate::core::config::settings::get_string("show_thinking")
-                .as_deref()
-                != Some("off");
-            self.refresh_status_cache();
-        } else if let Some(stage) = &mut self.auth {
-            match (&mut *stage, k.code) {
-                (AuthStage::Choose { selected }, KeyCode::Up | KeyCode::Down) => {
-                    *selected = 1 - *selected;
-                }
-                (AuthStage::Choose { selected }, KeyCode::Enter) => {
-                    let choice = *selected;
-                    self.auth_choose(choice);
-                }
-                (AuthStage::Account { selected }, KeyCode::Up | KeyCode::Down) => {
-                    let n = crate::core::providers::registry::oauth_providers().len();
-                    *selected = (*selected + 1) % n.max(1);
-                }
-                (AuthStage::Key { selected }, KeyCode::Up) => {
-                    let n = crate::core::providers::registry::key_providers().len();
-                    *selected = (*selected + n - 1) % n.max(1);
-                }
-                (AuthStage::Key { selected }, KeyCode::Down) => {
-                    let n = crate::core::providers::registry::key_providers().len();
-                    *selected = (*selected + 1) % n.max(1);
-                }
-                (AuthStage::Account { selected }, KeyCode::Enter) => {
-                    let choice = *selected;
-                    self.auth_account(choice);
-                }
-                (AuthStage::Key { selected }, KeyCode::Enter) => {
-                    let choice = *selected;
-                    self.auth_key(choice);
-                }
-                (_, KeyCode::Esc) => {
-                    let waiting = matches!(&*stage, AuthStage::Waiting);
-                    let cancelled = self.cancel_login();
-                    self.auth = None;
-                    self.pending_key = None;
-                    self.editor.mask = false;
-                    self.editor.set_text("");
-                    if waiting && cancelled {
-                        self.notice("login cancelled".into());
-                    }
-                }
-                (AuthStage::ApiKey { .. }, _) => {
-                    if let Some(key) = key_of(&k, &self.keymap) {
-                        if let EditorResult::Submit(text) = self.editor.key(key) {
-                            self.submit(text);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        } else if self
-            .menu
-            .as_ref()
-            .map(|m| m.kind == MenuKind::Scoped)
-            .unwrap_or(false)
-            && ((k.code == KeyCode::Char(' ') && !ctrl) || (ctrl && k.code == KeyCode::Char('x')))
-        {
-            if ctrl {
-                model::clear_scope();
-                self.notice("scope cleared — ctrl+p cycles every model again".into());
-                self.open_scoped_menu();
-            } else {
-                self.toggle_scoped();
-            }
-        } else if self.menu.is_some()
-            && matches!(
-                k.code,
-                KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc
-            )
-            && !ctrl
-        {
-            match k.code {
-                KeyCode::Up => {
-                    self.menu.as_mut().unwrap().step(-1);
-                }
-                KeyCode::Down => {
-                    self.menu.as_mut().unwrap().step(1);
-                }
-                KeyCode::Enter => {
-                    self.select_menu();
-                }
-                KeyCode::Esc => {
-                    self.menu = None;
-                    // Declining the -r picker releases a
-                    // held launch prompt into the current
-                    // session.
-                    self.release_initial_prompt();
-                }
-                _ => {}
-            }
-        } else if k.code == KeyCode::Esc && self.pending_key.is_some() {
-            self.pending_key = None;
-            self.editor.mask = false;
-            self.editor.set_text("");
-            self.notice("login cancelled".into());
-        } else if k.code == KeyCode::Esc && self.agent.is_streaming() {
-            self.agent.interrupt();
-        } else if ctrl && k.code == KeyCode::Char('c') {
-            if self.agent.is_streaming() {
-                self.agent.interrupt();
-                arm(self);
-            } else if !self.editor.is_empty() {
-                self.editor.set_text("");
-                arm(self);
-            } else if self
-                .armed_at
-                .map(|t| t.elapsed() < CONFIRM_QUIT_WINDOW)
-                .unwrap_or(false)
-            {
-                return true;
-            } else {
-                arm(self);
-            }
-        } else if ctrl && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('P')) {
-            let backward =
-                k.code == KeyCode::Char('P') || k.modifiers.contains(KeyModifiers::SHIFT);
-            self.cycle_model(!backward);
-        } else if ctrl && k.code == KeyCode::Char('d') && self.editor.is_empty() {
-            return true;
-        } else if k.code == KeyCode::BackTab
-            || (k.code == KeyCode::Tab && !ctrl && k.modifiers.contains(KeyModifiers::SHIFT))
-        {
-            // Shift+tab cycles the reasoning effort through
-            // whatever levels this model declares. The
-            // statusline already shows the new level; only a
-            // model without a reasoning knob gets a notice.
-            match self.agent.cycle_effort() {
-                Some(_) => self.refresh_status_cache(),
-                None => self.notice("this model has no reasoning effort control".into()),
-            }
-        } else if let Some(key) = key_of(&k, &self.keymap) {
-            if let EditorResult::Submit(text) = self.editor.key(key) {
-                self.submit(text);
-            }
-            self.sync_menu();
-        }
-
-        false
-    }
-
     fn submit_direct(&mut self, text: String) {
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() {
@@ -1031,7 +781,12 @@ impl App {
         }
 
         if let Some(rest) = command_arg(&trimmed, "/login") {
-            self.handle_login_command(rest.trim());
+            let provider = rest.trim().to_string();
+            if provider.is_empty() {
+                self.open_login_menu();
+            } else {
+                self.login(provider);
+            }
             return;
         }
 
@@ -1042,63 +797,66 @@ impl App {
         let model_rest =
             command_arg(&trimmed, "/models").or_else(|| command_arg(&trimmed, "/model"));
         if let Some(rest) = model_rest {
-            self.handle_models_command(rest.trim());
+            let query = rest.trim();
+            if query.is_empty() {
+                self.open_model_menu();
+            } else if let Some(found) = model::resolve(query) {
+                if let Err(error) = persist_model(&found) {
+                    self.notice(format!("could not save model choice: {error}"));
+                    return;
+                }
+                self.notice(format!("model set to {}", model::slug(&found)));
+                self.agent.model = found;
+                self.refresh_status_cache();
+            } else {
+                self.notice(format!(
+                    "no available model matches {query:?} — sign in to its provider with /login"
+                ));
+            }
             return;
         }
-        self.dispatch_builtin_command(trimmed);
-    }
-
-    fn handle_login_command(&mut self, provider: &str) {
-        if provider.is_empty() {
-            self.open_login_menu();
-        } else {
-            self.login(provider.to_string());
-        }
-    }
-
-    fn handle_models_command(&mut self, query: &str) {
-        if query.is_empty() {
-            self.open_model_menu();
-        } else if let Some(found) = model::resolve(query) {
-            persist_model(&found);
-            self.notice(format!("model set to {}", model::slug(&found)));
-            self.agent.model = found;
-            self.refresh_status_cache();
-        } else {
-            self.notice(format!(
-                "no available model matches {query:?} — sign in to its provider with /login"
-            ));
-        }
-    }
-
-    /// `/help`'s full text: the built-in command list plus, when any
-    /// extension declares one, its commands appended below.
-    fn help_text(&self) -> String {
-        let mut help = HELP_TEXT.to_string();
-        let ext_commands = self.host.commands();
-        if !ext_commands.is_empty() {
-            help.push_str("\n\nextension commands:");
-            for (name, description) in ext_commands {
-                help.push_str(&format!("\n  /{name:<21}{description}"));
-            }
-        }
-        help
-    }
-
-    /// Every built-in slash command not already peeled off by
-    /// `submit_direct` (those need the raw, untrimmed argument text before
-    /// their leading `/name` is known — this dispatches on the whole line).
-    /// Falls through to an extension/prompt-template command, then to a
-    /// plain prompt.
-    fn dispatch_builtin_command(&mut self, trimmed: String) {
         match trimmed.as_str() {
             "/quit" | "/exit" => self.should_quit = true,
             "/version" => self.notice(format!("e {}", crate::VERSION)),
             "/help" => {
-                let help = self.help_text();
+                let mut help = "commands:\n  /login [provider]   sign in (API key or account)\n  /models [name]      list or switch models\n  /scoped-models      choose which models ctrl+p cycles\n  /reload             reload extensions, themes, and config\n  /new                fresh session\n  /resume             resume a saved session\n  /tree               rewind to an earlier point and branch\n  /compact            summarize into a fresh session\n  /trust              trust this directory (loads its AGENTS.md, .e skills and prompts)\n  ! <cmd>              run a shell command; the model sees the output\n  shift+tab           cycle reasoning effort (per model)\n  /version            show the version\n  /quit               exit".to_string();
+                let ext_commands = self.host.commands();
+                if !ext_commands.is_empty() {
+                    help.push_str("\n\nextension commands:");
+                    for (name, description) in ext_commands {
+                        help.push_str(&format!("\n  /{name:<21}{description}"));
+                    }
+                }
                 self.notice(help);
             }
-            "/new" | "/clear" => self.handle_new_session_command(),
+            "/new" | "/clear" => {
+                // A running turn owns the history and session log; replacing
+                // them mid-turn would commit its reply into the wrong
+                // session. `is_streaming` also covers the gap between a
+                // submit and its TurnStart event.
+                if self.active.is_some() || self.agent.is_streaming() {
+                    self.notice("a turn is running — press Esc to stop it, then /new".into());
+                    return;
+                }
+                self.compacting = false;
+                self.compaction_epoch += 1;
+                self.compact_requested = false;
+                self.held_prompts.clear();
+                self.shell_block = None;
+                self.reload_block = None;
+                self.context_tokens = 0;
+                self.agent.clear();
+                self.agent.clear_session_name();
+                self.agent.set_session(None);
+                // The name is part of session identity: a fresh session must
+                // not inherit the old one's.
+                self.agent.adopt_session_name(None);
+                self.session_epoch += 1;
+                self.transcript.clear();
+                self.transcript
+                    .push(Block::new(Kind::Banner, crate::VERSION));
+                set_tab_title(&tab_title(&title_path(), None));
+            }
             "/resume" => self.open_resume_menu(),
             "/tree" => self.open_tree_menu(),
             "/settings" => self.open_settings(),
@@ -1111,65 +869,36 @@ impl App {
                 ),
                 Err(e) => self.notice(format!("trust: {e}")),
             },
-            _ if trimmed.starts_with('/') => self.dispatch_extension_or_prompt_command(&trimmed),
+            _ if trimmed.starts_with('/') => {
+                let (name, args) = trimmed[1..].split_once(' ').unwrap_or((&trimmed[1..], ""));
+                if let Some(template) =
+                    crate::core::resources::prompts::find(name, &self.agent.cwd())
+                {
+                    let expanded =
+                        crate::core::resources::prompts::substitute(&template.content, args);
+                    self.prompt(expanded);
+                } else if self.host.has_command(name) {
+                    let host = self.host.clone();
+                    let results = self.results.clone();
+                    let (name, args) = (name.to_string(), args.to_string());
+                    let epoch = self.session_epoch;
+                    tokio::spawn(async move {
+                        let out = host.run_command(&name, &args).await;
+                        if let Some(notice) = out.notice {
+                            let _ = results.send(AppJob::Notice(notice)).await;
+                        }
+                        if let Some(text) = out.prompt {
+                            let _ = results.send(AppJob::Prompt { text, epoch }).await;
+                        }
+                        if let Some(name) = out.session_name.filter(|n| !n.trim().is_empty()) {
+                            let _ = results.send(AppJob::Rename { name, epoch }).await;
+                        }
+                    });
+                } else {
+                    self.notice(format!("unknown command {trimmed}"));
+                }
+            }
             _ => self.prompt(trimmed),
-        }
-    }
-
-    fn handle_new_session_command(&mut self) {
-        // A running turn owns the history and session log; replacing
-        // them mid-turn would commit its reply into the wrong
-        // session. `is_streaming` also covers the gap between a
-        // submit and its TurnStart event.
-        if self.active.is_some() || self.agent.is_streaming() {
-            self.notice("a turn is running — press Esc to stop it, then /new".into());
-            return;
-        }
-        self.compacting = false;
-        self.compact_requested = false;
-        self.held_prompts.clear();
-        self.shell_block = None;
-        self.reload_block = None;
-        self.context_tokens = 0;
-        self.agent.clear();
-        self.agent.clear_session_name();
-        self.agent.set_session(None);
-        // The name is part of session identity: a fresh session must
-        // not inherit the old one's.
-        self.agent.adopt_session_name(None);
-        self.session_epoch += 1;
-        self.transcript.clear();
-        self.transcript
-            .push(Block::new(Kind::Banner, crate::VERSION));
-        set_tab_title(&tab_title(&title_path(), None));
-    }
-
-    /// A `/name` not recognized as a built-in: a project prompt template,
-    /// then an extension command, then "unknown command".
-    fn dispatch_extension_or_prompt_command(&mut self, trimmed: &str) {
-        let (name, args) = trimmed[1..].split_once(' ').unwrap_or((&trimmed[1..], ""));
-        if let Some(template) = crate::core::resources::prompts::find(name, &self.agent.cwd()) {
-            let expanded = crate::core::resources::prompts::substitute(&template.content, args);
-            self.prompt(expanded);
-        } else if self.host.has_command(name) {
-            let host = self.host.clone();
-            let results = self.results.clone();
-            let (name, args) = (name.to_string(), args.to_string());
-            let epoch = self.session_epoch;
-            tokio::spawn(async move {
-                let out = host.run_command(&name, &args).await;
-                if let Some(notice) = out.notice {
-                    let _ = results.send(AppJob::Notice(notice)).await;
-                }
-                if let Some(text) = out.prompt {
-                    let _ = results.send(AppJob::Prompt { text, epoch }).await;
-                }
-                if let Some(name) = out.session_name.filter(|n| !n.trim().is_empty()) {
-                    let _ = results.send(AppJob::Rename { name, epoch }).await;
-                }
-            });
-        } else {
-            self.notice(format!("unknown command {trimmed}"));
         }
     }
 
@@ -1266,6 +995,10 @@ impl App {
             }
             return;
         }
+        if self.shell_block.is_some() {
+            self.notice("a shell command is running — compact after it finishes".into());
+            return;
+        }
         self.start_compaction(false);
     }
 
@@ -1275,6 +1008,12 @@ impl App {
         if self.compacting {
             if !auto {
                 self.notice("already compacting".into());
+            }
+            return;
+        }
+        if self.shell_block.is_some() {
+            if !auto {
+                self.notice("a shell command is running — compact after it finishes".into());
             }
             return;
         }
@@ -1292,16 +1031,26 @@ impl App {
             return;
         }
         self.compacting = true;
+        self.compaction_epoch += 1;
+        let epoch = self.compaction_epoch;
         self.notice("compacting…".into());
         let model = self.agent.model.clone();
         let results = self.results.clone();
         tokio::spawn(async move {
             let job = match crate::core::agent::compact::summarize(model, &to_summarize).await {
-                Ok(summary) => AppJob::Compacted { summary, kept },
-                Err(message) => AppJob::CompactFailed(message),
+                Ok(summary) => AppJob::Compacted {
+                    summary,
+                    kept,
+                    epoch,
+                },
+                Err(message) => AppJob::CompactFailed { message, epoch },
             };
             let _ = results.send(job).await;
         });
+    }
+
+    fn compaction_is_current(&self, epoch: u64) -> bool {
+        self.compacting && epoch == self.compaction_epoch
     }
 
     /// `!cmd`: run it through the bash tool off-task; the result arrives as
@@ -1548,8 +1297,8 @@ fn system_prompt() -> String {
     crate::core::agent::context::system_prompt_here()
 }
 
-fn persist_model(m: &Model) {
-    crate::core::config::settings::set_string("model", &model::slug(m));
+fn persist_model(m: &Model) -> std::io::Result<()> {
+    crate::core::config::settings::set_string("model", &model::slug(m))
 }
 
 /// The text after a slash command, only on a word boundary: `/login x` →
@@ -1838,6 +1587,7 @@ pub async fn run(
         results: results_tx,
         input_verdicts: PendingInputVerdicts::default(),
         compacting: false,
+        compaction_epoch: 0,
         compact_requested: false,
         held_prompts: Vec::new(),
         trust: None,
@@ -1961,11 +1711,235 @@ pub async fn run(
                         rows = r;
                         painter.resize(c, r);
                     }
-                    TermEvent::Key(k)
-                        if k.kind != crossterm::event::KeyEventKind::Release
-                            && app.handle_key(k) =>
-                    {
-                        break;
+                    TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
+                        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                        if app.viewer.is_some() {
+                            let close = k.code == KeyCode::Esc
+                                || (ctrl && k.code == KeyCode::Char('o'));
+                            if close {
+                                app.viewer = None;
+                            } else if let Some(viewer) = &mut app.viewer {
+                                let total = app
+                                    .outputs
+                                    .get(viewer.index)
+                                    .map(|(_, c)| c.lines().count())
+                                    .unwrap_or(0);
+                                match k.code {
+                                    KeyCode::Up => viewer.scroll = viewer.scroll.saturating_sub(1),
+                                    KeyCode::Down => {
+                                        viewer.scroll = (viewer.scroll + 1)
+                                            .min(total.saturating_sub(1))
+                                    }
+                                    KeyCode::PageUp => {
+                                        viewer.scroll = viewer.scroll.saturating_sub(20)
+                                    }
+                                    KeyCode::PageDown => {
+                                        viewer.scroll = (viewer.scroll + 20)
+                                            .min(total.saturating_sub(1))
+                                    }
+                                    KeyCode::Left => {
+                                        viewer.index = viewer.index.saturating_sub(1);
+                                        viewer.scroll = 0;
+                                    }
+                                    KeyCode::Right => {
+                                        viewer.index = (viewer.index + 1)
+                                            .min(app.outputs.len().saturating_sub(1));
+                                        viewer.scroll = 0;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        } else if ctrl && k.code == KeyCode::Char('o') {
+                            if app.outputs.is_empty() {
+                                app.notice("no tool output to view yet".into());
+                            } else {
+                                app.viewer = Some(Viewer {
+                                    index: app.outputs.len() - 1,
+                                    scroll: 0,
+                                });
+                            }
+                        } else if let Some(stage) = &mut app.trust {
+                            match k.code {
+                                KeyCode::Up | KeyCode::Down => stage.selected = 1 - stage.selected,
+                                KeyCode::Enter => {
+                                    let trusted = stage.selected == 0;
+                                    match crate::core::config::trust::set(&app.agent.cwd(), trusted) {
+                                        Err(e) => app.notice(format!("trust: {e}")),
+                                        Ok(()) => {
+                                            app.trust = None;
+                                            if !trusted {
+                                                app.notice("working untrusted — project AGENTS.md and .e skills/prompts ignored (/trust to allow)".into());
+                                            }
+                                            // An open -r picker still owns
+                                            // the launch prompt; submitting
+                                            // it now would start a turn the
+                                            // session pick then refuses.
+                                            if app.menu.is_none() {
+                                                if let Some(initial) = app.pending_initial.take() {
+                                                    app.submit_initial(initial);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else if let Some(panel) = &mut app.settings {
+                            let mut setting_error = None;
+                            match k.code {
+                                KeyCode::Up => panel.step(-1),
+                                KeyCode::Down => panel.step(1),
+                                KeyCode::Left => setting_error = panel.change(-1).err(),
+                                KeyCode::Right => setting_error = panel.change(1).err(),
+                                KeyCode::Esc | KeyCode::Enter => app.settings = None,
+                                _ => {}
+                            }
+                            if let Some(error) = setting_error {
+                                app.notice(format!("could not save setting: {error}"));
+                            }
+                            // A theme change applies immediately; settings can
+                            // also change what the statusline derives from disk.
+                            // The thinking toggle and keymap are file-backed
+                            // too — re-read them so a mid-session change
+                            // lands this frame.
+                            app.apply_theme();
+                            app.apply_keymap();
+                            app.show_thinking = crate::core::config::settings::get_string(
+                                "show_thinking",
+                            )
+                            .as_deref()
+                            != Some("off");
+                            app.refresh_status_cache();
+                        } else if let Some(stage) = &mut app.auth {
+                            match (&mut *stage, k.code) {
+                                (AuthStage::Choose { selected }, KeyCode::Up | KeyCode::Down) => {
+                                    *selected = 1 - *selected;
+                                }
+                                (AuthStage::Choose { selected }, KeyCode::Enter) => {
+                                    let choice = *selected;
+                                    app.auth_choose(choice);
+                                }
+                                (AuthStage::Account { selected }, KeyCode::Up | KeyCode::Down) => {
+                                    let n = crate::core::providers::registry::oauth_providers().len();
+                                    *selected = (*selected + 1) % n.max(1);
+                                }
+                                (AuthStage::Key { selected }, KeyCode::Up) => {
+                                    let n = crate::core::providers::registry::key_providers().len();
+                                    *selected = (*selected + n - 1) % n.max(1);
+                                }
+                                (AuthStage::Key { selected }, KeyCode::Down) => {
+                                    let n = crate::core::providers::registry::key_providers().len();
+                                    *selected = (*selected + 1) % n.max(1);
+                                }
+                                (AuthStage::Account { selected }, KeyCode::Enter) => {
+                                    let choice = *selected;
+                                    app.auth_account(choice);
+                                }
+                                (AuthStage::Key { selected }, KeyCode::Enter) => {
+                                    let choice = *selected;
+                                    app.auth_key(choice);
+                                }
+                                (_, KeyCode::Esc) => {
+                                    let waiting = matches!(&*stage, AuthStage::Waiting);
+                                    let cancelled = app.cancel_login();
+                                    app.auth = None;
+                                    app.pending_key = None;
+                                    app.editor.mask = false;
+                                    app.editor.set_text("");
+                                    if waiting && cancelled {
+                                        app.notice("login cancelled".into());
+                                    }
+                                }
+                                (AuthStage::ApiKey { .. }, _) => {
+                                    if let Some(key) = key_of(&k, &app.keymap) {
+                                        if let EditorResult::Submit(text) = app.editor.key(key) {
+                                            app.submit(text);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else if app
+                            .menu
+                            .as_ref()
+                            .map(|m| m.kind == MenuKind::Scoped)
+                            .unwrap_or(false)
+                            && ((k.code == KeyCode::Char(' ') && !ctrl)
+                                || (ctrl && k.code == KeyCode::Char('x')))
+                        {
+                            if ctrl {
+                                match model::clear_scope() {
+                                    Ok(()) => {
+                                        app.notice("scope cleared — ctrl+p cycles every model again".into());
+                                        app.open_scoped_menu();
+                                    }
+                                    Err(error) => app.notice(format!("could not save model scope: {error}")),
+                                }
+                            } else {
+                                app.toggle_scoped();
+                            }
+                        } else if app.menu.is_some()
+                            && matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc)
+                            && !ctrl
+                        {
+                            match k.code {
+                                KeyCode::Up => { app.menu.as_mut().unwrap().step(-1); }
+                                KeyCode::Down => { app.menu.as_mut().unwrap().step(1); }
+                                KeyCode::Enter => { app.select_menu(); }
+                                KeyCode::Esc => {
+                                    app.menu = None;
+                                    // Declining the -r picker releases a
+                                    // held launch prompt into the current
+                                    // session.
+                                    app.release_initial_prompt();
+                                }
+                                _ => {}
+                            }
+                        } else if k.code == KeyCode::Esc && app.pending_key.is_some() {
+                            app.pending_key = None;
+                            app.editor.mask = false;
+                            app.editor.set_text("");
+                            app.notice("login cancelled".into());
+                        } else if k.code == KeyCode::Esc && app.agent.is_streaming() {
+                            app.agent.interrupt();
+                        } else if ctrl && k.code == KeyCode::Char('c') {
+                            if app.agent.is_streaming() {
+                                app.agent.interrupt();
+                                arm(&mut app);
+                            } else if !app.editor.is_empty() {
+                                app.editor.set_text("");
+                                arm(&mut app);
+                            } else if app.armed_at.map(|t| t.elapsed() < Duration::from_millis(1500)).unwrap_or(false) {
+                                break;
+                            } else {
+                                arm(&mut app);
+                            }
+                        } else if ctrl && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+                            let backward = k.code == KeyCode::Char('P')
+                                || k.modifiers.contains(KeyModifiers::SHIFT);
+                            app.cycle_model(!backward);
+                        } else if ctrl && k.code == KeyCode::Char('d') && app.editor.is_empty() {
+                            break;
+                        } else if k.code == KeyCode::BackTab
+                            || (k.code == KeyCode::Tab
+                                && !ctrl
+                                && k.modifiers.contains(KeyModifiers::SHIFT))
+                        {
+                            // Shift+tab cycles the reasoning effort through
+                            // whatever levels this model declares. The
+                            // statusline already shows the new level; only a
+                            // model without a reasoning knob gets a notice.
+                            match app.agent.cycle_effort() {
+                                Ok(Some(_)) => app.refresh_status_cache(),
+                                Ok(None) => app.notice("this model has no reasoning effort control".into()),
+                                Err(error) => app.notice(format!("could not save reasoning effort: {error}")),
+                            }
+                        } else if let Some(key) = key_of(&k, &app.keymap) {
+                            if let EditorResult::Submit(text) = app.editor.key(key) {
+                                app.submit(text);
+                            }
+                            app.sync_menu();
+                        }
                     }
                     _ => {}
                 }
@@ -2014,9 +1988,9 @@ pub async fn run(
                             set_tab_title(&tab_title(&title_path(), Some(&name)));
                         }
                     }
-                    Some(AppJob::Compacted { summary, kept }) => {
+                    Some(AppJob::Compacted { summary, kept, epoch }) => {
                         // Ignore a result that outlived its session (/new won).
-                        if app.compacting {
+                        if app.compaction_is_current(epoch) {
                             app.compacting = false;
                             if app.agent.load_compacted(&summary, kept).await {
                                 app.context_tokens =
@@ -2024,7 +1998,6 @@ pub async fn run(
                                         &system_prompt(),
                                         &app.agent.history_snapshot(),
                                     );
-                                app.shell_block = None;
                                 app.transcript.clear();
                                 app.transcript.push(Block::new(Kind::Banner, crate::VERSION));
                                 app.transcript.push(Block::new(Kind::Notice, "compacted — recent messages kept, the full session is under /resume"));
@@ -2035,14 +2008,15 @@ pub async fn run(
                             }
                         }
                     }
-                    Some(AppJob::CompactFailed(message)) if app.compacting => {
+                    Some(AppJob::CompactFailed { message, epoch })
+                        if app.compaction_is_current(epoch) => {
                         app.compacting = false;
                         app.notice(format!("compact failed: {message}"));
                         for text in std::mem::take(&mut app.held_prompts) {
                             app.prompt(text);
                         }
                     }
-                    Some(AppJob::CompactFailed(_)) => {}
+                    Some(AppJob::CompactFailed { .. }) => {}
                     Some(AppJob::CatalogRefreshed) => {
                         if let Some(menu) = &app.menu {
                             if menu.kind == MenuKind::Models {
@@ -2089,12 +2063,12 @@ pub async fn run(
                                 crate::core::tools::sanitize_display(&output.content);
                             let shown: String = {
                                 let lines: Vec<&str> = display_output.lines().collect();
-                                let tail = &lines[lines.len().saturating_sub(SHELL_BLOCK_TAIL_LINES)..];
+                                let tail = &lines[lines.len().saturating_sub(20)..];
                                 let mut text = tail.join("\n");
-                                if lines.len() > SHELL_BLOCK_TAIL_LINES {
+                                if lines.len() > 20 {
                                     text = format!(
                                         "… ({} more lines above)\n{text}",
-                                        lines.len() - SHELL_BLOCK_TAIL_LINES
+                                        lines.len() - 20
                                     );
                                 }
                                 text
@@ -2169,7 +2143,7 @@ pub async fn run(
             _ = tokio::time::sleep_until(next_paint), if paint_deferred => {}
             _ = tick.tick() => {
                 if let Some(at) = app.armed_at {
-                    if at.elapsed() > ARM_INDICATOR_TIMEOUT {
+                    if at.elapsed() > Duration::from_millis(1600) {
                         app.armed_at = None;
                         app.overlay = None;
                     }
@@ -2222,15 +2196,6 @@ pub async fn run(
     }
     Ok(())
 }
-
-/// How long a second ctrl+c, after the first arms the "press again to
-/// exit" prompt, actually quits.
-const CONFIRM_QUIT_WINDOW: Duration = Duration::from_millis(1500);
-
-/// How long the armed indicator stays lit before the tick loop clears it.
-/// Deliberately longer than `CONFIRM_QUIT_WINDOW`: the overlay must never
-/// disappear before the window it represents has actually closed.
-const ARM_INDICATOR_TIMEOUT: Duration = Duration::from_millis(1600);
 
 fn arm(app: &mut App) {
     app.armed_at = Some(Instant::now());
@@ -2600,6 +2565,7 @@ mod tests {
             results,
             input_verdicts: PendingInputVerdicts::default(),
             compacting: false,
+            compaction_epoch: 0,
             compact_requested: false,
             held_prompts: Vec::new(),
             trust: None,
@@ -2626,6 +2592,16 @@ mod tests {
             .filter(|block| block.kind == Kind::Thinking)
             .map(|block| (block.text.clone(), block.done))
             .collect()
+    }
+
+    #[test]
+    fn stale_compaction_generation_cannot_replace_current_history() {
+        let mut app = session_app();
+        app.compacting = true;
+        app.compaction_epoch = 4;
+        assert!(app.compaction_is_current(4));
+        app.compaction_epoch += 1; // /new, /resume, or /tree invalidated it.
+        assert!(!app.compaction_is_current(4));
     }
 
     fn tool_batch() -> SessionEvent {

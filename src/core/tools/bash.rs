@@ -19,7 +19,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -44,14 +44,11 @@ pub fn schema() -> Value {
 /// Bytes kept per background process, tail-retained like the foreground
 /// path's own cap — a runaway server logging forever must not grow forever.
 const BACKGROUND_RETAIN_LIMIT: usize = 32 * 1024;
-
-/// Handles retained before registering a new one starts evicting finished
-/// ones. Bounds the map over a long session that starts and finishes many
-/// background processes — nothing ever removed a completed entry otherwise,
-/// so its `Arc`/mutexes (bounded output aside) lived for the rest of the e
-/// process. A still-running handle is never evicted, no matter how many
-/// there are — only a process whose exit was already recorded is fair game.
-const MAX_BACKGROUND_HANDLES: usize = 64;
+/// Finished jobs remain queryable briefly, but an autonomous session must not
+/// retain every completed process forever.
+const BACKGROUND_FINISHED_RETAIN: usize = 64;
+const BACKGROUND_PROCESS_LIMIT: usize = 128;
+static BACKGROUND_FINISHED_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy)]
 enum ExitOutcome {
@@ -65,7 +62,7 @@ struct BackgroundProcess {
     output: Mutex<Vec<u8>>,
     total_bytes: Mutex<usize>,
     exit: Mutex<Option<ExitOutcome>>,
-    registered_at: Instant,
+    finished_sequence: AtomicU64,
 }
 
 /// Live background processes, keyed by handle. Process-lifetime only — like
@@ -73,26 +70,30 @@ struct BackgroundProcess {
 /// itself; there is no daemon and no persistence to reload on restart.
 static BACKGROUND: Mutex<Option<HashMap<String, Arc<BackgroundProcess>>>> = Mutex::new(None);
 
-fn register_background(id: String, process: Arc<BackgroundProcess>) {
+fn prune_background(map: &mut HashMap<String, Arc<BackgroundProcess>>) {
+    let mut finished: Vec<(String, u64)> = map
+        .iter()
+        .filter_map(|(id, process)| {
+            let sequence = process.finished_sequence.load(Ordering::Relaxed);
+            (sequence > 0).then(|| (id.clone(), sequence))
+        })
+        .collect();
+    finished.sort_by_key(|(_, sequence)| *sequence);
+    let excess = finished.len().saturating_sub(BACKGROUND_FINISHED_RETAIN);
+    for (id, _) in finished.into_iter().take(excess) {
+        map.remove(&id);
+    }
+}
+
+fn register_background(id: String, process: Arc<BackgroundProcess>) -> bool {
     let mut guard = BACKGROUND.lock().unwrap_or_else(|e| e.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
-    if map.len() >= MAX_BACKGROUND_HANDLES {
-        let mut exited: Vec<(String, Instant)> = map
-            .iter()
-            .filter_map(|(id, p)| {
-                let finished = p.exit.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-                finished.then(|| (id.clone(), p.registered_at))
-            })
-            .collect();
-        exited.sort_by_key(|(_, at)| *at);
-        for (id, _) in exited
-            .into_iter()
-            .take(map.len() + 1 - MAX_BACKGROUND_HANDLES)
-        {
-            map.remove(&id);
-        }
+    prune_background(map);
+    if map.len() >= BACKGROUND_PROCESS_LIMIT {
+        return false;
     }
     map.insert(id, process);
+    true
 }
 
 fn find_background(id: &str) -> Option<Arc<BackgroundProcess>> {
@@ -135,9 +136,13 @@ fn start_background(command: &str, cwd: &Path) -> ToolOutput {
         output: Mutex::new(Vec::new()),
         total_bytes: Mutex::new(0),
         exit: Mutex::new(None),
-        registered_at: Instant::now(),
+        finished_sequence: AtomicU64::new(0),
     });
-    register_background(id.clone(), process.clone());
+    if !register_background(id.clone(), process.clone()) {
+        kill_group(pid);
+        let _ = child.wait();
+        return failure("bash: background process limit reached; check or stop existing handles");
+    }
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -223,6 +228,17 @@ fn reap_background(
         Err(_) => ExitOutcome::Exited(-1),
     };
     *process.exit.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+    process.finished_sequence.store(
+        BACKGROUND_FINISHED_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        Ordering::Relaxed,
+    );
+    if let Some(map) = BACKGROUND
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        prune_background(map);
+    }
 }
 
 /// Check on, read more from, or kill a background process by handle.
@@ -669,50 +685,26 @@ fn failure(message: &str) -> ToolOutput {
 mod tests {
     use super::*;
 
-    fn fake(exit: Option<ExitOutcome>) -> Arc<BackgroundProcess> {
+    fn finished(sequence: u64) -> Arc<BackgroundProcess> {
         Arc::new(BackgroundProcess {
             pid: 0,
-            command: "true".into(),
+            command: String::new(),
             output: Mutex::new(Vec::new()),
             total_bytes: Mutex::new(0),
-            exit: Mutex::new(exit),
-            registered_at: Instant::now(),
+            exit: Mutex::new(Some(ExitOutcome::Exited(0))),
+            finished_sequence: AtomicU64::new(sequence),
         })
     }
 
-    /// This module is the only test touching the process-wide `BACKGROUND`
-    /// static, so a fresh map at the start of the one test that uses it is
-    /// safe rather than racing another test's handles.
     #[test]
-    fn registering_past_the_cap_evicts_finished_handles_but_never_a_running_one() {
-        *BACKGROUND.lock().unwrap_or_else(|e| e.into_inner()) = None;
-
-        for i in 0..MAX_BACKGROUND_HANDLES {
-            register_background(format!("finished-{i}"), fake(Some(ExitOutcome::Exited(0))));
+    fn finished_background_records_are_bounded() {
+        let mut processes = HashMap::new();
+        for sequence in 1..=(BACKGROUND_FINISHED_RETAIN as u64 + 2) {
+            processes.insert(sequence.to_string(), finished(sequence));
         }
-        register_background("still-running".into(), fake(None));
-        // One more finished registration should evict the oldest finished
-        // entry to make room, not the still-running one.
-        register_background("finished-new".into(), fake(Some(ExitOutcome::Exited(0))));
-
-        let guard = BACKGROUND.lock().unwrap_or_else(|e| e.into_inner());
-        let map = guard.as_ref().expect("populated above");
-        assert!(
-            map.len() <= MAX_BACKGROUND_HANDLES + 1,
-            "map grew unbounded: {} entries",
-            map.len()
-        );
-        assert!(
-            map.contains_key("still-running"),
-            "a still-running handle must never be evicted"
-        );
-        assert!(
-            !map.contains_key("finished-0"),
-            "the oldest finished handle should have been evicted to make room"
-        );
-        assert!(
-            map.contains_key("finished-new"),
-            "the newly registered handle must be present"
-        );
+        prune_background(&mut processes);
+        assert_eq!(processes.len(), BACKGROUND_FINISHED_RETAIN);
+        assert!(!processes.contains_key("1"));
+        assert!(processes.contains_key(&(BACKGROUND_FINISHED_RETAIN as u64 + 2).to_string()));
     }
 }

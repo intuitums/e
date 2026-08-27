@@ -38,7 +38,7 @@ fn settings_write_preserves_unknown_keys() {
     )
     .unwrap();
 
-    e::core::config::settings::set_string("effort", "low");
+    e::core::config::settings::set_string("effort", "low").unwrap();
 
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(h.join("settings.json")).unwrap()).unwrap();
@@ -98,7 +98,8 @@ fn future_configuration_formats_are_never_downgraded() {
 
     let settings_path = h.join("settings.json");
     std::fs::write(&settings_path, future).unwrap();
-    e::core::config::settings::set_string("theme", "light");
+    let settings_error = e::core::config::settings::set_string("theme", "light").unwrap_err();
+    assert_eq!(settings_error.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(std::fs::read_to_string(&settings_path).unwrap(), future);
 
     let auth_path = h.join("auth.json");
@@ -124,7 +125,7 @@ fn a_corrupt_file_is_quarantined_not_reset() {
     let h = home("corrupt");
     std::fs::write(h.join("settings.json"), "{ this is not json").unwrap();
 
-    e::core::config::settings::set_string("theme", "light");
+    e::core::config::settings::set_string("theme", "light").unwrap();
 
     // The write succeeded on a fresh object…
     let after: serde_json::Value =
@@ -182,7 +183,7 @@ fn quarantine_failure_preserves_the_corrupt_source() {
     // aside cannot succeed, so the write must abort rather than proceed.
     std::fs::create_dir_all(h.join("settings.json")).unwrap();
 
-    e::core::config::settings::set_string("theme", "light");
+    e::core::config::settings::set_string("theme", "light").unwrap_err();
 
     // The corrupt "file" (our directory) was never replaced by a real file,
     // and no fresh settings.json appeared beside it.

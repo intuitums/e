@@ -23,8 +23,8 @@ pub fn get_string(key: &str) -> Option<String> {
 
 /// Set one key. Every other key on disk — known or not — is preserved, the
 /// write is atomic, and a corrupt file is quarantined rather than reset.
-pub fn set_string(key: &str, val: &str) {
-    let _ = crate::core::config::store::update_versioned(
+pub fn set_string(key: &str, val: &str) -> std::io::Result<()> {
+    crate::core::config::store::update_versioned(
         &home::settings_path(),
         0o644,
         FORMAT_VERSION,
@@ -32,7 +32,7 @@ pub fn set_string(key: &str, val: &str) {
             stamp_format(obj);
             obj.insert(key.to_string(), Value::String(val.to_string()));
         },
-    );
+    )
 }
 
 /// A string-list key: absent means "no value set" (for scoped models, that
@@ -49,8 +49,8 @@ pub fn get_strings(key: &str) -> Option<Vec<String>> {
         })
 }
 
-pub fn set_strings(key: &str, values: &[String]) {
-    let _ = crate::core::config::store::update_versioned(
+pub fn set_strings(key: &str, values: &[String]) -> std::io::Result<()> {
+    crate::core::config::store::update_versioned(
         &home::settings_path(),
         0o644,
         FORMAT_VERSION,
@@ -61,12 +61,12 @@ pub fn set_strings(key: &str, values: &[String]) {
                 Value::Array(values.iter().map(|v| Value::String(v.clone())).collect()),
             );
         },
-    );
+    )
 }
 
 /// Remove a key entirely; every other key survives, as always.
-pub fn remove(key: &str) {
-    let _ = crate::core::config::store::update_versioned(
+pub fn remove(key: &str) -> std::io::Result<()> {
+    crate::core::config::store::update_versioned(
         &home::settings_path(),
         0o644,
         FORMAT_VERSION,
@@ -74,7 +74,7 @@ pub fn remove(key: &str) {
             stamp_format(obj);
             obj.remove(key);
         },
-    );
+    )
 }
 
 /// The whole `extensions` object from settings — each entry namespaced by
@@ -105,12 +105,12 @@ impl Setting {
             .unwrap_or_else(|| self.default.clone())
     }
     /// Advance to the next option and persist it.
-    pub fn cycle(&self, dir: i32) {
+    pub fn cycle(&self, dir: i32) -> std::io::Result<()> {
         let cur = self.current();
         let idx = self.options.iter().position(|o| *o == cur).unwrap_or(0) as i32;
         let n = self.options.len().max(1) as i32;
         let next = &self.options[(((idx + dir) % n + n) % n) as usize];
-        set_string(&self.key, next);
+        set_string(&self.key, next)
     }
 }
 

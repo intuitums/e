@@ -1,6 +1,7 @@
 //! Filesystem tools: read, write, grep.
 
 use serde_json::{json, Value};
+use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
 use super::{resolve, schema_object, truncate, truncate_with_notice, ToolOutcome, ToolOutput};
@@ -49,7 +50,7 @@ pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
     let mut stable = None;
     for _ in 0..2 {
         let before = super::file_stamp(&full);
-        let text = match std::fs::read_to_string(&full) {
+        let text = match read_window(&full, args["offset"].as_u64(), args["limit"].as_u64()) {
             Ok(t) => t,
             Err(e) => return err(format!("read {path}: {e}")),
         };
@@ -65,21 +66,110 @@ pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
         ));
     };
     super::note_seen_stamp(&full, stamp);
-    let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
-    let limit = args["limit"].as_u64().map(|n| n as usize);
-    let lines: Vec<&str> = text.lines().collect();
-    let start = offset - 1;
-    // Numbered lines: the model can quote "line 42" from compiler output
-    // straight back at the file, and a windowed read says where it sits.
-    let slice: Vec<String> = lines
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(limit.unwrap_or(usize::MAX))
-        .map(|(i, line)| format!("{}\t{}", i + 1, line))
-        .collect();
-    let count = slice.len();
-    ok(truncate(slice.join("\n")), format!("{count} lines"))
+    let count = text.lines().count();
+    ok(truncate(text), format!("{count} lines"))
+}
+
+/// A line-oriented tool must never allocate an arbitrarily long input line.
+/// The viewer/output cap is 32 KiB, so accepting more than twice that from
+/// one line cannot improve the result and turns a hostile file into an OOM.
+const MAX_LINE_BYTES: usize = 64 * 1024;
+
+fn bounded_line<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let end = available.iter().position(|byte| *byte == b'\n');
+        let take = end.map(|index| index + 1).unwrap_or(available.len());
+        if bytes.len().saturating_add(take) > MAX_LINE_BYTES {
+            reader.consume(take);
+            // Leave the reader at the start of the next physical line so a
+            // caller that keeps scanning (grep) can move past an oversized
+            // one instead of aborting the whole file. Bounded: we never hold
+            // more than the current buffer chunk.
+            drain_line_remainder(reader);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("line exceeds {MAX_LINE_BYTES} bytes"),
+            ));
+        }
+        bytes.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if end.is_some() {
+            break;
+        }
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "file is not valid UTF-8"))
+}
+
+/// Discard the rest of the current physical line (through the next `\n`, or
+/// EOF) without allocating it, so a caller can resume scanning later lines
+/// after an oversized one. Reads in fixed chunks; never retains more than one.
+fn drain_line_remainder<R: BufRead>(reader: &mut R) {
+    loop {
+        // Capture plain counts so the `fill_buf` borrow ends before `consume`.
+        let (consume, found_newline) = match reader.fill_buf() {
+            Ok(a) => {
+                if a.is_empty() {
+                    return;
+                }
+                match a.iter().position(|b| *b == b'\n') {
+                    Some(pos) => (pos + 1, true),
+                    None => (a.len(), false),
+                }
+            }
+            Err(_) => return,
+        };
+        reader.consume(consume);
+        if found_newline {
+            return;
+        }
+    }
+}
+
+fn read_window(path: &Path, offset: Option<u64>, limit: Option<u64>) -> io::Result<String> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let first = offset.unwrap_or(1).max(1) as usize;
+    let limit = limit.map(|n| n as usize).unwrap_or(usize::MAX);
+    let mut output = String::new();
+    let mut line_number = 0usize;
+    let mut returned = 0usize;
+    loop {
+        // Stop before reading the next line once the window is full: a line
+        // past `limit` (or the 32 KiB output cap) may be oversized or invalid
+        // UTF-8, and reading it would turn a valid window into an error.
+        if returned >= limit || output.len() > 32 * 1024 {
+            break;
+        }
+        let Some(line) = bounded_line(&mut reader)? else {
+            break;
+        };
+        line_number += 1;
+        if line_number < first {
+            continue;
+        }
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&format!("{line_number}\t{line}"));
+        returned += 1;
+    }
+    Ok(output)
 }
 
 pub fn write_schema() -> Value {
@@ -98,7 +188,9 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
     let Some(path) = args["path"].as_str() else {
         return err("write: missing path".into());
     };
-    let content = args["content"].as_str().unwrap_or("");
+    let Some(content) = args["content"].as_str() else {
+        return err("write: content must be a string".into());
+    };
     let full = resolve(cwd, path);
     if let Err(output) = super::require_regular_file(&full, "write", path) {
         return output;
@@ -109,51 +201,103 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
     if let Err(output) = super::check_fresh(&full, "write", path) {
         return output;
     }
-    let before = std::fs::read_to_string(&full).unwrap_or_default();
+    let before_lines = match count_text_lines(&full) {
+        Ok(lines) => lines,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(error) => return err(format!("write {path}: {error}")),
+    };
     if let Some(parent) = full.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            return err(format!("write {path}: {error}"));
+        }
     }
     match std::fs::write(&full, content) {
         Ok(()) => {
             super::note_seen(&full);
-            let additions = if before == content {
-                0
-            } else {
-                content.lines().count()
-            };
-            let deletions = if before.is_empty() || before == content {
-                0
-            } else {
-                before.lines().count()
-            };
+            let additions = content.lines().count();
+            let deletions = before_lines;
             // The model wrote this content one message ago — echoing it back
             // would bill the whole file into the context a second time (and
             // again on every later request). The full diff goes to the
             // detail viewer instead.
-            let mut detail = format!("wrote {path}");
-            if before != content {
-                if !before.is_empty() {
-                    detail.push_str("\n--- before\n");
-                    for line in before.lines() {
-                        detail.push_str(&format!("-{line}\n"));
-                    }
-                }
-                if !content.is_empty() {
-                    detail.push_str("+++ after\n");
-                    for line in content.lines() {
-                        detail.push_str(&format!("+{line}\n"));
-                    }
-                }
-            }
+            let detail = format!(
+                "wrote {path}\n[replaced {before_lines} line(s) with {} line(s)]",
+                content.lines().count()
+            );
             ToolOutput {
                 content: format!("wrote {path} ({} lines)", content.lines().count()),
                 outcome: ToolOutcome::Completed,
                 summary: format!("+{additions} -{deletions}"),
-                display: Some(truncate(detail.trim_end().to_string())),
+                display: Some(detail),
             }
         }
         Err(e) => err(format!("write {path}: {e}")),
     }
+}
+
+fn count_text_lines(path: &Path) -> io::Result<usize> {
+    // Counting lines for the write summary must not enforce the viewer's
+    // per-line cap: a valid file with long lines (minified JS/JSON) is still
+    // overwritable, and bounding the read here would wrongly reject those
+    // writes. We still refuse non-UTF-8 files (they are binary, not text to
+    // overwrite) — validated incrementally so a long line is never held in
+    // memory, matching bounded_line's contract without its length limit.
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut newlines = 0usize;
+    let mut ends_with_newline = true;
+    let mut saw_any = false;
+    let mut pending = 0u8; // continuation bytes still expected for a lead
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        saw_any = true;
+        for &byte in &buffer[..n] {
+            if byte == b'\n' {
+                newlines += 1;
+                ends_with_newline = true;
+            } else {
+                ends_with_newline = false;
+            }
+            if pending > 0 {
+                if byte & 0xC0 != 0x80 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "file is not valid UTF-8",
+                    ));
+                }
+                pending -= 1;
+            } else if byte >= 0x80 {
+                pending = match byte {
+                    0xC2..=0xDF => 1,
+                    0xE0..=0xEF => 2,
+                    0xF0..=0xF4 => 3,
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "file is not valid UTF-8",
+                        ))
+                    }
+                };
+            }
+        }
+    }
+    if pending > 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file is not valid UTF-8",
+        ));
+    }
+    // A trailing segment without a newline still counts as one line, matching
+    // bounded_line's "last partial line counts" semantics.
+    Ok(if saw_any && !ends_with_newline {
+        newlines + 1
+    } else {
+        newlines
+    })
 }
 
 pub fn grep_schema() -> Value {
@@ -286,24 +430,49 @@ fn search_file(
     {
         return;
     }
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(file) = std::fs::File::open(path) else {
         return;
     };
     let rel = path.strip_prefix(cwd).unwrap_or(path).display().to_string();
-    for (n, line) in text.lines().enumerate() {
-        if re.is_match(line) {
-            hits.push(format!("{rel}:{}: {}", n + 1, line.trim()));
-            *count += 1;
-            if *count >= MATCH_CAP {
-                return;
+    let mut reader = BufReader::new(file);
+    let mut n = 0usize;
+    loop {
+        match bounded_line(&mut reader) {
+            Ok(Some(line)) => {
+                n += 1;
+                if re.is_match(&line) {
+                    let line = truncate_match_line(line.trim());
+                    hits.push(format!("{rel}:{n}: {line}"));
+                    *count += 1;
+                    if *count >= MATCH_CAP {
+                        return;
+                    }
+                }
             }
+            Ok(None) => break,
+            // Oversized or non-UTF-8 line: skip it (bounded_line advanced past
+            // it) and keep scanning later lines instead of dropping them.
+            Err(_) => n += 1,
         }
     }
 }
 
+fn truncate_match_line(line: &str) -> &str {
+    const MAX_MATCH_LINE_BYTES: usize = 4096;
+    if line.len() <= MAX_MATCH_LINE_BYTES {
+        return line;
+    }
+    let mut end = MAX_MATCH_LINE_BYTES;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line[..end]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::glob_regex;
+    use super::{glob_regex, write};
+    use serde_json::json;
 
     #[test]
     fn glob_semantics() {
@@ -315,5 +484,29 @@ mod tests {
         assert!(m("a?c.txt", "abc.txt"));
         assert!(!m("a?c.txt", "a/c.txt"));
         assert!(m("**", "any/depth/at/all"));
+    }
+
+    #[test]
+    fn write_rejects_missing_content_without_overwriting() {
+        let dir = std::env::temp_dir().join(format!("e-fs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("kept.txt");
+        std::fs::write(&file, "keep me").unwrap();
+        let output = write(&json!({"path": "kept.txt"}), &dir);
+        assert!(output.is_error());
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "keep me");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_refuses_non_utf8_existing_file() {
+        let dir = std::env::temp_dir().join(format!("e-fs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("binary");
+        std::fs::write(&file, [0xff, 0x00]).unwrap();
+        let output = write(&json!({"path": "binary", "content": "replacement"}), &dir);
+        assert!(output.is_error());
+        assert_eq!(std::fs::read(file).unwrap(), vec![0xff, 0x00]);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -68,8 +68,8 @@ needs containment. Read the complete [security policy](SECURITY.md) before
 using e on untrusted repositories.
 
 `e doctor` reports versions, paths, terminal capabilities, configuration
-formats, extension health, and provider state. It makes no network requests,
-and configuration values and tokens are never printed. The legacy
+formats, and provider state. It does not launch extensions, makes no network
+requests, and configuration values and tokens are never printed. The legacy
 `--no-network` spelling remains accepted for script compatibility.
 
 ## Compatibility

@@ -38,10 +38,11 @@ impl SettingsPanel {
 
     /// Change the selected setting's value; persisted immediately. Reloads the
     /// option sets so a value that adds choices (never today) stays coherent.
-    pub fn change(&mut self, dir: i32) {
+    pub fn change(&mut self, dir: i32) -> std::io::Result<()> {
         if let Some(setting) = self.settings.get(self.selected) {
-            setting.cycle(dir);
+            setting.cycle(dir)?;
         }
+        Ok(())
     }
 
     pub fn render(&self, theme: &Theme, width: usize) -> Vec<String> {

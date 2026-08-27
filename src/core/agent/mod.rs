@@ -413,17 +413,20 @@ impl Agent {
     }
     /// Advance to the model's next effort level and persist it. None when
     /// the model has no reasoning knob.
-    pub fn cycle_effort(&self) -> Option<String> {
+    pub fn cycle_effort(&self) -> Result<Option<String>, std::io::Error> {
         if self.options.effort_override.is_some() {
-            return self.effort();
+            return Ok(self.effort());
         }
         let levels = self.efforts();
         if levels.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let next = next_effort(&levels, self.effort()?.as_str());
-        crate::core::config::settings::set_string("effort", &next);
-        Some(next)
+        let Some(current) = self.effort() else {
+            return Ok(None);
+        };
+        let next = next_effort(&levels, current.as_str());
+        crate::core::config::settings::set_string("effort", &next)?;
+        Ok(Some(next))
     }
     pub fn history_snapshot(&self) -> Vec<ChatMessage> {
         self.history

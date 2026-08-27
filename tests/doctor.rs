@@ -76,7 +76,7 @@ fn doctor_cli_emits_the_report_and_rejects_unknown_flags() {
 
 #[cfg(unix)]
 #[test]
-fn doctor_remains_available_when_an_extension_startup_hook_is_broken() {
+fn doctor_never_launches_extensions() {
     use std::os::unix::fs::PermissionsExt;
 
     let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
@@ -91,6 +91,7 @@ fn doctor_remains_available_when_an_extension_startup_hook_is_broken() {
     std::fs::write(
         &extension,
         r##"#!/bin/sh
+touch "$E_HOME/extension-ran"
 IFS= read -r initialize
 printf '%s\n' '{"id":1000000,"result":{"name":"broken-startup","version":"1","hooks":["startup"]}}'
 while IFS= read -r line; do
@@ -111,8 +112,8 @@ done
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("broken-startup: version 1, running"));
-    assert!(!stdout.contains("broken on purpose"));
+    assert!(stdout.contains("extensions: 0 active"));
+    assert!(!home.join("extension-ran").exists());
 
     let _ = std::fs::remove_dir_all(home);
 }

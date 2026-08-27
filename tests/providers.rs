@@ -1524,9 +1524,27 @@ fn cycle_pool_follows_the_scope() {
         "anthropic/claude-fable-5".into(),
         "xai/grok-4.6".into(),
         "openai/gpt-5.5".into(),
-    ]);
+    ])
+    .unwrap();
     let pool: Vec<String> = catalog::cycle_pool().iter().map(catalog::slug).collect();
     assert_eq!(pool, vec!["xai/grok-4.6", "anthropic/claude-fable-5"]);
+}
+
+#[test]
+fn malformed_models_configuration_is_reported_without_panicking() {
+    let _lock = env_lock();
+    clear_env_keys();
+    let home = Home::new("invalid-models-config");
+    home.write(
+        "models.json",
+        r#"{"providers":{"anthropic":{"api":"not-a-dialect"},"custom":{"base_url":"https://example.invalid","models":[{"id":"test","thinking":"mystery"}]}}}"#,
+    );
+
+    let catalog = catalog::catalog();
+    assert!(catalog.iter().any(|model| model.provider == "anthropic"));
+    let warnings = catalog::config_warnings().join("\n");
+    assert!(warnings.contains("unknown api dialect `not-a-dialect`"));
+    assert!(warnings.contains("unknown thinking mode `mystery`"));
 }
 
 #[test]

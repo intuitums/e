@@ -107,20 +107,28 @@ impl App {
     /// Space on the scoped picker: reference toggle semantics — no scope yet
     /// means the first toggle starts a scope of exactly that model.
     pub(super) fn toggle_scoped(&mut self) {
-        let Some(menu) = &mut self.menu else { return };
-        let Some(slug) = menu.current().map(|i| i.value.clone()) else {
+        let Some(slug) = self
+            .menu
+            .as_ref()
+            .and_then(|menu| menu.current().map(|item| item.value.clone()))
+        else {
             return;
         };
         match model::scope() {
             None => {
-                model::set_scope(std::slice::from_ref(&slug));
-                menu.for_each_item(|item| {
-                    item.meta = if item.value == slug {
-                        "in scope".into()
-                    } else {
-                        String::new()
-                    };
-                });
+                if let Err(error) = model::set_scope(std::slice::from_ref(&slug)) {
+                    self.notice(format!("could not save model scope: {error}"));
+                    return;
+                }
+                if let Some(menu) = &mut self.menu {
+                    menu.for_each_item(|item| {
+                        item.meta = if item.value == slug {
+                            "in scope".into()
+                        } else {
+                            String::new()
+                        };
+                    });
+                }
             }
             Some(mut ids) => {
                 let meta = if let Some(pos) = ids.iter().position(|id| *id == slug) {
@@ -130,10 +138,13 @@ impl App {
                     ids.push(slug.clone());
                     "in scope"
                 };
-                if let Some(item) = menu.current_mut() {
+                if let Err(error) = model::set_scope(&ids) {
+                    self.notice(format!("could not save model scope: {error}"));
+                    return;
+                }
+                if let Some(item) = self.menu.as_mut().and_then(|menu| menu.current_mut()) {
                     item.meta = meta.into();
                 }
-                model::set_scope(&ids);
             }
         }
     }
@@ -313,7 +324,10 @@ impl App {
             }
             MenuKind::Models => {
                 if let Some(found) = model::resolve(&item.value) {
-                    persist_model(&found);
+                    if let Err(error) = persist_model(&found) {
+                        self.notice(format!("could not save model choice: {error}"));
+                        return true;
+                    }
                     self.notice(format!("model set to {}", model::slug(&found)));
                     self.agent.model = found;
                     self.refresh_status_cache();

@@ -683,7 +683,13 @@ fn xai_credential(
     Ok(crate::core::auth::Credential::OAuth {
         access,
         refresh,
-        expires: crate::core::auth::now_ms() + lifetime * 1000 - XAI_REFRESH_SKEW_MS,
+        // Short-lived test/dev tokens are valid too. Saturating arithmetic
+        // keeps a smaller-than-skew lifetime from wrapping into an expiry
+        // thousands of years in the future; use `now` to refresh it promptly.
+        expires: crate::core::auth::now_ms()
+            .saturating_add(lifetime.saturating_mul(1000))
+            .saturating_sub(XAI_REFRESH_SKEW_MS)
+            .max(crate::core::auth::now_ms()),
         account_id: None,
     })
 }
@@ -809,5 +815,24 @@ mod tests {
         assert!(error.contains("refresh succeeded"));
         assert!(error.contains("saving refreshed credentials failed"));
         assert!(error.contains("Permission denied") || error.contains("read-only"));
+    }
+
+    #[test]
+    fn short_lived_xai_token_expires_now_instead_of_wrapping() {
+        let before = crate::core::auth::now_ms();
+        let credential = super::xai_credential(
+            &serde_json::json!({
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_in": 1
+            }),
+            None,
+        )
+        .unwrap();
+        let after = crate::core::auth::now_ms();
+        let super::Credential::OAuth { expires, .. } = credential else {
+            panic!("xAI returns OAuth credentials");
+        };
+        assert!((before..=after).contains(&expires));
     }
 }
