@@ -13,6 +13,9 @@ fn version_comparison() {
     assert!(!is_newer("v0.4.0", "0.4.0"));
     assert!(!is_newer("0.3.9", "0.4.0"));
     assert!(!is_newer("garbage", "0.4.0"));
+    // A code-named (non-SemVer) build is never newer than a release, so it
+    // never auto-updates over itself.
+    assert!(!is_newer("v9.9.9", "dogfood"));
 }
 
 fn serve_release(files: Vec<(String, Vec<u8>)>) -> (String, std::thread::JoinHandle<()>) {

@@ -1,6 +1,8 @@
 [package]
 name = "e"
-version = "0.4.0-dev"
+# Cargo requires a valid SemVer here, but the version users see is the
+# `dogfood` codename in src/lib.rs — e is unversioned while we dogfood it.
+version = "0.0.0"
 edition = "2021"
 license = "MIT"
 description = "A TUI for coding agents"

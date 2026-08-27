@@ -6,4 +6,8 @@
 pub mod core;
 pub mod tui;
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The build's user-facing identity. While we dogfood, that's the `dogfood`
+/// codename rather than a version number — when e ships for real this becomes
+/// the released version. Cargo's manifest `version` stays a placeholder
+/// because Cargo requires valid SemVer there.
+pub const VERSION: &str = "dogfood";

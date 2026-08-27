@@ -20,7 +20,7 @@ Extensions can:
 e → extension, requests (each carries an `id` to answer with):
 
 ```
-{"id":1,"method":"initialize","params":{"protocol":1,"e_version":"0.4.0-dev","cwd":"/path","extensions_config":{…}}}
+{"id":1,"method":"initialize","params":{"protocol":1,"e_version":"dogfood","cwd":"/path","extensions_config":{…}}}
 {"id":2,"method":"hook.startup","params":{"cwd":"/path","argv":["--worktree","feature"],"flags":{"worktree":"feature"}}}
 {"id":3,"method":"tool_call","params":{"name":"greet","arguments":{...}}}
 {"id":4,"method":"command","params":{"name":"ping","args":"rest of the line"}}

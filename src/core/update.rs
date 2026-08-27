@@ -46,7 +46,19 @@ fn parts(version: &str) -> [u64; 3] {
     out
 }
 
+pub fn is_release_version(v: &str) -> bool {
+    let v = v.trim_start_matches('v');
+    let mut segs = v.split('.');
+    let major = segs.next().is_some_and(|s| s.parse::<u64>().is_ok());
+    let minor = segs.next().is_some_and(|s| s.parse::<u64>().is_ok());
+    major && minor
+}
+
 pub fn is_newer(candidate: &str, current: &str) -> bool {
+    // A code-named/dev build never rolls itself forward to a release.
+    if !is_release_version(current) {
+        return false;
+    }
     parts(candidate) > parts(current)
 }
 
@@ -149,6 +161,11 @@ async fn fetch(url: &str) -> Result<Vec<u8>, String> {
 /// The whole flow for the running binary: check, install if newer. Ok(None)
 /// means already current (or not applicable).
 pub async fn self_update() -> Result<Option<String>, String> {
+    // Dogfood builds carry a non-SemVer codename; don't auto-replace them
+    // with a published release.
+    if !is_release_version(crate::VERSION) {
+        return Ok(None);
+    }
     let tag = latest_tag().await?;
     if !is_newer(&tag, crate::VERSION) {
         return Ok(None);
