@@ -1391,10 +1391,12 @@ pub async fn run(
     }
 
     // Raw mode first so the frame loop can take the terminal over. Theme
-    // detection reads COLORFGBG only — no OSC 11 stdin probe, which would
-    // race the reply against startup keystrokes (audit #93). The guard
-    // exists before any further mode changes, so every exit path —
-    // including `?` returns below — restores all of them.
+    // detection now queries the terminal (OSC 11 background color, then
+    // COLORFGBG) so `auto` follows the real terminal theme instead of
+    // defaulting to dark. The probe is timeout-bounded and runs here, where
+    // the TUI owns the terminal reader, so it can't block startup or swallow
+    // keystrokes (audit #93). The guard exists before any further mode
+    // changes, so every exit path restores them.
     terminal::enable_raw_mode()?;
     let _guard = TerminalGuard;
     execute!(
@@ -1404,10 +1406,9 @@ pub async fn run(
         // for shift+enter and multi-line entry is unreachable.
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
-    // COLORFGBG-only detection: nothing is read from stdin, so there are no
-    // probe-window keystrokes to salvage (audit #93).
-    let detected = crate::tui::background::detect_light();
-    let detected = detected.unwrap_or(false);
+    // detect_light() probes the terminal background over OSC 11 (short
+    // timeout) and falls back to COLORFGBG, then dark.
+    let detected = crate::tui::background::detect_light().unwrap_or(false);
     let theme = crate::tui::theme::resolve(&crate::core::config::settings::theme(), detected);
     let keymap = crate::core::config::keybindings::load();
 
