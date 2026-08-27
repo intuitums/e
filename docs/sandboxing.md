@@ -55,11 +55,10 @@ For an actual boundary, isolate the process:
 Hand-rolled sandbox flags (bwrap's bind-mount list, a seccomp filter, a
 `sandbox-exec` profile) are easy to get subtly wrong in a way that *looks*
 isolated but isn't — a missing `--unshare-net`, a bind mount that's
-writable when it should be read-only. That risk is why pi's own sandbox
-example (`packages/coding-agent/examples/extensions/sandbox/`) doesn't
-hand-roll bwrap or sandbox-exec calls either — it wraps
-`@anthropic-ai/sandbox-runtime`, a maintained package, rather than
-reimplementing the flags. A future `docs/extensions/sandbox.mjs` should do
-the analogous thing: wrap a maintained sandboxing tool and fail loudly
-(refuse the call) when that tool isn't installed, never fall back to
-running the command unsandboxed.
+writable when it should be read-only. Getting that right for real is its
+own project: `thule` is the planned first-party answer, built to give e a
+real execution boundary directly instead of leaving every user to wrap
+`bash` themselves. Until it lands, a future `docs/extensions/sandbox.mjs`
+built on the `tool_call`-override mechanism above should wrap a maintained
+sandboxing tool and fail loudly (refuse the call) when that tool isn't
+installed, never fall back to running the command unsandboxed.

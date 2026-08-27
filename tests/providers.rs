@@ -535,6 +535,45 @@ async fn each_dialect_streams_text_tools_and_usage() {
     }
 }
 
+// A nameless tool_use block (name: "") must not open a tool-call lifecycle:
+// Anthropic names the block up front, so the start can be refused there
+// instead of leaving a dangling ToolCallStart with no matching ToolCallEnd.
+// The consumer relies on start/end balance (see collect_stream's asserts),
+// and a nameless call is unrunnable anyway.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn anthropic_nameless_tool_use_opens_no_lifecycle() {
+    let _lock = env_lock();
+    let sse = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":0}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu_bad\",\"name\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"x\\\":1}\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu_good\",\"name\":\"read\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let (port, server) = serve_sse(&[sse]);
+    let home = Home::new("anthropic-nameless");
+    home.auth(r#"{"anthropic":{"key":"sk-ant-test"}}"#);
+    let request = Request {
+        model: test_model("anthropic", port, Api::Anthropic),
+        system: "sys".into(),
+        messages: history_messages(&History::AnthropicToolLoop),
+        effort: Some("high".into()),
+        tools: vec![read_tool()],
+    };
+    let (_text, _reasoning, calls, _usage, _finish) = collect_stream(request).await;
+    // collect_stream already panics if a start lacks an end; this pins that
+    // the nameless block emitted nothing while the named one survived.
+    assert_eq!(calls.len(), 1, "only the named tool_use should be emitted");
+    assert_eq!(calls[0].id, "tu_good");
+    server.join().unwrap();
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn each_dialect_translates_the_same_image_message() {

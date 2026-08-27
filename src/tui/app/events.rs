@@ -54,14 +54,7 @@ impl App {
                     // still goes to the model's own history in core.)
                     s.text
                         .push_str(&crate::core::tools::sanitize_display(&delta));
-                    let idx = match s.block {
-                        Some(idx) => idx,
-                        None => {
-                            let idx = self.transcript.push(Block::new(Kind::Assistant, ""));
-                            s.block = Some(idx);
-                            idx
-                        }
-                    };
+                    let idx = open_block(&mut self.transcript, &mut s.block, Kind::Assistant);
                     let text = s.text.clone();
                     if let Some(b) = self.transcript.blocks.get_mut(idx) {
                         b.text = text;
@@ -79,14 +72,8 @@ impl App {
                     if self.show_thinking {
                         s.thinking
                             .push_str(&crate::core::tools::sanitize_display(&delta));
-                        let idx = match s.thinking_block {
-                            Some(idx) => idx,
-                            None => {
-                                let idx = self.transcript.push(Block::new(Kind::Thinking, ""));
-                                s.thinking_block = Some(idx);
-                                idx
-                            }
-                        };
+                        let idx =
+                            open_block(&mut self.transcript, &mut s.thinking_block, Kind::Thinking);
                         let text = s.thinking.clone();
                         if let Some(b) = self.transcript.blocks.get_mut(idx) {
                             b.text = text;
@@ -352,6 +339,20 @@ impl App {
                     }
                 }
             }
+        }
+    }
+}
+
+/// The currently open block for `index`, or a freshly started one — the
+/// same shape `TextDelta`'s assistant block and `ReasoningDelta`'s thinking
+/// block both need, each with a different `kind`.
+fn open_block(transcript: &mut Transcript, index: &mut Option<usize>, kind: Kind) -> usize {
+    match *index {
+        Some(idx) => idx,
+        None => {
+            let idx = transcript.push(Block::new(kind, ""));
+            *index = Some(idx);
+            idx
         }
     }
 }

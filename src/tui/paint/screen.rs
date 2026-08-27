@@ -310,9 +310,9 @@ impl Painter {
             let (lock, wake) = &*shared;
             loop {
                 let (frame, resize, shutdown) = {
-                    let mut box_ = lock.lock().unwrap();
+                    let mut box_ = lock.lock().unwrap_or_else(|e| e.into_inner());
                     while box_.frame.is_none() && box_.resize.is_none() && !box_.shutdown {
-                        box_ = wake.wait(box_).unwrap();
+                        box_ = wake.wait(box_).unwrap_or_else(|e| e.into_inner());
                     }
                     (box_.frame.take(), box_.resize.take(), box_.shutdown)
                 };
@@ -336,7 +336,7 @@ impl Painter {
 
     fn post(&self, update: impl FnOnce(&mut PaintMailbox)) {
         let (lock, wake) = &*self.mailbox;
-        update(&mut lock.lock().unwrap());
+        update(&mut lock.lock().unwrap_or_else(|e| e.into_inner()));
         wake.notify_one();
     }
 

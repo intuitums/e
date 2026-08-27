@@ -55,12 +55,30 @@ impl TurnLog {
         note_persist(&self.persist_warned, result, &self.events);
     }
 
+    /// Same as `commit`, but for the turn loop's own async task: `append`
+    /// does synchronous session-file I/O, which would otherwise block that
+    /// task's tokio worker thread on every committed message. Running it on
+    /// the blocking pool gives it the same treatment `run_tool` already
+    /// gives the built-in tools' blocking work, instead of the turn loop
+    /// being the one place that skips it.
+    async fn commit_async(&self, message: ChatMessage) {
+        let log = self.clone();
+        let result = match tokio::task::spawn_blocking(move || log.append(message)).await {
+            Ok(result) => result,
+            Err(_) => Err(std::io::Error::other("session append task panicked")),
+        };
+        note_persist(&self.persist_warned, result, &self.events);
+    }
+
     fn append(&self, message: ChatMessage) -> std::io::Result<()> {
-        self.history.lock().unwrap().push(message.clone());
+        self.history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(message.clone());
         if !self.save_session {
             return Ok(());
         }
-        let mut guard = self.session.lock().unwrap();
+        let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
             let mut created = Session::create(&self.cwd, &slug(&self.model))?;
             // A pending name applies before the first record. It is
@@ -68,7 +86,12 @@ impl TurnLog {
             // log — dropping it would make the next commit open a different
             // file and strand every message already in memory outside any
             // session.
-            if let Some(name) = self.session_name.lock().unwrap().clone() {
+            if let Some(name) = self
+                .session_name
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
                 let _ = created.set_name(&name);
             }
             *guard = Some(created);
@@ -77,6 +100,61 @@ impl TurnLog {
             Some(s) => s.append(&message),
             None => Ok(()),
         }
+    }
+
+    /// Replace history with the compaction seed plus the kept recent
+    /// messages, writing them into a fresh session file so the compacted
+    /// state is itself resumable; the old file stays untouched. The fresh
+    /// log is created before the old one is detached: if creation fails,
+    /// the old log stays attached and later turns append to it, so a crash
+    /// resumes into the complete pre-compaction conversation instead of a
+    /// new file holding only an unanchored tail. Blocking session I/O —
+    /// callers run it off the async task (`Agent::load_compacted`).
+    fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) -> bool {
+        let seed_message = ChatMessage::user(crate::core::agent::compact::seed(summary));
+        let mut fresh_history = Vec::with_capacity(kept.len() + 1);
+        fresh_history.push(seed_message.clone());
+        fresh_history.extend(kept);
+
+        if !self.save_session {
+            *self.history.lock().unwrap_or_else(|e| e.into_inner()) = fresh_history;
+            return true;
+        }
+
+        // Same lock order as `commit`: history before session.
+        let mut history_guard = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        let result = match Session::create(&self.cwd, &slug(&self.model)) {
+            Ok(mut created) => {
+                // Same best-effort pending-name application as `commit`.
+                if let Some(name) = self
+                    .session_name
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                {
+                    let _ = created.set_name(&name);
+                }
+                for message in &fresh_history {
+                    if let Err(error) = created.append(message) {
+                        // This file never became the active compacted log. Do
+                        // not leave a plausible partial session in /resume.
+                        let failed_path = created.path().to_path_buf();
+                        drop(created);
+                        let _ = std::fs::remove_file(failed_path);
+                        note_persist(&self.persist_warned, Err(error), &self.events);
+                        return false;
+                    }
+                }
+                *guard = Some(created);
+                *history_guard = fresh_history;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        };
+        let installed = result.is_ok();
+        note_persist(&self.persist_warned, result, &self.events);
+        installed
     }
 }
 
@@ -348,13 +426,19 @@ impl Agent {
         Some(next)
     }
     pub fn history_snapshot(&self) -> Vec<ChatMessage> {
-        self.history.lock().unwrap().clone()
+        self.history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
     pub fn load_history(&self, messages: Vec<ChatMessage>) {
-        *self.history.lock().unwrap() = messages;
+        *self.history.lock().unwrap_or_else(|e| e.into_inner()) = messages;
     }
     pub fn clear(&self) {
-        self.history.lock().unwrap().clear();
+        self.history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     /// The commit handle over this agent's history, session, and warning
@@ -386,51 +470,22 @@ impl Agent {
     /// fails, the old log stays attached and later turns append to it, so a
     /// crash resumes into the complete pre-compaction conversation instead
     /// of a new file holding only an unanchored tail.
-    pub fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) -> bool {
-        let seed_message = ChatMessage::user(crate::core::agent::compact::seed(summary));
-        let mut fresh_history = Vec::with_capacity(kept.len() + 1);
-        fresh_history.push(seed_message.clone());
-        fresh_history.extend(kept);
-
-        if !self.options.save_session {
-            *self.history.lock().unwrap() = fresh_history;
-            return true;
-        }
-
-        // Same lock order as `commit`: history before session.
-        let mut history_guard = self.history.lock().unwrap();
-        let mut guard = self.session.lock().unwrap();
-        let result = match Session::create(&self.cwd, &slug(&self.model)) {
-            Ok(mut created) => {
-                // Same best-effort pending-name application as `commit`.
-                if let Some(name) = self.session_name.lock().unwrap().clone() {
-                    let _ = created.set_name(&name);
-                }
-                for message in &fresh_history {
-                    if let Err(error) = created.append(message) {
-                        // This file never became the active compacted log. Do
-                        // not leave a plausible partial session in /resume.
-                        let failed_path = created.path().to_path_buf();
-                        drop(created);
-                        let _ = std::fs::remove_file(failed_path);
-                        note_persist(&self.persist_warned, Err(error), &self.events);
-                        return false;
-                    }
-                }
-                *guard = Some(created);
-                *history_guard = fresh_history;
-                Ok(())
-            }
-            Err(e) => Err(e),
-        };
-        let installed = result.is_ok();
-        note_persist(&self.persist_warned, result, &self.events);
-        installed
+    ///
+    /// Runs the file I/O on the blocking pool — this is called from the
+    /// TUI's own async event loop, and a multi-message session write must
+    /// not stall it any more than the turn loop's own commits are allowed
+    /// to (see `TurnLog::commit_async`).
+    pub async fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) -> bool {
+        let log = self.log();
+        let summary = summary.to_string();
+        tokio::task::spawn_blocking(move || log.load_compacted(&summary, kept))
+            .await
+            .unwrap_or(false)
     }
 
     /// Attach a session log; created lazily on the first message when None.
     pub fn set_session(&self, session: Option<Session>) {
-        *self.session.lock().unwrap() = if self.options.save_session {
+        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = if self.options.save_session {
             session
         } else {
             None
@@ -454,8 +509,8 @@ impl Agent {
     /// the abandoned tail survives as a sibling branch, not an overwrite.
     /// Same lock order as `commit`: history before session.
     pub fn rewind_to(&self, head: Option<String>, messages: Vec<ChatMessage>) {
-        let mut history_guard = self.history.lock().unwrap();
-        let mut session_guard = self.session.lock().unwrap();
+        let mut history_guard = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session_guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(session) = session_guard.as_mut() {
             session.set_head(head);
         }
@@ -466,13 +521,18 @@ impl Agent {
     /// when the log is created on the first message. Either way the name is
     /// idempotent — the last one wins.
     pub fn set_session_name(&self, name: String) {
-        *self.session_name.lock().unwrap() = Some(name);
+        *self.session_name.lock().unwrap_or_else(|e| e.into_inner()) = Some(name);
         if !self.options.save_session {
             return;
         }
-        let mut guard = self.session.lock().unwrap();
+        let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = guard.as_mut() {
-            if let Some(name) = self.session_name.lock().unwrap().clone() {
+            if let Some(name) = self
+                .session_name
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
                 let result = s.set_name(&name);
                 drop(guard);
                 note_persist(&self.persist_warned, result, &self.events);
@@ -483,23 +543,26 @@ impl Agent {
     /// Adopt the name a resumed session carries (or clear it for a fresh
     /// one). In-memory only — the log already holds its own name entries.
     pub fn adopt_session_name(&self, name: Option<String>) {
-        *self.session_name.lock().unwrap() = name;
+        *self.session_name.lock().unwrap_or_else(|e| e.into_inner()) = name;
     }
 
     /// Prompts waiting on the running turn (steering not yet drained).
     pub fn queued_count(&self) -> usize {
-        self.pending.lock().unwrap().len()
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// The extension-set session name, if any (the derived title still
     /// exists but the name overrides it in /resume).
     pub fn session_name(&self) -> Option<String> {
-        self.session_name.lock().unwrap().clone()
+        self.session_name
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Drop the session name — a fresh session starts unnamed.
     pub fn clear_session_name(&self) {
-        *self.session_name.lock().unwrap() = None;
+        *self.session_name.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     pub fn cwd(&self) -> PathBuf {
@@ -520,7 +583,10 @@ impl Agent {
     /// acquire a new binary payload halfway through its provider stream.
     pub fn submit_message(&mut self, message: ChatMessage, system: String) -> bool {
         if self.running {
-            self.pending.lock().unwrap().push(message.content);
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(message.content);
             return true;
         }
         self.log().commit(message);
@@ -576,13 +642,19 @@ impl Agent {
                     break false;
                 }
                 // Steer: fold any pending messages into this turn between steps.
-                let steered: Vec<String> = { pending.lock().unwrap().drain(..).collect() };
+                let steered: Vec<String> = {
+                    pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .drain(..)
+                        .collect()
+                };
                 for message in steered {
                     let _ = events.send(SessionEvent::Steered(message.clone())).await;
-                    log.commit(ChatMessage::user(message));
+                    log.commit_async(ChatMessage::user(message)).await;
                 }
 
-                let mut messages = { history.lock().unwrap().clone() };
+                let mut messages = { history.lock().unwrap_or_else(|e| e.into_inner()).clone() };
                 // Some compatible gateways omit usage entirely. Keep a local,
                 // conservative fallback so the mid-turn safety guard still
                 // exists there; a real Usage frame replaces it below. Sized
@@ -838,7 +910,7 @@ impl Agent {
                 if stream_cancelled || errored {
                     if !text.is_empty() || !calls.is_empty() {
                         for item in reasoning_items.drain(..) {
-                            log.commit(ChatMessage::reasoning(item));
+                            log.commit_async(ChatMessage::reasoning(item)).await;
                         }
                         let (note, outcome, summary) = if stream_cancelled {
                             (
@@ -854,11 +926,13 @@ impl Agent {
                             )
                         };
                         let unrun = calls.clone();
-                        log.commit(ChatMessage::assistant(std::mem::take(&mut text), calls));
+                        log.commit_async(ChatMessage::assistant(std::mem::take(&mut text), calls))
+                            .await;
                         for call in unrun {
-                            log.commit(ChatMessage::tool_result_with_meta(
+                            log.commit_async(ChatMessage::tool_result_with_meta(
                                 call.id, note, outcome, summary,
-                            ));
+                            ))
+                            .await;
                         }
                     }
                     break stream_cancelled;
@@ -875,7 +949,7 @@ impl Agent {
                     && calls.is_empty()
                     && reasoning_items.is_empty()
                     && !reasoning_streamed
-                    && pending.lock().unwrap().is_empty()
+                    && pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
                 {
                     if !empty_retried {
                         empty_retried = true;
@@ -904,16 +978,17 @@ impl Agent {
                 // Reasoning items commit first — the dialect that produced
                 // them must replay them ahead of the assistant turn.
                 for item in reasoning_items.drain(..) {
-                    log.commit(ChatMessage::reasoning(item));
+                    log.commit_async(ChatMessage::reasoning(item)).await;
                 }
                 // Commit the assistant turn (text + any calls).
-                log.commit(ChatMessage::assistant(text, calls.clone()));
+                log.commit_async(ChatMessage::assistant(text, calls.clone()))
+                    .await;
 
                 if calls.is_empty() {
                     // A plain reply would end the turn — but a message that
                     // landed mid-reply must still be delivered, so continue the
                     // turn to pick it up rather than stranding it.
-                    if !pending.lock().unwrap().is_empty() {
+                    if !pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
                         continue;
                     }
                     break false;
@@ -1015,12 +1090,13 @@ impl Agent {
                     };
                     last_context = last_context
                         .saturating_add((output.content.chars().count() as u64).div_ceil(4));
-                    log.commit(ChatMessage::tool_result_with_meta(
+                    log.commit_async(ChatMessage::tool_result_with_meta(
                         call.id,
                         output.content,
                         output.outcome,
                         output.summary,
-                    ));
+                    ))
+                    .await;
                 }
                 if cancel.load(Ordering::SeqCst) {
                     break 'turn true;
@@ -1041,7 +1117,7 @@ impl Agent {
                     // Worded so it stays true even if the compaction the
                     // frontend runs at TurnEnd fails — it must not claim a
                     // compaction that may not have happened.
-                    pending.lock().unwrap().insert(
+                    pending.lock().unwrap_or_else(|e| e.into_inner()).insert(
                         0,
                         "The turn was paused because the context ran low. Continue the task \
                          from where it left off."
@@ -1064,7 +1140,11 @@ impl Agent {
     /// worker left to drain them. The frontend must resubmit them in order.
     pub fn on_turn_end(&mut self) -> Vec<String> {
         self.running = false;
-        self.pending.lock().unwrap().drain(..).collect()
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect()
     }
 
     pub fn interrupt(&mut self) {

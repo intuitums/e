@@ -66,6 +66,34 @@ pub enum StartupAction {
     },
 }
 
+/// One flag declaration matching an argv token — see `ExtensionHost::match_flag`.
+enum FlagMatch {
+    /// Always record this: every bool form, and a string flag's `--name=value`
+    /// or unclaimed bare form (`--name` not followed by a value-shaped token).
+    Definite { name: String, value: FlagValue },
+    /// A bare string flag (`--name value`) whose next token looks like a
+    /// value. Only the first such match for one arg actually claims it —
+    /// callers that care (`parse_flags`) arbitrate that; a losing claim
+    /// still counts as "matched" (the arg is typed, just not this flag's
+    /// value) but records nothing.
+    ClaimsNext { name: String, next: String },
+}
+
+enum FlagValue {
+    Bool(bool),
+    Str(Option<String>),
+}
+
+impl FlagValue {
+    fn into_json(self) -> serde_json::Value {
+        match self {
+            FlagValue::Bool(on) => serde_json::json!(on),
+            FlagValue::Str(Some(value)) => serde_json::json!(value),
+            FlagValue::Str(None) => serde_json::Value::Null,
+        }
+    }
+}
+
 impl ExtensionHost {
     /// Discover and start every extension. `notices` receives extension
     /// `notify` messages and startup diagnostics for the transcript.
@@ -166,6 +194,71 @@ impl ExtensionHost {
             .collect()
     }
 
+    /// Whether `arg` matches one flag's declared long form. Shared by
+    /// `parse_flags` (which records the value) and `strip_typed_flags`
+    /// (which only needs to know how much of argv this flag consumes), so
+    /// the two never drift on what counts as a match. A bare string flag
+    /// (`--name value`) whose next token looks like a value returns
+    /// `ClaimsNext` rather than a value directly: whether *this particular*
+    /// match gets to claim `next` depends on whether an earlier-declared
+    /// flag already claimed it for the same arg, which only `parse_flags`
+    /// tracks (`strip_typed_flags` just needs to know the shape matched, to
+    /// skip the same number of tokens).
+    fn match_flag(
+        flag: &crate::core::api::protocol::FlagDecl,
+        arg: &str,
+        next: Option<&str>,
+    ) -> Option<FlagMatch> {
+        let long = flag.long_form()?;
+        if flag.flag_type == "string" {
+            if let Some(value) = arg.strip_prefix(&format!("{long}=")) {
+                return Some(FlagMatch::Definite {
+                    name: flag.name.clone(),
+                    value: FlagValue::Str(Some(value.to_string())),
+                });
+            }
+            if arg != long {
+                return None;
+            }
+            return Some(match next {
+                Some(next) if next != "-" && !next.starts_with('-') => FlagMatch::ClaimsNext {
+                    name: flag.name.clone(),
+                    next: next.to_string(),
+                },
+                _ => FlagMatch::Definite {
+                    name: flag.name.clone(),
+                    value: FlagValue::Str(None),
+                },
+            });
+        }
+        if arg == long {
+            return Some(FlagMatch::Definite {
+                name: flag.name.clone(),
+                value: FlagValue::Bool(true),
+            });
+        }
+        if let Some(value) = arg.strip_prefix(&format!("{long}=")) {
+            let on = matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+            return Some(FlagMatch::Definite {
+                name: flag.name.clone(),
+                value: FlagValue::Bool(on),
+            });
+        }
+        if arg
+            .strip_prefix("--no-")
+            .is_some_and(|rest| rest == flag.name)
+        {
+            return Some(FlagMatch::Definite {
+                name: flag.name.clone(),
+                value: FlagValue::Bool(false),
+            });
+        }
+        None
+    }
+
     /// Parse argv against every extension's typed flag declarations. Returns
     /// `{"name": value}` for flags that appeared — booleans as true/false,
     /// strings as their value (null when a string flag is bare or followed
@@ -179,56 +272,29 @@ impl ExtensionHost {
             if arg == "--" {
                 break;
             }
-            // Match this arg against every declared flag. A separated string
-            // value (`--name value`) is consumed at most once, whichever
-            // declaration matches first.
+            // A separated string value (`--name value`) is claimed by at
+            // most one declaration, whichever matches first; a later
+            // ClaimsNext match on the same arg (e.g. two extensions
+            // declaring the same flag) records nothing rather than
+            // overwriting it.
             let mut consumed_value = false;
-            let mut match_flag = |parsed: &mut serde_json::Map<String, serde_json::Value>| {
-                for ext in &self.extensions {
-                    for flag in &ext.manifest.flags {
-                        let Some(long) = flag.long_form() else {
-                            continue; // display-only name
-                        };
-                        if flag.flag_type == "string" {
-                            if let Some(value) = arg.strip_prefix(&format!("{long}=")) {
-                                parsed.insert(flag.name.clone(), serde_json::json!(value));
-                            } else if &long == arg {
-                                // `--name value`, or null when the next
-                                // token is another flag or absent.
-                                match argv.get(i + 1) {
-                                    Some(next) if next != "-" && !next.starts_with('-') => {
-                                        if !consumed_value {
-                                            parsed
-                                                .insert(flag.name.clone(), serde_json::json!(next));
-                                            consumed_value = true;
-                                        }
-                                    }
-                                    _ => {
-                                        parsed.insert(flag.name.clone(), serde_json::Value::Null);
-                                    }
-                                }
-                            }
-                        } else if &long == arg {
-                            parsed.insert(flag.name.clone(), serde_json::json!(true));
-                        } else if let Some(value) = arg.strip_prefix(&format!("{long}=")) {
-                            let on = matches!(
-                                value.to_ascii_lowercase().as_str(),
-                                "1" | "true" | "yes" | "on"
-                            );
-                            parsed.insert(flag.name.clone(), serde_json::json!(on));
-                        } else if let Some(rest) = arg.strip_prefix("--no-") {
-                            if rest == flag.name {
-                                parsed.insert(flag.name.clone(), serde_json::json!(false));
-                            }
+            let next = argv.get(i + 1).map(String::as_str);
+            for ext in &self.extensions {
+                for flag in &ext.manifest.flags {
+                    match Self::match_flag(flag, arg, next) {
+                        None => {}
+                        Some(FlagMatch::Definite { name, value }) => {
+                            parsed.insert(name, value.into_json());
                         }
+                        Some(FlagMatch::ClaimsNext { name, next }) if !consumed_value => {
+                            parsed.insert(name, serde_json::json!(next));
+                            consumed_value = true;
+                        }
+                        Some(FlagMatch::ClaimsNext { .. }) => {}
                     }
                 }
-            };
-            match_flag(&mut parsed);
-            if consumed_value {
-                i += 1; // skip the separated value slot
             }
-            i += 1;
+            i += 1 + usize::from(consumed_value); // + skip a claimed value slot
         }
         serde_json::Value::Object(parsed)
     }
@@ -249,27 +315,16 @@ impl ExtensionHost {
 
             let mut matched = false;
             let mut consumes_next = false;
+            let next = argv.get(i + 1).map(String::as_str);
             for ext in &self.extensions {
                 for flag in &ext.manifest.flags {
-                    let Some(long) = flag.long_form() else {
-                        continue;
-                    };
-                    if flag.flag_type == "string" {
-                        if arg == &long {
+                    match Self::match_flag(flag, arg, next) {
+                        None => {}
+                        Some(FlagMatch::Definite { .. }) => matched = true,
+                        Some(FlagMatch::ClaimsNext { .. }) => {
                             matched = true;
-                            consumes_next = argv
-                                .get(i + 1)
-                                .is_some_and(|next| next != "-" && !next.starts_with('-'));
-                        } else if arg.strip_prefix(&format!("{long}=")).is_some() {
-                            matched = true;
+                            consumes_next = true;
                         }
-                    } else if arg == &long
-                        || arg.strip_prefix(&format!("{long}=")).is_some()
-                        || arg
-                            .strip_prefix("--no-")
-                            .is_some_and(|rest| rest == flag.name)
-                    {
-                        matched = true;
                     }
                 }
             }
@@ -585,7 +640,7 @@ impl ExtensionHost {
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
         for ext in &self.extensions {
-            if let Some(child) = ext.child.lock().unwrap().as_mut() {
+            if let Some(child) = ext.child.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                 let _ = child.start_kill();
             }
         }
@@ -615,9 +670,15 @@ impl ExtensionHost {
         }
         let id = self.ids.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        ext.pending.lock().unwrap().insert(id, tx);
+        ext.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, tx);
         if let Some(progress) = progress {
-            ext.progress.lock().unwrap().insert(id, progress);
+            ext.progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id, progress);
         }
         // Whatever ends this call — response, timeout, or the caller
         // dropping the future on Esc — the pending entry goes with it: a
@@ -663,8 +724,14 @@ struct PendingGuard {
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        self.pending.lock().unwrap().remove(&self.id);
-        self.progress.lock().unwrap().remove(&self.id);
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+        self.progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
     }
 }
 
@@ -749,20 +816,38 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
         while let Some(line) = writer_rx.recv().await {
             if stdin.write_all(line.as_bytes()).await.is_err() {
                 alive_writer.store(false, Ordering::SeqCst);
-                pending_writer.lock().unwrap().clear();
-                progress_writer.lock().unwrap().clear();
+                pending_writer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
+                progress_writer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
                 break;
             }
             if stdin.write_all(b"\n").await.is_err() {
                 alive_writer.store(false, Ordering::SeqCst);
-                pending_writer.lock().unwrap().clear();
-                progress_writer.lock().unwrap().clear();
+                pending_writer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
+                progress_writer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
                 break;
             }
             if stdin.flush().await.is_err() {
                 alive_writer.store(false, Ordering::SeqCst);
-                pending_writer.lock().unwrap().clear();
-                progress_writer.lock().unwrap().clear();
+                pending_writer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
+                progress_writer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
                 break;
             }
         }
@@ -777,7 +862,11 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
         while let Ok(Some(line)) = read_bounded_line(&mut reader, MAX_EXTENSION_LINE_BYTES).await {
             match protocol::parse_incoming(&line) {
                 Some(Incoming::Response { id, result }) => {
-                    if let Some(tx) = pending_reader.lock().unwrap().remove(&id) {
+                    if let Some(tx) = pending_reader
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id)
+                    {
                         let _ = tx.send(result);
                     }
                 }
@@ -787,7 +876,11 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
                     let _ = notices.try_send(message);
                 }
                 Some(Incoming::ToolUpdate { id, stream, chunk }) => {
-                    let target = progress_reader.lock().unwrap().get(&id).cloned();
+                    let target = progress_reader
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&id)
+                        .cloned();
                     if let Some(tx) = target {
                         // Backpressure keeps progress ordered ahead of the
                         // response line that follows it on extension stdout.
@@ -800,8 +893,14 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
         alive_reader.store(false, Ordering::SeqCst);
         // Dropping the senders wakes every request through its
         // `Ok(Err(_)) => extension exited` path instead of its long timeout.
-        pending_reader.lock().unwrap().clear();
-        progress_reader.lock().unwrap().clear();
+        pending_reader
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        progress_reader
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     });
 
     // Handshake.

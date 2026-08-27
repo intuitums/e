@@ -223,11 +223,23 @@ pub async fn run(
                     let block = &value["content_block"];
                     match block["type"].as_str().unwrap_or("") {
                         "tool_use" => {
+                            // Anthropic names a tool_use block up front, so we
+                            // can refuse a nameless one here rather than let it
+                            // dangle: a call we never open needs no ToolCallEnd,
+                            // keeping the start/end lifecycle the consumer
+                            // relies on balanced. The other dialects can't do
+                            // this — their name streams in with the arguments
+                            // deltas — so they gate at the close instead.
+                            let name = block["name"].as_str().unwrap_or("").to_string();
+                            if name.is_empty() {
+                                // Skip the block; the stream keeps going.
+                                continue;
+                            }
                             open_tools.insert(
                                 index,
                                 ToolCall {
                                     id: block["id"].as_str().unwrap_or("").to_string(),
-                                    name: block["name"].as_str().unwrap_or("").to_string(),
+                                    name,
                                     arguments: String::new(),
                                     signature: None,
                                 },
@@ -285,6 +297,9 @@ pub async fn run(
                 "content_block_stop" => {
                     let index = value["index"].as_u64().unwrap_or(0) as usize;
                     if let Some(mut call) = open_tools.remove(&index) {
+                        // Only named blocks reach here: nameless tool_use
+                        // blocks are refused at content_block_start, so there
+                        // is nothing to gate on.
                         if call.arguments.is_empty() {
                             call.arguments = "{}".into();
                         }

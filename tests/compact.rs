@@ -66,7 +66,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
 
     // The seed lands as the first message of a fresh session file.
     let (agent, _rx) = Agent::new(model);
-    assert!(agent.load_compacted(&summary, history[3..].to_vec()));
+    assert!(agent.load_compacted(&summary, history[3..].to_vec()).await);
     let seeded = agent.history_snapshot();
     assert_eq!(seeded.len(), 2, "seed plus the kept tail");
     assert!(seeded[0].content.contains("Goal: fix the parser."));
@@ -195,8 +195,11 @@ fn split_never_separates_signed_thinking_from_its_assistant_turn() {
     assert!(to_summarize.len() >= 3, "the old turns were summarized");
 }
 
-#[test]
-fn failed_fresh_log_keeps_the_old_session_attached() {
+// Same as `compact_summarizes_and_seeds_a_fresh_session`: env_lock's guard
+// is deliberately held across `load_compacted`'s await.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn failed_fresh_log_keeps_the_old_session_attached() {
     // When the compaction seed's fresh log cannot be created (read-only
     // sessions dir), the old log must stay attached: later turns append to
     // the complete pre-compaction file instead of a new file holding only an
@@ -238,7 +241,11 @@ fn failed_fresh_log_keeps_the_old_session_attached() {
         return;
     }
 
-    assert!(!agent.load_compacted("Goal: continue.", vec![ChatMessage::user("recent turn")]));
+    assert!(
+        !agent
+            .load_compacted("Goal: continue.", vec![ChatMessage::user("recent turn")])
+            .await
+    );
 
     // A compaction that cannot be persisted did not happen in memory either.
     let h = agent.history_snapshot();

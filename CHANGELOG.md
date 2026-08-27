@@ -8,6 +8,24 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- Internal hardening pass, no user-visible behavior change. The turn loop's
+  session-file writes (`TurnLog::commit`, `load_compacted`) now run on the
+  blocking pool instead of inline on the async task, matching the built-in
+  tools' own `spawn_blocking` treatment. Mutex locking on shared
+  history/session/extension-request state is consistently poison-tolerant
+  (`unwrap_or_else(|e| e.into_inner())`) instead of a mix of that and bare
+  `unwrap()`, so one panic under a lock can no longer cascade into every
+  later call failing. The Anthropic stream now drops a nameless `tool_use`
+  block the same way the other three dialects already drop an empty-named
+  call. The extension host's argv flag parser and its argv-stripping pass
+  share one `match_flag` instead of two independently maintained copies of
+  the same matching rules. A finished background `bash` process's tracked
+  handle is now evicted (oldest-finished-first) once the process-lifetime
+  map passes 64 entries, instead of growing unbounded for the life of the
+  session; a still-running handle is never evicted. `docs/sandboxing.md`
+  points at `thule`, the planned first-party sandboxing project, instead of
+  a sibling project's example.
+
 - Launch and automation have one tested contract. Canonical flags keep their
   descriptive names and gain compact aliases: `--no-extensions`/`--ne`,
   `--no-save`/`--ns`, `--read-only`/`--ro`, `--no-tools`/`--nt`, plus
