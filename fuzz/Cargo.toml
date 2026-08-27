@@ -1,0 +1,36 @@
+[package]
+name = "e-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+e = { path = ".." }
+
+[[bin]]
+name = "sse"
+path = "fuzz_targets/sse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extension_protocol"
+path = "fuzz_targets/extension_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sanitize"
+path = "fuzz_targets/sanitize.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

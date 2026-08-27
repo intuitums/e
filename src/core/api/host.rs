@@ -151,6 +151,21 @@ impl ExtensionHost {
             .collect()
     }
 
+    /// Names, declared versions, and liveness only — enough for diagnostics
+    /// without exposing extension configuration or protocol messages.
+    pub fn diagnostic_status(&self) -> Vec<(String, String, bool)> {
+        self.extensions
+            .iter()
+            .map(|extension| {
+                (
+                    extension.manifest.name.clone(),
+                    extension.manifest.version.clone(),
+                    extension.alive.load(Ordering::SeqCst),
+                )
+            })
+            .collect()
+    }
+
     /// Parse argv against every extension's typed flag declarations. Returns
     /// `{"name": value}` for flags that appeared — booleans as true/false,
     /// strings as their value (null when a string flag is bare or followed

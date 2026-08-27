@@ -48,7 +48,7 @@ e rpc                 JSONL request/response protocol on stdin/stdout\n  \
 e docs [topic]        print a built-in format guide\n  \
 e update              update e to the latest release\n  \
 e auth                show sign-in status\n  \
-e doctor              print paste-safe runtime diagnostics\n  \
+e doctor [--no-network]\n                      print paste-safe, local-only runtime diagnostics\n  \
 e providers           list provider support and sign-in state\n  \
 e -v, --version"
         );
@@ -81,6 +81,65 @@ e -v, --version"
         return Ok(());
     }
     let startup_json_requested = cli::has_flag(&args, &["--json", "-j"]);
+    // Diagnostics must remain available when a startup hook is the thing
+    // being diagnosed. Extensions are initialized for health reporting, but
+    // their startup hooks do not get to intercept or relaunch these commands.
+    if let Ok(diagnostic_options) = cli::parse(args.clone()) {
+        let diagnostic_args = &diagnostic_options.positional;
+        if matches!(
+            diagnostic_args.first().map(String::as_str),
+            Some("doctor" | "providers")
+        ) {
+            let doctor = diagnostic_args.first().map(String::as_str) == Some("doctor");
+            let valid = if doctor {
+                diagnostic_args.as_slice() == ["doctor"]
+                    || diagnostic_args.as_slice() == ["doctor", "--no-network"]
+            } else {
+                diagnostic_args.as_slice() == ["providers"]
+            };
+            if !valid {
+                eprintln!(
+                    "usage: e {}",
+                    if doctor {
+                        "doctor [--no-network]"
+                    } else {
+                        "providers"
+                    }
+                );
+                host.shutdown().await;
+                std::process::exit(2);
+            }
+
+            let report = e::core::providers::diagnostics::report(&host);
+            if diagnostic_options.json {
+                let json = if doctor {
+                    serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into())
+                } else {
+                    serde_json::to_string_pretty(&report.providers).unwrap_or_else(|_| "[]".into())
+                };
+                println!("{json}");
+            } else if doctor {
+                println!("{}", e::core::providers::diagnostics::render(&report));
+            } else {
+                for provider in &report.providers {
+                    println!(
+                        "{:<16} {:<10} {:<22} auth={:<8} models={}",
+                        provider.name,
+                        provider.tier,
+                        provider.dialect,
+                        if provider.signed_in {
+                            provider.authentication.as_str()
+                        } else {
+                            "missing"
+                        },
+                        provider.models
+                    );
+                }
+            }
+            host.shutdown().await;
+            return Ok(());
+        }
+    }
     match host.startup(args).await {
         Ok(e::core::api::StartupAction::Continue(next)) => args = next,
         Ok(e::core::api::StartupAction::Relaunch { argv, request }) => {
@@ -130,44 +189,6 @@ e -v, --version"
             host.shutdown().await;
             std::process::exit(2);
         }
-    }
-    if matches!(
-        args.first().map(String::as_str),
-        Some("doctor" | "providers")
-    ) {
-        let report = e::core::providers::diagnostics::report(&host);
-        if options.json {
-            if args.first().map(String::as_str) == Some("providers") {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report.providers).unwrap_or_else(|_| "[]".into())
-                );
-            } else {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into())
-                );
-            }
-        } else if args.first().map(String::as_str) == Some("providers") {
-            for provider in &report.providers {
-                println!(
-                    "{:<16} {:<10} {:<22} auth={:<8} models={}",
-                    provider.name,
-                    provider.tier,
-                    provider.dialect,
-                    if provider.signed_in {
-                        provider.authentication.as_str()
-                    } else {
-                        "missing"
-                    },
-                    provider.models
-                );
-            }
-        } else {
-            println!("{}", e::core::providers::diagnostics::render(&report));
-        }
-        host.shutdown().await;
-        return Ok(());
     }
     if args.first().map(String::as_str) == Some("rpc") {
         return rpc(host, &options).await;

@@ -27,11 +27,13 @@ only supplies the checks that must be completed.
 Run the same checks as CI before opening a pull request:
 
 ```sh
-cargo test
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-./scripts/guard.sh
+./x check
+./x bench
 ```
+
+The repository pins its Rust toolchain in `rust-toolchain.toml`. `./x` is the
+single definition of local and CI verification; `./x test <cargo-test-args>`
+and `./x lint` provide narrower development loops.
 
 `cargo test` includes byte-level terminal rendering tests. If an intentional
 UI change alters those fixtures, make the reason clear in the change.
@@ -42,5 +44,10 @@ the guard only when the boundary itself is intentionally changing.
 
 Changes to the extension host, authentication, configuration store, provider
 wire code, and `.github/` require code-owner review.
+
+Use [REVIEW.md](REVIEW.md) for the checks specific to protocol, persistence,
+security-boundary, terminal, and release changes. Any supported-surface change
+must follow [the compatibility policy](docs/compatibility.md) and update or add
+a retained fixture.
 
 By contributing, you agree that your work is licensed under [MIT](LICENSE).

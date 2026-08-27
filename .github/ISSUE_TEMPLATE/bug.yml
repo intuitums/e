@@ -23,3 +23,11 @@ body:
       description: Output of `e --version`, and your OS.
     validations:
       required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste `e doctor --no-network` output. It is redacted by design; review it before submitting.
+      render: shell
+    validations:
+      required: false

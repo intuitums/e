@@ -1,0 +1,2 @@
+{"type":"session","id":"legacy","cwd":"/tmp/e-fixture","created":1,"model":"test/model"}
+{"type":"message","message":{"role":"user","content":"legacy session"}}

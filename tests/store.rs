@@ -6,6 +6,19 @@ use std::sync::Mutex;
 
 static LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn unversioned_configuration_fixtures_remain_json_objects() {
+    for name in ["settings-v0.json", "auth-v0.json", "trust-v0.json"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/config")
+            .join(name);
+        let object = e::core::config::store::read_object(&path)
+            .unwrap_or_else(|error| panic!("compatibility fixture {name} failed: {error}"));
+        assert!(!object.is_empty(), "compatibility fixture {name} was empty");
+        assert!(!object.contains_key("format_version"));
+    }
+}
+
 fn home(name: &str) -> PathBuf {
     let h = std::env::temp_dir().join(format!("e-store-{name}"));
     let _ = std::fs::remove_dir_all(&h);
@@ -30,6 +43,7 @@ fn settings_write_preserves_unknown_keys() {
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(h.join("settings.json")).unwrap()).unwrap();
     assert_eq!(after["effort"], "low"); // our change landed
+    assert_eq!(after["format_version"], 1); // writes declare their format
     assert_eq!(after["theme"], "dark"); // untouched
     assert_eq!(after["my_custom"]["deep"], 42); // the unknown key survived
 }
@@ -55,8 +69,53 @@ fn auth_write_preserves_an_unparseable_entry() {
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(h.join("auth.json")).unwrap()).unwrap();
     assert_eq!(after["xai"]["key"], "z"); // added
+    assert_eq!(after["format_version"], 1); // writes declare their format
     assert_eq!(after["opencode-go"]["key"], "k"); // kept
     assert_eq!(after["future-provider"]["scheme"], "totally-new"); // NOT wiped
+}
+
+#[test]
+fn trust_write_versions_the_file_and_preserves_unknown_keys() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let h = home("trust-format");
+    std::fs::write(h.join("trust.json"), r#"{"future":{"value":42}}"#).unwrap();
+    let workspace = h.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    e::core::config::trust::set(&workspace, true).unwrap();
+
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(h.join("trust.json")).unwrap()).unwrap();
+    assert_eq!(after["format_version"], 1);
+    assert_eq!(after["future"]["value"], 42);
+}
+
+#[test]
+fn future_configuration_formats_are_never_downgraded() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let h = home("future-formats");
+    let future = r#"{"format_version":999,"future":{"must":"survive"}}"#;
+
+    let settings_path = h.join("settings.json");
+    std::fs::write(&settings_path, future).unwrap();
+    e::core::config::settings::set_string("theme", "light");
+    assert_eq!(std::fs::read_to_string(&settings_path).unwrap(), future);
+
+    let auth_path = h.join("auth.json");
+    std::fs::write(&auth_path, future).unwrap();
+    let auth_error =
+        e::core::auth::set("xai", e::core::auth::Credential::ApiKey { key: "z".into() })
+            .unwrap_err();
+    assert_eq!(auth_error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read_to_string(&auth_path).unwrap(), future);
+
+    let trust_path = h.join("trust.json");
+    std::fs::write(&trust_path, future).unwrap();
+    let workspace = h.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let trust_error = e::core::config::trust::set(&workspace, true).unwrap_err();
+    assert_eq!(trust_error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read_to_string(&trust_path).unwrap(), future);
 }
 
 #[test]

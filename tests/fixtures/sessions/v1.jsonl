@@ -1,0 +1,2 @@
+{"type":"session","format_version":1,"id":"current","cwd":"/tmp/e-fixture","created":2,"model":"test/model"}
+{"type":"message","message":{"role":"user","content":"current session"}}

@@ -278,4 +278,16 @@ mod tests {
             other => panic!("unexpected incoming message: {other:?}"),
         }
     }
+
+    #[test]
+    fn released_v1_manifest_fixture_remains_readable() {
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/extensions/v1-manifest.json"
+        ));
+        let manifest: Manifest = serde_json::from_str(fixture).unwrap();
+        assert_eq!(manifest.name, "fixture");
+        assert_eq!(manifest.tools[0].name, "hello");
+        assert_eq!(manifest.flags[0].flag_type, "boolean");
+    }
 }

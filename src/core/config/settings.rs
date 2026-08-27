@@ -6,6 +6,14 @@ use serde_json::Value;
 
 use crate::core::config::home;
 
+/// Current shape of `settings.json`. Readers remain key-based and therefore
+/// accept unversioned and future files without discarding unknown settings.
+pub const FORMAT_VERSION: u32 = 1;
+
+fn stamp_format(obj: &mut serde_json::Map<String, Value>) {
+    obj.insert("format_version".into(), Value::from(FORMAT_VERSION));
+}
+
 pub fn get_string(key: &str) -> Option<String> {
     crate::core::config::store::read_object(&home::settings_path())
         .unwrap_or_default()
@@ -16,9 +24,15 @@ pub fn get_string(key: &str) -> Option<String> {
 /// Set one key. Every other key on disk — known or not — is preserved, the
 /// write is atomic, and a corrupt file is quarantined rather than reset.
 pub fn set_string(key: &str, val: &str) {
-    let _ = crate::core::config::store::update(&home::settings_path(), 0o644, |obj| {
-        obj.insert(key.to_string(), Value::String(val.to_string()));
-    });
+    let _ = crate::core::config::store::update_versioned(
+        &home::settings_path(),
+        0o644,
+        FORMAT_VERSION,
+        |obj| {
+            stamp_format(obj);
+            obj.insert(key.to_string(), Value::String(val.to_string()));
+        },
+    );
 }
 
 /// A string-list key: absent means "no value set" (for scoped models, that
@@ -36,19 +50,31 @@ pub fn get_strings(key: &str) -> Option<Vec<String>> {
 }
 
 pub fn set_strings(key: &str, values: &[String]) {
-    let _ = crate::core::config::store::update(&home::settings_path(), 0o644, |obj| {
-        obj.insert(
-            key.to_string(),
-            Value::Array(values.iter().map(|v| Value::String(v.clone())).collect()),
-        );
-    });
+    let _ = crate::core::config::store::update_versioned(
+        &home::settings_path(),
+        0o644,
+        FORMAT_VERSION,
+        |obj| {
+            stamp_format(obj);
+            obj.insert(
+                key.to_string(),
+                Value::Array(values.iter().map(|v| Value::String(v.clone())).collect()),
+            );
+        },
+    );
 }
 
 /// Remove a key entirely; every other key survives, as always.
 pub fn remove(key: &str) {
-    let _ = crate::core::config::store::update(&home::settings_path(), 0o644, |obj| {
-        obj.remove(key);
-    });
+    let _ = crate::core::config::store::update_versioned(
+        &home::settings_path(),
+        0o644,
+        FORMAT_VERSION,
+        |obj| {
+            stamp_format(obj);
+            obj.remove(key);
+        },
+    );
 }
 
 /// The whole `extensions` object from settings — each entry namespaced by

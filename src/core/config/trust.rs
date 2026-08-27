@@ -12,6 +12,8 @@ use std::path::PathBuf;
 
 use crate::core::config::{home, store};
 
+pub const FORMAT_VERSION: u32 = 1;
+
 fn file() -> std::path::PathBuf {
     home::home().join("trust.json")
 }
@@ -57,7 +59,11 @@ pub fn set(cwd: &Path, trusted: bool) -> std::io::Result<()> {
     let cwd = canonical(cwd);
     let key = key(&cwd);
     let display = cwd.to_string_lossy().into_owned();
-    store::update(&file(), 0o644, |object| {
+    store::update_versioned(&file(), 0o644, FORMAT_VERSION, |object| {
+        object.insert(
+            "format_version".into(),
+            serde_json::Value::from(FORMAT_VERSION),
+        );
         object.insert(
             key,
             serde_json::json!({ "path": display, "trusted": trusted }),

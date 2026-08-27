@@ -1,5 +1,11 @@
 # Build
 /target/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/*/*
+!/fuzz/corpus/sse/basic
+!/fuzz/corpus/extension_protocol/response
+!/fuzz/corpus/sanitize/terminal
 
 # Profiling and logs
 *.log

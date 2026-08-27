@@ -78,6 +78,15 @@ release notes are that section verbatim), open a fresh empty
   reference.md" no longer strands the model only when a human invoked it;
   and a frontmatter `description:` may span lines (block scalars, indented
   continuations) instead of silently truncating at the first newline.
+- Repository hardening: persisted sessions and configuration now declare
+  format versions backed by retained compatibility fixtures; `e doctor`
+  provides redacted, local-only diagnostics; Rust and repository
+  checks are pinned behind `./x`; CI adds property tests, scheduled fuzzing,
+  performance budgets, path triage, and downloadable PR binaries; releases
+  qualify tags and changelogs, use locked builds, smoke-test installation,
+  and publish a CycloneDX SBOM with signed build provenance. Architecture,
+  compatibility, release verification, review, support, and first-run safety
+  documentation now state the maintained contracts explicitly.
 
 - Internal simplification, no behavior change: message commits go through
   one `TurnLog` handle instead of six threaded parameters; every

@@ -11,6 +11,42 @@ use e::core::session::{self, Session};
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn released_session_fixtures_remain_readable() {
+    for (name, expected) in [
+        ("v0.jsonl", "legacy session"),
+        ("v1.jsonl", "current session"),
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sessions")
+            .join(name);
+        let messages = Session::load(&path).unwrap_or_else(|error| {
+            panic!("compatibility fixture {name} stopped loading: {error}")
+        });
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, expected);
+    }
+}
+
+#[test]
+fn future_session_format_fails_with_an_actionable_error() {
+    let path = std::env::temp_dir().join(format!(
+        "e-future-session-{}-{}.jsonl",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::write(
+        &path,
+        r#"{"type":"session","format_version":999,"id":"future","cwd":"/tmp","created":1,"model":"m"}
+{"type":"message","message":{"role":"user","content":"hello"}}
+"#,
+    )
+    .unwrap();
+    let error = Session::load(&path).err().expect("future format must fail");
+    assert!(error.to_string().contains("newer than this e supports"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn session_round_trips_and_lists() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = std::env::temp_dir().join(format!("e-session-{}", std::process::id()));

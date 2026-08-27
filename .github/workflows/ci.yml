@@ -38,13 +38,30 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Rust toolchain
-        run: rustup update --no-self-update stable && rustc --version
+        run: rustc --version
 
-      - name: Formatting
-        run: cargo fmt --check
+      - name: Repository contract
+        run: ./x check
 
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+  performance:
+    name: Performance budgets
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Test
-        run: cargo test
+      - name: Rust toolchain
+        run: rustc --version
+
+      - name: Measure release binary
+        run: ./x bench
+
+      - name: Upload pull-request binary
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: e-${{ runner.os }}-${{ runner.arch }}-${{ github.event.pull_request.number }}
+          path: target/release/e
+          if-no-files-found: error
+          retention-days: 7

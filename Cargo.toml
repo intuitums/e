@@ -4,6 +4,7 @@ name = "e"
 # `dogfood` codename in src/lib.rs — e is unversioned while we dogfood it.
 version = "0.0.0"
 edition = "2021"
+rust-version = "1.98"
 license = "MIT"
 description = "A TUI for coding agents"
 
@@ -32,6 +33,9 @@ sha2 = "0.11"
 rand = "0.10"
 regex = "1"
 libc = "0.2"
+
+[dev-dependencies]
+proptest = "1"
 
 # A third off the binary for zero runtime cost (measured: 8.02 -> 5.18 MiB,
 # speed unchanged). Unwinding stays ON deliberately: a panicking tool is

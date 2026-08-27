@@ -61,8 +61,8 @@ fi
 if out=$(prod_rs $(find src/core -name '*.rs' 2>/dev/null) | grep -E 'fs::write|File::create|OpenOptions' |
     grep -v '^src/core/config/store.rs:' | grep -v '^src/core/session.rs:' |
     grep -v '^src/core/config/home.rs:' | grep -v '^src/core/tools/' |
-    grep -v '^src/core/update.rs:'); then
-  bad "direct file write in src/core outside config/{store,home}.rs, session.rs, tools, update.rs:"
+    grep -v '^src/core/update.rs:' | grep -v '^src/core/providers/diagnostics.rs:'); then
+  bad "direct file write in src/core outside audited store/session/tool/update/diagnostics paths:"
   say "$out"
 fi
 
@@ -80,6 +80,19 @@ for wf in .github/workflows/*.yml; do
   if out=$(grep -n 'uses:' "$wf" | grep -vE '@[0-9a-f]{40}'); then
     bad "workflow action not pinned to a full commit SHA in $wf:"
     say "$out"
+  fi
+done
+
+# 7. Exact CODEOWNERS paths must exist. This prevents ownership silently
+#    disappearing after a directory rename; glob patterns remain valid and
+#    are deliberately skipped here.
+for pattern in $(awk '!/^#/ && NF { print $1 }' .github/CODEOWNERS); do
+  case "$pattern" in
+    '*'|*'*'*|*'?'*|*'['*) continue ;;
+  esac
+  target=${pattern#/}
+  if [ ! -e "$target" ]; then
+    bad "CODEOWNERS path does not exist: $pattern"
   fi
 done
 

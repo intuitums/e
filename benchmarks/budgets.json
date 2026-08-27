@@ -1,0 +1,5 @@
+{
+  "binary_size_bytes": 10485760,
+  "cold_start_ms": 50,
+  "first_frame_ms": 250
+}

@@ -13,6 +13,10 @@ use std::io;
 
 use crate::core::config::home;
 
+/// Current shape of `auth.json`. Unversioned files remain readable and
+/// unknown entries remain preserved by the merge-write store.
+pub const FORMAT_VERSION: u32 = 1;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Credential {
@@ -81,7 +85,11 @@ pub fn signed_in(auth: &AuthFile, provider: &str) -> bool {
 /// provider — including any e couldn't parse — survives.
 pub fn set(provider: &str, credential: Credential) -> io::Result<()> {
     let value = serde_json::to_value(credential).unwrap_or(serde_json::Value::Null);
-    crate::core::config::store::update(&home::auth_path(), 0o600, |obj| {
+    crate::core::config::store::update_versioned(&home::auth_path(), 0o600, FORMAT_VERSION, |obj| {
+        obj.insert(
+            "format_version".into(),
+            serde_json::Value::from(FORMAT_VERSION),
+        );
         obj.insert(provider.to_string(), value);
     })
 }

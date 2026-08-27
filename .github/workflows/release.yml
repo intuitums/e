@@ -1,22 +1,39 @@
 name: Release
 
-# A version tag builds the four release binaries and publishes them with
-# checksums. install.sh consumes these artifacts.
+# A version tag qualifies and builds four release binaries, then publishes
+# checksums, an SBOM, and build provenance. install.sh consumes the binaries.
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
 
 jobs:
+  qualify:
+    name: Qualify tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify source, version, and changelog
+        run: |
+          ./x check
+          ./x release-check "${{ github.ref_name }}"
+
   create:
     name: Draft release
+    needs: qualify
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,6 +72,8 @@ jobs:
     needs: create
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -74,24 +93,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          rustup update --no-self-update stable
           for target in ${{ matrix.targets }}; do
             rustup target add "$target"
-            cargo build --release --target "$target"
+            cargo build --release --locked --target "$target"
             tar czf "e-$target.tar.gz" -C "target/$target/release" e
             gh release upload "$TAG" "e-$target.tar.gz" --clobber
           done
+
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          case " ${{ matrix.targets }} " in
+            *" $host "*)
+              "target/$host/release/e" --version | grep -Fx "e ${TAG#v}"
+              sha256sum "e-$host.tar.gz" > checksums.txt 2>/dev/null || \
+                shasum -a 256 "e-$host.tar.gz" > checksums.txt
+              install_dir=$(mktemp -d)
+              E_RELEASE_BASE="file://$PWD" E_INSTALL_DIR="$install_dir" ./install.sh
+              "$install_dir/e" --version | grep -Fx "e ${TAG#v}"
+              ;;
+          esac
 
   publish:
     name: Checksums and publish
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Checksum every artifact, undraft
+      - name: Download and checksum every artifact
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -99,5 +133,22 @@ jobs:
           mkdir assets && cd assets
           gh release download "$TAG" --pattern "e-*.tar.gz"
           sha256sum e-*.tar.gz > checksums.txt
-          gh release upload "$TAG" checksums.txt --clobber
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --format json --spec-version 1.5
+          mv bom.json assets/e-sbom.cdx.json
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: assets/*
+
+      - name: Upload metadata and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release upload "$TAG" assets/checksums.txt assets/e-sbom.cdx.json --clobber
           gh release edit "$TAG" --draft=false

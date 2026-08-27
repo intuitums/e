@@ -1,0 +1,9 @@
+{
+  "name": "fixture",
+  "version": "1.0.0",
+  "tools": [{"name":"hello","description":"say hello","parameters":{"type":"object"}}],
+  "commands": [{"name":"ping","description":"answer"}],
+  "flags": [{"name":"dry-run","type":"boolean","description":"do not change files"}],
+  "hooks": ["input"],
+  "future_field": "ignored by version 1 readers"
+}

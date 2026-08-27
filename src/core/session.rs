@@ -30,11 +30,18 @@ use serde::{Deserialize, Serialize};
 use crate::core::config::home;
 use crate::core::providers::ChatMessage;
 
+/// Current on-disk session format. Version 0 is the header shape written by
+/// pre-release builds before the field existed; readers deliberately retain
+/// support for it.
+pub const FORMAT_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum Entry {
     #[serde(rename = "session")]
     Header {
+        #[serde(default)]
+        format_version: u32,
         id: String,
         cwd: String,
         created: u64,
@@ -204,6 +211,7 @@ impl Session {
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
         let lock = LockGuard::acquire(&path)?;
         let header = Entry::Header {
+            format_version: FORMAT_VERSION,
             id,
             cwd: cwd.to_string_lossy().into_owned(),
             created: stamp,
@@ -348,11 +356,16 @@ impl Session {
         let last_nonempty = lines.iter().rposition(|l| !l.trim().is_empty());
         let mut out: Vec<Node> = Vec::new();
         let mut previous: Option<String> = None;
+        let mut saw_header = false;
         for (index, line) in lines.iter().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
             match serde_json::from_str::<Entry>(line) {
+                Ok(Entry::Header { format_version, .. }) => {
+                    validate_format(format_version)?;
+                    saw_header = true;
+                }
                 Ok(Entry::Message {
                     id,
                     parent,
@@ -380,6 +393,9 @@ impl Session {
                 }
             }
         }
+        if !saw_header {
+            return Err(std::io::Error::other("session header is missing"));
+        }
         Ok(out)
     }
 
@@ -401,6 +417,16 @@ impl Session {
             _lock: lock,
             current,
         })
+    }
+}
+
+fn validate_format(version: u32) -> std::io::Result<()> {
+    if version <= FORMAT_VERSION {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "session format {version} is newer than this e supports ({FORMAT_VERSION})"
+        )))
     }
 }
 
@@ -496,7 +522,12 @@ fn info(path: &Path, expected_cwd: Option<&Path>) -> Option<SessionInfo> {
     for line in reader.lines() {
         let line = line.ok()?;
         match serde_json::from_str(&line) {
-            Ok(Entry::Header { cwd, .. }) => session_cwd = Some(PathBuf::from(cwd)),
+            Ok(Entry::Header {
+                cwd,
+                format_version,
+                ..
+            }) if validate_format(format_version).is_ok() => session_cwd = Some(PathBuf::from(cwd)),
+            Ok(Entry::Header { .. }) => return None,
             Ok(Entry::Message { message, .. }) => messages.push(message),
             Ok(Entry::Name { name: n }) => name = Some(n),
             Err(_) => {}
@@ -552,6 +583,13 @@ mod tests {
             uuid::Uuid::now_v7()
         ));
         let entries = [
+            Entry::Header {
+                format_version: FORMAT_VERSION,
+                id: "session".into(),
+                cwd: "/tmp".into(),
+                created: 0,
+                model: "test/model".into(),
+            },
             Entry::Message {
                 id: "root".into(),
                 parent: None,

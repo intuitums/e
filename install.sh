@@ -27,7 +27,9 @@ esac
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-base="https://github.com/$repo/releases/latest/download"
+# E_RELEASE_BASE is an internal release-smoke seam: production installs leave
+# it unset; CI points it at the just-built local artifacts.
+base="${E_RELEASE_BASE:-https://github.com/$repo/releases/latest/download}"
 
 curl -fsSL -o "$tmp/e.tar.gz" "$base/e-$target.tar.gz" || {
   echo "no release published yet — install.sh works once the first release exists" >&2

@@ -5,13 +5,13 @@ Instructions for an agent editing this repo.
 ## Build and check
 
 ```sh
-cargo build          # dev
-cargo test           # the whole contract — run this before you call anything done
-cargo fmt --check && cargo clippy --all-targets -- -D warnings
-./scripts/guard.sh   # the security-surface audit — CI runs all of these
+cargo build          # fast dev build
+./x test             # the whole behavioral contract
+./x check            # format, lint, tests, and security-surface guard
+./x bench            # release-mode performance budgets
 ```
 
-`cargo test` is not optional. The visual design is pinned byte-for-byte in
+`./x test` is not optional. The visual design is pinned byte-for-byte in
 `tests/` against the reference design's own literals. If a rendering change
 makes the tests fail, you drifted the look — fix the code, don't loosen the
 test.
@@ -23,12 +23,12 @@ src/core/    the harness, terminal-free
   agent/          the turn loop (mod.rs): request → stream → run tools → repeat;
                   steering · compact.rs (threshold, keep-recent cut, summarize)
                   · context.rs (system prompt, AGENTS.md, skills catalog)
-  provider/       the seam (mod.rs) — one Request, one Event stream, the SSE
-                  splitter · completions.rs · responses.rs · anthropic.rs (the
-                  three wire dialects) · registry.rs + providers/*.json
-                  (providers are data: gateway, dialect, auth surface, seed
-                  models) · catalog/ (assembly, availability, scope;
-                  remote.rs = the live /models sync)
+  providers/      the seam (mod.rs) — one Request, one Event stream, the SSE
+                  splitter · openai_completions.rs · openai_responses.rs ·
+                  anthropic.rs · google.rs (the four wire dialects) ·
+                  registry.rs + registry/*.json (providers are data: gateway,
+                  dialect, auth surface, seed models) · catalog/ (assembly,
+                  availability, scope; remote.rs = the live /models sync)
   auth/           credentials (mod.rs) · login.rs (OAuth, device-code, API keys)
   config/         the ~/.e surface: home.rs (paths) · store.rs (merge-write)
                   · settings.rs · trust.rs (per-directory trust) ·

@@ -6,12 +6,14 @@
 *                     @fschrhunt
 
 /src/core/api/        @fschrhunt
-/src/core/auth.rs     @fschrhunt
-/src/core/login.rs    @fschrhunt
-/src/core/store.rs    @fschrhunt
-/src/core/home.rs     @fschrhunt
-/src/core/provider.rs @fschrhunt
-/src/core/completions.rs @fschrhunt
-/src/core/responses.rs @fschrhunt
+/src/core/auth/       @fschrhunt
+/src/core/config/     @fschrhunt
+/src/core/providers/  @fschrhunt
+/src/core/session.rs  @fschrhunt
+/src/core/tools/      @fschrhunt
+/src/core/update.rs   @fschrhunt
+/docs/extensions.md   @fschrhunt
+/docs/compatibility.md @fschrhunt
 /.github/             @fschrhunt
 /scripts/guard.sh     @fschrhunt
+/install.sh           @fschrhunt

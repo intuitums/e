@@ -89,8 +89,48 @@ pub fn update<F: FnOnce(&mut Map<String, Value>)>(
     mode: u32,
     mutate: F,
 ) -> io::Result<()> {
+    update_inner(path, mode, None, mutate)
+}
+
+/// Update a versioned object without allowing an older e to rewrite a format
+/// it does not understand. Unversioned and older objects remain writable so
+/// the next successful write upgrades them in place.
+pub fn update_versioned<F: FnOnce(&mut Map<String, Value>)>(
+    path: &Path,
+    mode: u32,
+    supported: u32,
+    mutate: F,
+) -> io::Result<()> {
+    update_inner(path, mode, Some(supported), mutate)
+}
+
+fn update_inner<F: FnOnce(&mut Map<String, Value>)>(
+    path: &Path,
+    mode: u32,
+    supported: Option<u32>,
+    mutate: F,
+) -> io::Result<()> {
     let _guard = lock_write()?;
     let mut object = read_object(path)?;
+    if let (Some(supported), Some(version)) = (supported, object.get("format_version")) {
+        match version.as_u64() {
+            Some(version) if version <= u64::from(supported) => {}
+            Some(version) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "configuration format {version} is newer than this e supports ({supported})"
+                    ),
+                ));
+            }
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "configuration format_version must be a non-negative integer",
+                ));
+            }
+        }
+    }
     mutate(&mut object);
     let text = format!(
         "{}\n",

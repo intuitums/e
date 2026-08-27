@@ -1,0 +1,30 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "41 5 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [sse, extension_protocol, sanitize]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install cargo-fuzz
+        run: |
+          rustup toolchain install nightly-2026-08-20 --profile minimal
+          cargo +nightly-2026-08-20 install cargo-fuzz --version 0.11.0 --locked
+
+      - name: Fuzz bounded parser surface
+        run: cargo +nightly-2026-08-20 fuzz run "${{ matrix.target }}" -- -max_total_time=120 -rss_limit_mb=2048

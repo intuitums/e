@@ -2,18 +2,20 @@
 """e's benchmark suite: the numbers e's identity depends on.
 
 Measures the release binary — build it first (`cargo build --release`) or let
-this script do it. Writes a timestamped report into benchmarks/results/ and
-prints it. Run on a quiet machine; medians over repeated runs keep the noise
-down, but results are only comparable to results from the same machine.
+this script do it. Normal runs write a timestamped report. `--check` applies
+deliberately generous cross-runner budgets and writes nothing, making it a
+stable regression alarm rather than a microbenchmark contest.
 """
-import os, pty, select, statistics, subprocess, sys, time, platform, datetime, fcntl, struct, termios
+import argparse, datetime, fcntl, json, os, platform, pty, select, shutil
+import statistics, struct, subprocess, sys, termios, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BINARY = os.path.join(ROOT, "target", "release", "e")
+BUDGETS = os.path.join(ROOT, "benchmarks", "budgets.json")
 
 
 def build():
-    subprocess.run(["cargo", "build", "--release"], cwd=ROOT, check=True,
+    subprocess.run(["cargo", "build", "--release", "--locked"], cwd=ROOT, check=True,
                    capture_output=True)
 
 
@@ -65,12 +67,16 @@ def boot_to_first_frame(runs=5):
                 break
             time.sleep(0.02)
         os.close(fd)
-        subprocess.run(["rm", "-rf", home], check=False)
+        shutil.rmtree(home, ignore_errors=True)
     return statistics.median(samples)
 
 
 def main():
-    if not os.path.exists(BINARY) or "--build" in sys.argv:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--build", action="store_true", help="rebuild the release binary")
+    parser.add_argument("--check", action="store_true", help="enforce budgets without writing a report")
+    args = parser.parse_args()
+    if not os.path.exists(BINARY) or args.build:
         print("building release…", file=sys.stderr)
         build()
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
@@ -93,11 +99,33 @@ def main():
         "",
     ])
     out = os.path.join(ROOT, "benchmarks", "results", f"{stamp}_{commit}.txt")
-    with open(out, "w") as f:
-        f.write(report)
     print(report)
+    if args.check:
+        with open(BUDGETS, encoding="utf-8") as file:
+            budgets = json.load(file)
+        measurements = {
+            "binary_size_bytes": size,
+            "cold_start_ms": cold,
+            "first_frame_ms": boot,
+        }
+        failures = [
+            f"{name}: {measurements[name]:.1f} > {limit}"
+            for name, limit in budgets.items()
+            if measurements[name] > limit
+        ]
+        if failures:
+            print("performance budget exceeded:", file=sys.stderr)
+            for failure in failures:
+                print(f"  {failure}", file=sys.stderr)
+            return 1
+        print("performance budgets: passed")
+        return 0
+
+    with open(out, "w", encoding="utf-8") as file:
+        file.write(report)
     print(f"written: {os.path.relpath(out, ROOT)}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

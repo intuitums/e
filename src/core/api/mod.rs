@@ -16,5 +16,6 @@ mod protocol;
 
 pub use host::{read_bounded_line, ExtensionHost, StartupAction, ToolProgress};
 pub use protocol::{
-    CommandResult, HookVerdict, InputVerdict, Manifest, ToolResult, PROTOCOL_VERSION,
+    parse_incoming, CommandResult, HookVerdict, Incoming, InputVerdict, Manifest, ToolResult,
+    PROTOCOL_VERSION,
 };

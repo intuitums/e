@@ -35,6 +35,7 @@ pinned in `scripts/guard.sh` and enforced in CI:
 - credentials are written `0600` through one atomic merge-write path
 - extensions get exactly the protocol surface in
   [docs/extensions.md](docs/extensions.md), nothing more
+- `e doctor` never prints credential values and makes no network probes
 
 ## Reporting a vulnerability
 
