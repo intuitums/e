@@ -58,9 +58,9 @@ pub enum Kind {
     Banner,
     User,
     Assistant,
-    /// One assistant turn's streamed thinking — drawn live and kept until the
-    /// turn ends, so it never vanishes while the reply streams. Dims with the
-    /// turn's finish like the rest of the committed turn.
+    /// One assistant turn's streamed thinking — drawn live while the burst
+    /// runs, then collapsed to a single dim `Thought for Ns` row when the
+    /// burst ends (reply text, tools, retry, steer, turn commit).
     Thinking,
     Tool,
     /// One provider-issued batch: a tallied header over stable lifecycle
@@ -286,8 +286,8 @@ impl Block {
                 if text.is_empty() {
                     return Vec::new();
                 }
-                // Live thinking wears the palette's thinkingText; a committed
-                // turn's thinking dims with it (`dim` on light is one step
+                // Live thinking wears the palette's thinkingText; a collapsed
+                // burst's summary row dims (`dim` on light is one step
                 // further toward the background than statusline).
                 let color = if self.done { "dim" } else { "thinkingText" };
                 wrap_styled(text, width.saturating_sub(4).max(8))
@@ -684,11 +684,11 @@ mod tests {
         assert_eq!(block.cache.as_ref().unwrap().2.as_ptr(), cached);
     }
 
-    /// Thinking is drawn live in thinkingText and dims with the committed
-    /// turn, never vanishing while the reply streams.
+    /// Thinking streams live in thinkingText; once its burst ends, the
+    /// collapsed block is a single dim summary row.
     #[test]
-    fn thinking_renders_live_and_dims_with_the_turn() {
-        // Distinct colors so the live/done shift is observable.
+    fn thinking_streams_live_then_collapses_to_one_dim_row() {
+        // Distinct colors so the live/collapsed shift is observable.
         let theme = Theme::from_json(
             r#"{"vars":{"a":250,"b":240},"colors":{"thinkingText":"a","dim":"b"}}"#,
         )
@@ -703,20 +703,18 @@ mod tests {
                 "live thinking wears thinkingText"
             );
         }
+        // Burst end: events.rs swaps in the summary text and marks the
+        // block done; only the paint contract is pinned here.
+        block.text = "Thought for 12s".into();
         block.done = true;
         block.touch();
-        let dimmed = block.lines_for_test(&theme, 40);
-        assert_eq!(
-            dimmed.len(),
-            live.len(),
-            "thinking persists through the turn"
+        let collapsed = block.lines_for_test(&theme, 40);
+        assert_eq!(collapsed.len(), 1, "a collapsed burst is one row");
+        assert!(collapsed[0].contains("Thought for 12s"));
+        assert!(
+            collapsed[0].contains(theme.fg_prefix("dim")),
+            "the collapsed row dims"
         );
-        for row in &dimmed {
-            assert!(
-                row.contains(theme.fg_prefix("dim")),
-                "committed thinking dims with the turn"
-            );
-        }
     }
 
     /// Block text stays inert even for the thinking surface.

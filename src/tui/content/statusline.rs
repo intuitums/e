@@ -15,10 +15,6 @@ pub enum TurnPhase {
     Thinking,
     /// Backing off after a retryable failure before another attempt.
     Retrying,
-    /// The model is streaming tool-call arguments — real output the
-    /// transcript can't show yet. Without its own phase the row froze on
-    /// "Thinking" while a large write call assembled for tens of seconds.
-    ToolAssembly,
     Tool,
     AssistantText,
 }
@@ -55,6 +51,18 @@ fn clip(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Elapsed time in the activity row: seconds under a minute, minutes and
+/// seconds above, hours and minutes beyond — never a bare `636s`.
+pub fn format_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 /// Per-turn token flow and focused activity phase.
 pub struct Turn {
     /// Latest request's full context, from real usage (a chars/4 seed until
@@ -67,8 +75,8 @@ pub struct Turn {
     /// chars/4 estimate of the current step's streamed text + reasoning.
     pub estimated_output: u64,
     streamed_chars: u64,
-    /// Cumulative tool-call argument bytes streamed this step (liveness for
-    /// the assembly phase; also real output the estimate must count).
+    /// Cumulative tool-call argument bytes streamed this step (real output
+    /// the token estimate must count).
     assembly_bytes: u64,
     pub phase: TurnPhase,
     /// Set while `phase == Retrying`.
@@ -162,7 +170,10 @@ impl Turn {
                 } else {
                     format!(" {tokens}")
                 };
-                Some(format!("Thinking ({elapsed_secs}s){suffix}"))
+                Some(format!(
+                    "Thinking ({}){suffix}",
+                    format_elapsed(elapsed_secs)
+                ))
             }
             TurnPhase::Retrying => {
                 let r = self.retry.as_ref()?;
@@ -183,15 +194,6 @@ impl Turn {
                         r.limit
                     )
                 })
-            }
-            TurnPhase::ToolAssembly => {
-                let tokens = self.tokens();
-                let suffix = if tokens.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {tokens}")
-                };
-                Some(format!("Writing tool call ({elapsed_secs}s){suffix}"))
             }
             TurnPhase::Tool => None,
             TurnPhase::AssistantText => {
@@ -269,7 +271,7 @@ pub fn statusline(
 
 #[cfg(test)]
 mod tests {
-    use super::{RecoveredStatus, RetryStatus, Turn, TurnPhase};
+    use super::{format_elapsed, RecoveredStatus, RetryStatus, Turn, TurnPhase};
     use crate::core::providers::FailureCause;
 
     #[test]
@@ -290,21 +292,37 @@ mod tests {
     }
 
     #[test]
-    fn tool_assembly_keeps_the_row_alive() {
+    fn elapsed_switches_to_minutes_above_a_minute() {
+        assert_eq!(format_elapsed(59), "59s");
+        assert_eq!(format_elapsed(60), "1m 00s");
+        assert_eq!(format_elapsed(636), "10m 36s");
+        assert_eq!(format_elapsed(3_725), "1h 02m");
+    }
+
+    #[test]
+    fn thinking_label_shows_minutes_past_a_minute() {
+        let mut turn = Turn::new();
+        turn.input = 39_000;
+        turn.output = 20_000;
+        assert_eq!(
+            turn.label(636).as_deref(),
+            Some("Thinking (10m 36s) (↑39k ↓20k)")
+        );
+    }
+
+    #[test]
+    fn assembly_bytes_count_toward_the_estimate_while_thinking() {
         let mut turn = Turn::new();
         turn.note_usage(50_000, 200);
-        turn.phase = TurnPhase::ToolAssembly;
         turn.note_assembly(8_000); // ~2k tokens of argument JSON so far
         assert_eq!(
             turn.label(7).as_deref(),
-            Some("Writing tool call (7s) (↑50k ↓2.2k)")
+            Some("Thinking (7s) (↑50k ↓2.2k)"),
+            "argument streaming stays in the Thinking phase — the tool row, not the footer, owns the activity"
         );
         // The next cumulative report ticks the same counter.
         turn.note_assembly(12_000);
-        assert_eq!(
-            turn.label(8).as_deref(),
-            Some("Writing tool call (8s) (↑50k ↓3.2k)")
-        );
+        assert_eq!(turn.tokens(), "(↑50k ↓3.2k)");
     }
 
     #[test]

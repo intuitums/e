@@ -22,7 +22,8 @@ use crate::tui::composer::{Editor, EditorResult, Key};
 use crate::tui::menu::{Menu, MenuItem, MenuKind, HINT_SCOPED, HINT_USE};
 use crate::tui::screen::Painter;
 use crate::tui::statusline::{
-    statusline, RecoveredStatus, RetryStatus, StatusData, Turn, TurnPhase, RECOVERED_VISIBLE_MS,
+    format_elapsed, statusline, RecoveredStatus, RetryStatus, StatusData, Turn, TurnPhase,
+    RECOVERED_VISIBLE_MS,
 };
 use crate::tui::theme::Theme;
 use crate::tui::transcript::{Block, Kind, Transcript};
@@ -38,10 +39,12 @@ struct ActiveTurn {
     block: Option<usize>,
     text: String,
     /// The live thinking block for the current burst, if reasoning has
-    /// streamed. Earlier bursts from this turn stay in the transcript and
-    /// dim together at TurnEnd — this index is only the open segment.
+    /// streamed. Earlier bursts from this turn collapsed where they ended —
+    /// this index is only the open segment.
     thinking_block: Option<usize>,
     thinking: String,
+    /// When the open burst started, for the collapsed row's duration.
+    thinking_started: Option<Instant>,
     turn: Turn,
     started: Instant,
     error: Option<String>,
@@ -200,7 +203,7 @@ struct App {
     /// The settings panel, when /settings is active.
     settings: Option<crate::tui::settingspanel::SettingsPanel>,
     /// Whether streamed thinking is drawn (the `show_thinking` setting,
-    /// default on). Gating only the drawing — the ↓ token estimate always
+    /// default off). Gating only the drawing — the ↓ token estimate always
     /// counts reasoning.
     show_thinking: bool,
     /// Background job narration (login flows) into the transcript.
@@ -1578,7 +1581,7 @@ pub async fn run(
         auth: None,
         settings: None,
         show_thinking: crate::core::config::settings::get_string("show_thinking").as_deref()
-            != Some("off"),
+            == Some("on"),
         jobs: jobs_tx,
         logins: logins_tx,
         login_task: None,
@@ -1808,7 +1811,7 @@ pub async fn run(
                                 "show_thinking",
                             )
                             .as_deref()
-                            != Some("off");
+                            == Some("on");
                             app.refresh_status_cache();
                         } else if let Some(stage) = &mut app.auth {
                             match (&mut *stage, k.code) {
@@ -2616,11 +2619,11 @@ mod tests {
         }
     }
 
-    /// A typical think-then-tools turn opens a second thinking block when
-    /// the batch starts. Both segments stay live through the turn and dim
-    /// together at TurnEnd — not only the last index.
+    /// A typical think-then-tools turn opens a second thinking burst below
+    /// the tools; each burst collapses to one row where it ends, and TurnEnd
+    /// collapses the final one.
     #[test]
-    fn turn_end_dims_pre_tool_thinking() {
+    fn thinking_bursts_collapse_at_each_handoff() {
         let mut app = session_app();
         app.on_session_event(SessionEvent::TurnStart);
         app.on_session_event(SessionEvent::ReasoningDelta("before tools".into()));
@@ -2629,15 +2632,15 @@ mod tests {
         app.on_session_event(tool_batch());
         assert_eq!(
             thinking_flags(&app),
-            vec![("before tools".into(), false)],
-            "pre-tool thinking must stay live until the turn commits"
+            vec![("Thought for 0s".into(), true)],
+            "the pre-tool burst collapses when tools take over"
         );
 
         app.on_session_event(SessionEvent::ReasoningDelta("after tools".into()));
         assert_eq!(
             thinking_flags(&app),
             vec![
-                ("before tools".into(), false),
+                ("Thought for 0s".into(), true),
                 ("after tools".into(), false)
             ]
         );
@@ -2645,14 +2648,17 @@ mod tests {
         app.on_session_event(SessionEvent::TurnEnd { aborted: false });
         assert_eq!(
             thinking_flags(&app),
-            vec![("before tools".into(), true), ("after tools".into(), true)]
+            vec![
+                ("Thought for 0s".into(), true),
+                ("Thought for 0s".into(), true)
+            ]
         );
     }
 
-    /// Retries and steered messages also drop the live index. Those earlier
-    /// blocks must still dim when the turn commits.
+    /// Retries and steered messages also end the live burst; each collapsed
+    /// row keeps its place in the transcript.
     #[test]
-    fn turn_end_dims_thinking_cleared_by_retry_and_steer() {
+    fn thinking_collapses_at_retry_and_steer() {
         let mut app = session_app();
         app.on_session_event(SessionEvent::TurnStart);
         app.on_session_event(SessionEvent::ReasoningDelta("attempt one".into()));
@@ -2663,14 +2669,20 @@ mod tests {
             cause: crate::core::providers::FailureCause::Network,
             reason: "timeout".into(),
         });
+        assert_eq!(
+            thinking_flags(&app),
+            vec![("Thought for 0s".into(), true)],
+            "the abandoned attempt's burst collapses at the retry"
+        );
+
         app.on_session_event(SessionEvent::ReasoningDelta("attempt two".into()));
         app.on_session_event(SessionEvent::Steered("also check this".into()));
         app.on_session_event(SessionEvent::ReasoningDelta("after steer".into()));
         assert_eq!(
             thinking_flags(&app),
             vec![
-                ("attempt one".into(), false),
-                ("attempt two".into(), false),
+                ("Thought for 0s".into(), true),
+                ("Thought for 0s".into(), true),
                 ("after steer".into(), false)
             ]
         );
@@ -2679,9 +2691,9 @@ mod tests {
         assert_eq!(
             thinking_flags(&app),
             vec![
-                ("attempt one".into(), true),
-                ("attempt two".into(), true),
-                ("after steer".into(), true)
+                ("Thought for 0s".into(), true),
+                ("Thought for 0s".into(), true),
+                ("Thought for 0s".into(), true)
             ]
         );
     }

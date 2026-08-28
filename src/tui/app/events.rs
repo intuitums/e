@@ -14,6 +14,7 @@ impl App {
                     text: String::new(),
                     thinking_block: None,
                     thinking: String::new(),
+                    thinking_started: None,
                     turn: Turn::new(),
                     started: Instant::now(),
                     error: None,
@@ -34,18 +35,18 @@ impl App {
             SessionEvent::Steered(text) => {
                 // A mid-turn message: show it as a user turn where it landed.
                 self.transcript.push(Block::new(Kind::User, text));
-                // The next assistant text opens a fresh block.
+                // The next assistant text opens a fresh block; the burst
+                // that was live collapses where it sat.
+                self.end_thinking_burst();
                 if let Some(s) = &mut self.active {
                     s.block = None;
                     s.text.clear();
-                    // The steered reply restarts its own thinking block.
-                    // The prior block stays live until TurnEnd dims the
-                    // whole turn — clearing the index must not finish it.
-                    s.thinking_block = None;
-                    s.thinking.clear();
                 }
             }
             SessionEvent::TextDelta(delta) => {
+                // Reply text starting ends the live thinking burst — it
+                // collapses to its one-line summary above the reply.
+                self.end_thinking_burst();
                 if let Some(s) = &mut self.active {
                     s.turn.phase = TurnPhase::AssistantText;
                     s.turn.note_text(&delta);
@@ -62,14 +63,18 @@ impl App {
                     }
                 }
             }
-            // Reasoning stays on screen through the turn — it must not vanish
-            // while the reply streams, and it dims with the committed turn,
-            // not before. Raw provider text is stripped before it can reach
-            // the paint stream, like assistant text.
+            // Reasoning streams live in thinkingText while the burst runs;
+            // when the burst ends — reply text, tools, retry, steer, turn
+            // commit — it collapses to a single dim row. Raw provider text
+            // is stripped before it can reach the paint stream, like
+            // assistant text.
             SessionEvent::ReasoningDelta(delta) => {
                 if let Some(s) = &mut self.active {
                     s.turn.note_text(&delta);
                     if self.show_thinking {
+                        if s.thinking_block.is_none() {
+                            s.thinking_started = Some(Instant::now());
+                        }
                         s.thinking
                             .push_str(&crate::core::tools::sanitize_display(&delta));
                         let idx =
@@ -83,24 +88,22 @@ impl App {
                 }
             }
             SessionEvent::ToolCallAssembly { bytes } => {
-                // The model is streaming tool-call arguments — no text to
-                // show yet, but the row must move: phase plus a ticking
-                // estimate, so a long write call never looks like a stall.
+                // The model is streaming tool-call arguments. No phase of
+                // its own — the footer stays on Thinking (the model is
+                // still generating), the bytes count toward the token
+                // estimate, and the tool row appears in the tree when the
+                // call actually starts.
                 if let Some(s) = &mut self.active {
-                    s.turn.phase = TurnPhase::ToolAssembly;
                     s.turn.note_assembly(bytes);
                 }
             }
             SessionEvent::ToolBatchStart { calls } => {
+                // The pre-batch reasoning collapses where it sits; the next
+                // burst starts fresh below the tools.
+                self.end_thinking_burst();
                 if let Some(s) = &mut self.active {
                     s.block = None;
                     s.text.clear();
-                    // The pre-batch reasoning stays as its own block above;
-                    // the next burst starts fresh below the tools. The
-                    // prior block stays live until TurnEnd — clearing the
-                    // index must not finish it, or it would dim early.
-                    s.thinking_block = None;
-                    s.thinking.clear();
                     s.turn.phase = TurnPhase::Tool;
                     s.pending_tools += calls.len();
                     let children = calls
@@ -230,12 +233,10 @@ impl App {
                     // The abandoned attempt's argument bytes die with it —
                     // the fresh attempt streams from scratch.
                     s.turn.note_assembly(0);
-                    // A retry replays its thinking fresh; the abandoned
-                    // attempt's block stays behind as history and stays
-                    // live until TurnEnd dims the whole turn.
-                    s.thinking_block = None;
-                    s.thinking.clear();
                 }
+                // The abandoned attempt's thinking collapses with its
+                // duration; the retry streams a fresh burst.
+                self.end_thinking_burst();
             }
             SessionEvent::Recovered { attempt, limit } => {
                 if let Some(s) = &mut self.active {
@@ -272,13 +273,12 @@ impl App {
                         }
                     }
                 }
+                // The turn's final burst collapses with it — same moment,
+                // not early. Every other burst end (reply text, tools,
+                // retry, steer) collapsed where it happened; this catches
+                // the one that ran to the turn's end.
+                self.end_thinking_burst();
                 let Some(s) = self.active.take() else { return };
-                // The turn's thinking dims with it — same moment, not early.
-                // Tool batches, retries, and steered messages each start a
-                // fresh block without finishing the prior one, so the live
-                // index is only the last segment. Dim every still-live
-                // thinking row, not just that index.
-                dim_thinking(&mut self.transcript);
                 // The reference grammar: a completed turn ends with a dim
                 // duration-and-tokens row; a cancelled one says so instead.
                 if aborted {
@@ -357,14 +357,30 @@ fn open_block(transcript: &mut Transcript, index: &mut Option<usize>, kind: Kind
     }
 }
 
-/// Dim every still-live thinking row. Tool batches, retries, and steered
-/// messages start a fresh block without finishing the prior one, so the
-/// live index is not the full set — TurnEnd walks them all, same moment.
-pub(super) fn dim_thinking(transcript: &mut Transcript) {
-    for block in &mut transcript.blocks {
-        if block.kind == Kind::Thinking && !block.done {
-            block.done = true;
-            block.touch();
+/// End the live thinking burst: collapse its block (or blocks — the walk
+/// covers everything still live, not just the open index) to a single dim
+/// `Thought for Ns` row, using when the burst started. A no-op with no
+/// burst open — in particular when `show_thinking` is off, which never
+/// opens one.
+impl App {
+    pub(super) fn end_thinking_burst(&mut self) {
+        let Some(s) = &mut self.active else { return };
+        if s.thinking_block.is_none() {
+            return;
         }
+        let secs = s
+            .thinking_started
+            .map(|started| started.elapsed().as_secs())
+            .unwrap_or(0);
+        for block in &mut self.transcript.blocks {
+            if block.kind == Kind::Thinking && !block.done {
+                block.text = format!("Thought for {}", format_elapsed(secs));
+                block.done = true;
+                block.touch();
+            }
+        }
+        s.thinking_block = None;
+        s.thinking.clear();
+        s.thinking_started = None;
     }
 }
