@@ -39,9 +39,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [intuitum-24vcpu-ubuntu-2604-01, macos-latest]
+    # checkout's default `clean: true` runs git clean -ffdx, which wipes
+    # target/ every run; on a persistent self-hosted box we keep it so cargo
+    # rebuilds incrementally.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: false
 
       - name: Rust toolchain
         run: rustc --version
@@ -56,6 +61,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: false
 
       - name: Rust toolchain
         run: rustc --version
