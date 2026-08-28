@@ -9,11 +9,18 @@
 pub mod compact;
 pub mod context;
 pub mod retry;
+pub mod wake;
+
+/// The continuation message committed after a sleep-caused mid-reply loss:
+/// history already holds the truncated reply, so this is the whole prompt
+/// the model needs to finish its own sentence.
+const SLEEP_CONTINUATION: &str = "Your previous reply was cut off because the device slept. \
+Continue from exactly where it stopped.";
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
@@ -283,6 +290,16 @@ pub enum SessionEvent {
     },
     /// A steering message was accepted mid-turn (for display as a user block).
     Steered(String),
+    /// The process was suspended and woke within the resume window; the
+    /// turn is being continued automatically over the committed partial.
+    Slept {
+        duration_secs: u64,
+    },
+    /// The process was suspended longer than the resume window; the turn
+    /// stopped. Partial work is committed; this is a stop, not an error.
+    SleepStopped {
+        duration_secs: u64,
+    },
     TurnEnd {
         aborted: bool,
     },
@@ -352,6 +369,9 @@ pub struct Agent {
     /// events sender, and a per-turn counter would let its stale ToolEnd
     /// collide with (and corrupt) a later turn's row.
     tool_seq: Arc<AtomicU64>,
+    /// The latest observed system-sleep gap. Written by the turn's
+    /// heartbeat task; tests write it through [`Agent::inject_sleep_gap`].
+    wake: wake::Shared,
     options: AgentOptions,
 }
 
@@ -378,9 +398,20 @@ impl Agent {
             session_name: Arc::new(Mutex::new(None)),
             persist_warned: Arc::new(AtomicBool::new(false)),
             tool_seq: Arc::new(AtomicU64::new(0)),
+            wake: wake::shared(),
             options,
         };
         (agent, rx)
+    }
+
+    /// Test seam: record a sleep gap as if the heartbeat had just observed
+    /// the machine wake. The turn loop attributes stream losses to it when
+    /// the attempt was in flight across the gap.
+    pub fn inject_sleep_gap(&mut self, duration: std::time::Duration) {
+        *self.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake::SleepGap {
+            duration,
+            woke_at: Instant::now(),
+        });
     }
 
     /// Attach the extension host: its tools join (and may override) the
@@ -611,6 +642,7 @@ impl Agent {
         let pending = self.pending.clone();
         let host = self.host.clone();
         let tool_seq = self.tool_seq.clone();
+        let wake = self.wake.clone();
         let tool_mode = if model.supports_tools {
             self.options.tool_mode
         } else {
@@ -623,6 +655,18 @@ impl Agent {
         };
 
         tokio::spawn(async move {
+            // Sleep/wake detection: a one-second heartbeat records wall-vs-
+            // monotonic divergence; the stream-error path consults it to
+            // attribute a loss to a suspension and pick resume vs stop.
+            let heartbeat_stop = Arc::new(AtomicBool::new(false));
+            tokio::spawn(wake::heartbeat(
+                wake.clone(),
+                heartbeat_stop.clone(),
+                Duration::from_secs(1),
+            ));
+            let window_secs = wake::policy::window_secs();
+            let max_continuations = wake::policy::max_continuations();
+            let mut sleep_continuations = 0u32;
             let _ = events.send(SessionEvent::TurnStart).await;
             // One free retry for a blank success per turn: an empty stream is
             // the most transient failure there is, and ending the turn on the
@@ -694,11 +738,20 @@ impl Agent {
                 // initial request. MAX_ATTEMPTS is a request budget, not a
                 // retry budget.
                 let mut attempt = 1u32;
+                // When this attempt's stream opened. A sleep gap whose wake
+                // came after this instant happened with the attempt in
+                // flight, so a loss from it is attributable to the sleep.
+                let mut attempt_started = Instant::now();
                 let (mut rx, mut handle) = providers::stream(clone_request(&request));
 
                 let mut text = String::new();
                 let mut calls: Vec<ToolCall> = Vec::new();
                 let mut reasoning_items: Vec<String> = Vec::new();
+                // Set when a mid-reply loss should resume via a continuation
+                // over the committed partial; when the window or the
+                // continuation cap is exhausted, the stop flag is set instead.
+                let mut sleep_resume: Option<Duration> = None;
+                let mut sleep_stopped = false;
                 // A dialect can stream thought deltas without ever
                 // committing a ReasoningItem (e.g. Gemini's empty-text
                 // thought chunks), so a thinking-only stream must still
@@ -792,16 +845,63 @@ impl Agent {
                             step_usage = Some((input, output, cache_read));
                         }
                         ProviderEvent::Error(err) => {
+                            // A suspension that outlived the resume window
+                            // stops the run whatever the provider call died
+                            // of: partial work is committed below, and the
+                            // stop is reported as a stop, not an error.
+                            if let Some(gap) = wake::gap_since(&wake, attempt_started)
+                                .filter(|gap| gap.duration.as_secs() >= window_secs)
+                            {
+                                let _ = events
+                                    .send(SessionEvent::SleepStopped {
+                                        duration_secs: gap.duration.as_secs(),
+                                    })
+                                    .await;
+                                let _ = events
+                                    .send(SessionEvent::Warning(format!(
+                                        "run stopped — the device was asleep for {} (window {window_secs}s)",
+                                        gap.label()
+                                    )))
+                                    .await;
+                                handle.abort();
+                                errored = true;
+                                sleep_stopped = true;
+                                break 'stream;
+                            }
+                            let nothing_produced = text.is_empty()
+                                && calls.is_empty()
+                                && reasoning_items.is_empty()
+                                && !reasoning_streamed;
+                            // The attempt was in flight across a sleep that
+                            // fits the window: the run keeps going. Nothing
+                            // streamed means an immediate replay — not
+                            // charged to the attempt budget, since the loss
+                            // was the machine's, not the provider's.
+                            let slept_through = wake::gap_since(&wake, attempt_started).is_some();
+                            if nothing_produced && slept_through {
+                                let duration = wake::gap_since(&wake, attempt_started)
+                                    .map(|gap| gap.duration.as_secs())
+                                    .unwrap_or(0);
+                                let _ = events
+                                    .send(SessionEvent::Slept {
+                                        duration_secs: duration,
+                                    })
+                                    .await;
+                                // No artificial backoff — the machine just
+                                // woke; let the connect decide.
+                                attempt_started = Instant::now();
+                                let (nrx, nhandle) = providers::stream(clone_request(&request));
+                                rx = nrx;
+                                handle = nhandle;
+                                assembly_bytes = 0;
+                                continue 'stream;
+                            }
                             // Safe to retry only when the cause itself is
                             // retryable (never Auth or Rejected) AND nothing
                             // has streamed yet this attempt: a delivered
                             // request that already produced output or ran
                             // tools cannot be replayed without risking a
                             // duplicate.
-                            let nothing_produced = text.is_empty()
-                                && calls.is_empty()
-                                && reasoning_items.is_empty()
-                                && !reasoning_streamed;
                             if err.cause.is_retryable()
                                 && nothing_produced
                                 && attempt < retry::MAX_ATTEMPTS
@@ -822,6 +922,7 @@ impl Agent {
                                     handle.abort();
                                     break 'turn true;
                                 }
+                                attempt_started = Instant::now();
                                 let (nrx, nhandle) = providers::stream(clone_request(&request));
                                 rx = nrx;
                                 handle = nhandle;
@@ -829,6 +930,44 @@ impl Agent {
                                 // scratch; the liveness counter follows.
                                 assembly_bytes = 0;
                                 continue 'stream;
+                            }
+                            // A mid-reply loss under the window resumes
+                            // differently: the partial reply is committed
+                            // below, and a continuation request lets the
+                            // model finish its own sentence — bounded by the
+                            // continuation cap so lid-flapping cannot chain
+                            // turns unattended.
+                            if !nothing_produced {
+                                if let Some(gap) = wake::gap_since(&wake, attempt_started) {
+                                    if sleep_continuations < max_continuations {
+                                        sleep_resume = Some(gap.duration);
+                                        errored = true;
+                                        break 'stream;
+                                    }
+                                    let _ = events
+                                        .send(SessionEvent::SleepStopped {
+                                            duration_secs: gap.duration.as_secs(),
+                                        })
+                                        .await;
+                                    let _ = events
+                                        .send(SessionEvent::Warning(format!(
+                                            "run stopped — the device was asleep for {} (continuation cap {max_continuations} reached)",
+                                            gap.label()
+                                        )))
+                                        .await;
+                                    handle.abort();
+                                    // Enter the cancel-family stop path (like
+                                    // the past-window branch above): commit the
+                                    // partial once, synthesize results for any
+                                    // unrun calls, and end the turn. Without
+                                    // `errored` the stop block is skipped and
+                                    // the half-streamed reply is committed as a
+                                    // normal turn — running its tool calls after
+                                    // the run was already reported stopped.
+                                    errored = true;
+                                    sleep_stopped = true;
+                                    break 'stream;
+                                }
                             }
                             // Distinguish genuine exhaustion (the cause was
                             // retryable and nothing had streamed, but the
@@ -938,7 +1077,33 @@ impl Agent {
                             .await;
                         }
                     }
-                    break stream_cancelled;
+                    if stream_cancelled {
+                        break true;
+                    }
+                    // A sleep past the window (or the continuation cap) is a
+                    // stop in the cancel family: the stop line already went
+                    // out, so end aborted without a second row.
+                    if sleep_stopped {
+                        break true;
+                    }
+                    // A sleep under the window resumes: the continuation
+                    // message is committed and shown, and the next step asks
+                    // the model to finish its own sentence.
+                    if let Some(duration) = sleep_resume {
+                        sleep_continuations += 1;
+                        let _ = events
+                            .send(SessionEvent::Slept {
+                                duration_secs: duration.as_secs(),
+                            })
+                            .await;
+                        log.commit_async(ChatMessage::user(SLEEP_CONTINUATION.to_string()))
+                            .await;
+                        let _ = events
+                            .send(SessionEvent::Steered(SLEEP_CONTINUATION.to_string()))
+                            .await;
+                        continue 'turn;
+                    }
+                    break false;
                 }
 
                 // A stream that ends with no text, no calls, no reasoning,
@@ -1130,6 +1295,7 @@ impl Agent {
                 }
             };
             let _ = events.send(SessionEvent::TurnEnd { aborted }).await;
+            heartbeat_stop.store(true, Ordering::SeqCst);
             if let Some(h) = &host {
                 h.event("turn_end", serde_json::json!({"aborted": aborted}))
                     .await;

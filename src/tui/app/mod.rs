@@ -52,6 +52,10 @@ struct ActiveTurn {
     tool_blocks: std::collections::HashMap<u64, usize>,
     /// Batch members not yet terminal, including serially pending calls.
     pending_tools: usize,
+    /// Set when the turn was stopped because the device slept past the
+    /// resume window: the stop line is already in the transcript, so the
+    /// cancelled row is suppressed at TurnEnd.
+    sleep_stopped: bool,
     /// Accumulated provider-billed estimate for this turn, when the model
     /// declares rates. Unlike the context gauge, every request step counts.
     cost_usd: Option<f64>,

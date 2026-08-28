@@ -18,6 +18,7 @@ impl App {
                     turn: Turn::new(),
                     started: Instant::now(),
                     error: None,
+                    sleep_stopped: false,
                     tool_blocks: std::collections::HashMap::new(),
                     pending_tools: 0,
                     cost_usd: self.agent.model.pricing.as_ref().map(|_| 0.0),
@@ -227,6 +228,7 @@ impl App {
                         attempt,
                         limit,
                         delay_secs,
+                        since: Instant::now(),
                         cause,
                         reason,
                     });
@@ -260,6 +262,32 @@ impl App {
             SessionEvent::Warning(message) => {
                 self.notice(format!("warning: {message}"));
             }
+            SessionEvent::Slept { duration_secs } => {
+                // The device slept mid-run and woke inside the window: say
+                // so where the work happened, then the continuation follows
+                // as its own user turn.
+                self.transcript.push(Block::new(
+                    Kind::System,
+                    format!(
+                        "the device was asleep for {} — continuing",
+                        crate::core::output::format_elapsed(duration_secs)
+                    ),
+                ));
+            }
+            SessionEvent::SleepStopped { duration_secs } => {
+                // Past the resume window: a stop in the cancelled family.
+                // The TurnEnd row is suppressed; this line is the record.
+                if let Some(s) = &mut self.active {
+                    s.sleep_stopped = true;
+                }
+                self.transcript.push(Block::new(
+                    Kind::System,
+                    format!(
+                        "run stopped — the device was asleep for {}",
+                        crate::core::output::format_elapsed(duration_secs)
+                    ),
+                ));
+            }
             SessionEvent::TurnEnd { aborted } => {
                 let stranded = self.agent.on_turn_end();
                 if aborted {
@@ -281,10 +309,11 @@ impl App {
                 self.end_thinking_burst();
                 let Some(s) = self.active.take() else { return };
                 // The reference grammar: a completed turn ends with a dim
-                // duration-and-tokens row; a cancelled one says so instead.
-                if aborted {
+                // duration-and-tokens row; a cancelled one says so instead —
+                // unless the sleep stop already said it its own way.
+                if aborted && !s.sleep_stopped {
                     self.transcript.push(Block::new(Kind::System, "cancelled"));
-                } else {
+                } else if !aborted {
                     let tokens = if s.turn.input == 0 && s.turn.output == 0 {
                         String::new()
                     } else {

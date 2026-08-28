@@ -6,6 +6,7 @@
 mod common;
 
 use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{env_lock, serve_raw, serve_sse, sse_response, test_model, Home};
@@ -499,4 +500,256 @@ async fn body_transport_error_before_output_retries() {
     assert!(saw_retry, "a pre-output body failure must retry");
     assert!(!saw_error, "the retry should recover the turn");
     assert_eq!(text, "ok");
+}
+
+/// One scripted behavior per POST the agent makes.
+enum Act {
+    /// Send one text delta, hold the socket, then drop it mid-stream.
+    Hold,
+    /// Close before any bytes — a loss with nothing produced.
+    Close,
+    /// Answer with a complete, successful SSE stream.
+    Answer(&'static str),
+}
+
+// A raw server scripting each POST the agent makes (GET /models gets the
+// empty catalog). Holds and closes reproduce suspend-killed sockets: one
+// delta then EOF, or silence before headers.
+fn sleepy_server(script: Vec<Act>) -> u16 {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let script = Arc::new(Mutex::new(script.into_iter()));
+    std::thread::spawn(move || loop {
+        let Ok((mut sock, _)) = listener.accept() else {
+            return;
+        };
+        let act = script.lock().unwrap_or_else(|e| e.into_inner()).next();
+        let Some(act) = act else { return };
+        let mut buf = vec![0u8; 262144];
+        let n = sock.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+        if request.starts_with("GET") {
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{\"object\":\"list\",\"data\":[]}",
+            )
+            .unwrap();
+            continue;
+        }
+        match act {
+            Act::Hold => {
+                let body = "data: {\"choices\":[{\"delta\":{\"content\":\"half a reply\"}}]}\n\n";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+                );
+                sock.write_all(response.as_bytes()).unwrap();
+                sock.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(600));
+                // Dropping the socket closes it mid-stream.
+            }
+            Act::Close => {
+                // Hold briefly so tests can inject a gap while the request
+                // is in flight, then drop with no response — a loss with
+                // nothing produced.
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            Act::Answer(text) => {
+                let body = format!(
+                    "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\n\
+                     data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":5,\"completion_tokens\":1}}}}\n\n\
+                     data: [DONE]\n\n"
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+                );
+                sock.write_all(response.as_bytes()).unwrap();
+            }
+        }
+    });
+    port
+}
+
+// The device slept mid-reply and woke inside the window: the partial reply
+// is committed, a continuation turn finishes the sentence, and the events
+// say so — Slept, the continuation as a user turn, no error.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sleep_under_the_window_resumes_over_the_committed_partial() {
+    let _lock = env_lock();
+    let port = sleepy_server(vec![Act::Hold, Act::Answer("and now it is finished")]);
+    let _home = mock_home();
+
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
+    agent.submit("hi".into(), "sys".into());
+
+    let mut saw_text = false;
+    let mut saw_slept = false;
+    let mut saw_steered = false;
+    let mut final_text = String::new();
+    let mut errored = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            SessionEvent::TextDelta(delta) => {
+                if !saw_text {
+                    // The attempt is in flight; the machine "wakes" now.
+                    agent.inject_sleep_gap(Duration::from_secs(60));
+                    saw_text = true;
+                }
+                final_text.push_str(&delta);
+            }
+            SessionEvent::Slept { duration_secs } => {
+                assert_eq!(duration_secs, 60);
+                saw_slept = true;
+            }
+            SessionEvent::Steered(text) => {
+                assert!(text.contains("Continue from exactly where it stopped"));
+                saw_steered = true;
+            }
+            SessionEvent::Error(_) => errored = true,
+            SessionEvent::TurnEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(saw_text && saw_slept && saw_steered);
+    assert!(!errored, "a resumed turn is not a failed turn");
+    assert!(
+        final_text.contains("half a reply") && final_text.contains("finished"),
+        "the continuation completes the sentence: {final_text}"
+    );
+    // History is honest: partial reply, continuation message, completion.
+    let history = agent.history_snapshot();
+    let user_messages = history.iter().filter(|m| m.role == "user").count();
+    let partial = history
+        .iter()
+        .any(|m| m.role == "assistant" && m.content.contains("half a reply"));
+    assert!(partial, "the watched partial stays in history");
+    assert!(user_messages >= 2, "the continuation is a real user turn");
+}
+
+// Asleep past the resume window: the turn stops with the system line and
+// an aborted end — a stop, not an error.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sleep_past_the_window_stops_the_turn() {
+    let _lock = env_lock();
+    let port = sleepy_server(vec![Act::Hold]);
+    let _home = mock_home();
+
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
+    agent.submit("hi".into(), "sys".into());
+
+    let mut saw_text = false;
+    let mut saw_stop = false;
+    let mut saw_warning = false;
+    let mut aborted = false;
+    let mut errored = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            SessionEvent::TextDelta(_) => {
+                if !saw_text {
+                    agent.inject_sleep_gap(Duration::from_secs(600));
+                    saw_text = true;
+                }
+            }
+            SessionEvent::SleepStopped { duration_secs } => {
+                assert_eq!(duration_secs, 600);
+                saw_stop = true;
+            }
+            SessionEvent::Warning(message) => saw_warning = message.contains("run stopped"),
+            SessionEvent::Error(_) => errored = true,
+            SessionEvent::TurnEnd { aborted: a } => {
+                aborted = a;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_text && saw_stop && saw_warning && aborted);
+    assert!(!errored, "the sleep stop is a stop, not an error");
+}
+
+// Asleep before anything streamed: the replay is immediate and invisible —
+// no continuation turn, no error, just the fresh attempt finishing.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sleep_before_any_output_replays_invisibly() {
+    let _lock = env_lock();
+    let port = sleepy_server(vec![Act::Close, Act::Answer("recovered")]);
+    let _home = mock_home();
+
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
+    agent.submit("hi".into(), "sys".into());
+    // Give the request time to be in flight, then wake the machine.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    agent.inject_sleep_gap(Duration::from_secs(30));
+
+    let mut saw_slept = false;
+    let mut saw_text = false;
+    let mut saw_steered = false;
+    let mut errored = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            SessionEvent::Slept { duration_secs } => {
+                assert_eq!(duration_secs, 30);
+                saw_slept = true;
+            }
+            SessionEvent::TextDelta(_) => saw_text = true,
+            SessionEvent::Steered(_) => saw_steered = true,
+            SessionEvent::Error(_) => errored = true,
+            SessionEvent::TurnEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(saw_slept && saw_text);
+    assert!(!saw_steered, "nothing streamed, so no continuation turn");
+    assert!(!errored);
+}
+
+// Reaching the continuation cap is a stop, not a silent recovery: after the
+// last allowed continuation the next mid-reply sleep must stop the turn in the
+// cancel family (SleepStopped + "continuation cap" warning + aborted end) and
+// must NOT commit the truncated reply as a normal turn or run its tool calls.
+// Regression for the cap branch omitting `errored`, which let execution fall
+// through to the success path.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn reaching_the_continuation_cap_stops_the_turn() {
+    let _lock = env_lock();
+    // Four mid-reply losses: three continuations (cap is 3), the fourth caps.
+    let port = sleepy_server(vec![Act::Hold, Act::Hold, Act::Hold, Act::Hold]);
+    let _home = mock_home();
+
+    let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
+    agent.submit("hi".into(), "sys".into());
+
+    let mut slept = 0;
+    let mut stopped = false;
+    let mut saw_cap_warning = false;
+    let mut aborted = false;
+    let mut errored = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            // Each attempt streams one delta before the socket drops; wake the
+            // machine while that attempt is in flight so every loss is a
+            // mid-reply sleep under the window.
+            SessionEvent::TextDelta(_) => agent.inject_sleep_gap(Duration::from_secs(60)),
+            SessionEvent::Slept { .. } => slept += 1,
+            SessionEvent::SleepStopped { .. } => stopped = true,
+            SessionEvent::Warning(message) => {
+                if message.contains("continuation cap") {
+                    saw_cap_warning = true;
+                }
+            }
+            SessionEvent::Error(_) => errored = true,
+            SessionEvent::TurnEnd { aborted: a } => {
+                aborted = a;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(slept, 3, "exactly the three allowed continuations resumed");
+    assert!(stopped && saw_cap_warning, "the cap stop is announced");
+    assert!(aborted, "the turn ends aborted, not as a normal completion");
+    assert!(!errored, "the cap stop is a stop, not an error");
 }

@@ -19,14 +19,15 @@ pub enum TurnPhase {
     AssistantText,
 }
 
-/// The detail `TurnPhase::Retrying` needs to render — set once per failure,
-/// not live-ticked: an honest snapshot of what's happening beats a countdown
-/// that can drift from when the retry actually fires.
+/// The detail `TurnPhase::Retrying` needs to render. `since` anchors the
+/// live countdown — the label ticks the remaining seconds down from
+/// `delay_secs` as the backoff burns, pi-style.
 #[derive(Clone, Debug)]
 pub struct RetryStatus {
     pub attempt: u32,
     pub limit: u32,
     pub delay_secs: u64,
+    pub since: std::time::Instant,
     pub cause: FailureCause,
     pub reason: String,
 }
@@ -51,17 +52,9 @@ fn clip(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// Elapsed time in the activity row: seconds under a minute, minutes and
-/// seconds above, hours and minutes beyond — never a bare `636s`.
-pub fn format_elapsed(secs: u64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m {:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
+/// Elapsed time in the activity row grammar — the shared core formatter,
+/// re-exported under its long-standing name.
+pub use crate::core::output::format_elapsed;
 
 /// Per-turn token flow and focused activity phase.
 pub struct Turn {
@@ -177,21 +170,23 @@ impl Turn {
             }
             TurnPhase::Retrying => {
                 let r = self.retry.as_ref()?;
-                let reason = clip(&r.reason, 56);
-                Some(if r.delay_secs > 0 {
+                let waited = r.since.elapsed().as_secs();
+                let remaining = r.delay_secs.saturating_sub(waited);
+                let reason = clip(&r.reason, 48);
+                let hint = if reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {reason}")
+                };
+                Some(if remaining > 0 {
                     format!(
-                        "{} · {reason} · retrying in {}s · attempt {}/{}",
-                        r.cause.label(),
-                        r.delay_secs,
-                        r.attempt,
-                        r.limit
+                        "Retrying ({}/{}) in {}s… esc to cancel{hint}",
+                        r.attempt, r.limit, remaining
                     )
                 } else {
                     format!(
-                        "{} · {reason} · retrying now · attempt {}/{}",
-                        r.cause.label(),
-                        r.attempt,
-                        r.limit
+                        "Retrying ({}/{}) now… esc to cancel{hint}",
+                        r.attempt, r.limit
                     )
                 })
             }
@@ -349,36 +344,38 @@ mod tests {
     }
 
     #[test]
-    fn retrying_shows_cause_reason_delay_and_attempt() {
+    fn retrying_counts_down_with_an_esc_hint() {
         let mut turn = Turn::new();
         turn.phase = TurnPhase::Retrying;
         turn.retry = Some(RetryStatus {
             attempt: 3,
             limit: 10,
             delay_secs: 4,
+            since: std::time::Instant::now(),
             cause: FailureCause::ProviderUnavailable,
             reason: "503 Service Unavailable".into(),
         });
         assert_eq!(
             turn.label(0).as_deref(),
-            Some("Provider unavailable · 503 Service Unavailable · retrying in 4s · attempt 3/10")
+            Some("Retrying (3/10) in 4s… esc to cancel · 503 Service Unavailable")
         );
     }
 
     #[test]
-    fn retrying_with_no_delay_says_retrying_now() {
+    fn a_burned_backoff_says_retrying_now() {
         let mut turn = Turn::new();
         turn.phase = TurnPhase::Retrying;
         turn.retry = Some(RetryStatus {
             attempt: 1,
             limit: 10,
-            delay_secs: 0,
+            delay_secs: 4,
+            since: std::time::Instant::now() - std::time::Duration::from_secs(9),
             cause: FailureCause::RateLimited,
             reason: "429 Too Many Requests".into(),
         });
         assert_eq!(
             turn.label(0).as_deref(),
-            Some("Rate limited · 429 Too Many Requests · retrying now · attempt 1/10")
+            Some("Retrying (1/10) now… esc to cancel · 429 Too Many Requests")
         );
     }
 
@@ -390,6 +387,7 @@ mod tests {
             attempt: 1,
             limit: 10,
             delay_secs: 1,
+            since: std::time::Instant::now(),
             cause: FailureCause::Network,
             reason: "x".repeat(200),
         });

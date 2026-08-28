@@ -21,6 +21,15 @@ pub fn get_string(key: &str) -> Option<String> {
         .and_then(|v| v.as_str().map(String::from))
 }
 
+/// A number key: absent means "no value set" — callers apply their own
+/// built-in default.
+pub fn get_u64(key: &str) -> Option<u64> {
+    crate::core::config::store::read_object(&home::settings_path())
+        .unwrap_or_default()
+        .get(key)
+        .and_then(|v| v.as_u64())
+}
+
 /// Set one key. Every other key on disk — known or not — is preserved, the
 /// write is atomic, and a corrupt file is quarantined rather than reset.
 pub fn set_string(key: &str, val: &str) -> std::io::Result<()> {

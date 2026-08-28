@@ -1,6 +1,20 @@
 //! Display formatters: token counts, durations, model labels.
 //! Shapes are byte-pinned by the parity tests.
 
+/// Elapsed time in the activity-row grammar: seconds under a minute,
+/// minutes and seconds above, hours and minutes beyond — never a bare
+/// `636s`. Lives in core so terminal-free code (wake records) shares the
+/// exact shape the TUI prints.
+pub fn format_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 /// `42` → `42`, `9600` → `9.6k`, `15000` → `15k`, `999000` → `999k`.
 pub fn format_tokens(tokens: u64) -> String {
     if tokens < 1000 {

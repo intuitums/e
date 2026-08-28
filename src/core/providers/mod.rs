@@ -739,6 +739,12 @@ pub fn http() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .user_agent(format!("e/{}", crate::VERSION))
             .connect_timeout(std::time::Duration::from_secs(30))
+            // After a system sleep, pooled connections are dead but look
+            // alive locally — a request that reuses one would sit out the
+            // full stall budget before failing. Keepalives retire them
+            // quickly on both sides instead.
+            .tcp_keepalive(std::time::Duration::from_secs(15))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("http client")
     })

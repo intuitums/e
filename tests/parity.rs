@@ -534,3 +534,45 @@ fn a_malformed_user_theme_falls_back_instead_of_panicking() {
     let ok = Theme::from_json(r##"{"vars":{"ink":235},"colors":{"text":"#a1b2c3"}}"##).unwrap();
     assert_eq!(ok.fg_prefix("text"), "\x1b[38;2;161;178;195m");
 }
+
+#[test]
+fn sleep_events_speak_in_the_system_grammar() {
+    use e::core::output::format_elapsed;
+    use e::tui::transcript::{Block, Kind};
+    let theme = e::tui::theme::resolve("dark", false);
+
+    // Woke inside the window: the record of the gap, then the turn goes on.
+    let resumed = Block::new(
+        Kind::System,
+        format!(
+            "the device was asleep for {} — continuing",
+            format_elapsed(190)
+        ),
+    );
+    let rows = resumed.lines_for_test(&theme, 80);
+    assert_eq!(
+        rows[0],
+        theme.fg(
+            "dim",
+            "● System: the device was asleep for 3m 10s — continuing"
+        )
+    );
+
+    // Past the window: the stop line sits where "cancelled" would, and the
+    // TurnEnd row is suppressed for it.
+    let stopped = Block::new(
+        Kind::System,
+        format!(
+            "run stopped — the device was asleep for {}",
+            format_elapsed(22 * 60)
+        ),
+    );
+    let rows = stopped.lines_for_test(&theme, 80);
+    assert_eq!(
+        rows[0],
+        theme.fg(
+            "dim",
+            "● System: run stopped — the device was asleep for 22m 00s"
+        )
+    );
+}
