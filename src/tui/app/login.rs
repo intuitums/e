@@ -87,7 +87,9 @@ impl App {
         let Some(provider) = providers.get(selected) else {
             return;
         };
-        self.auth = Some(AuthStage::Waiting);
+        self.auth = Some(AuthStage::Waiting {
+            back: Some(selected),
+        });
         self.notice(format!("starting the {} sign-in…", provider.display));
         match provider.auth.oauth.as_deref() {
             Some("xai-device") => self.start_xai_login(),
@@ -110,15 +112,25 @@ impl App {
         self.editor.set_text("");
     }
 
+    /// Key entry ended: save, then show the outcome beat and return to the
+    /// provider list.
     pub(super) fn submit_api_key(&mut self, key: &str) {
         let Some(secret_for) = self.pending_key.take() else {
             return;
         };
-        self.auth = None;
         self.editor.mask = false;
+        let selected = crate::core::providers::registry::key_providers()
+            .iter()
+            .position(|p| p.name == secret_for)
+            .unwrap_or(0);
+        let back = authpanel::BackTarget::Key(selected);
         match crate::core::auth::login::save_api_key(&secret_for, key) {
             Ok(()) => {
-                self.notice(format!("{secret_for}: key saved to ~/.e/auth.json"));
+                self.auth = Some(AuthStage::Done {
+                    ok: true,
+                    message: format!("{secret_for} key saved to ~/.e/auth.json"),
+                    back,
+                });
                 // An API-key sign-in is a sign-in: emit the same typed
                 // outcome the OAuth flows send, so the stranded-model
                 // re-pick happens here too, not only for browser logins.
@@ -129,7 +141,14 @@ impl App {
                         flow_id: None,
                     });
             }
-            Err(e) => self.notice(format!("{secret_for}: {e}")),
+            Err(e) => {
+                self.notice(format!("{secret_for}: {e}"));
+                self.auth = Some(AuthStage::Done {
+                    ok: false,
+                    message: format!("the {secret_for} key was not saved"),
+                    back,
+                });
+            }
         }
     }
 
@@ -148,14 +167,14 @@ impl App {
                 "starting the {} sign-in…",
                 model::display_name(&provider)
             ));
-            self.auth = Some(AuthStage::Waiting);
+            self.auth = Some(AuthStage::Waiting { back: None });
             self.start_codex_login(provider);
         } else if flow.as_deref() == Some("xai-device") {
             self.notice(format!(
                 "starting the {} sign-in…",
                 model::display_name(&provider)
             ));
-            self.auth = Some(AuthStage::Waiting);
+            self.auth = Some(AuthStage::Waiting { back: None });
             self.start_xai_login();
         } else {
             self.cancel_login();

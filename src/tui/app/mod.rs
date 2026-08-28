@@ -297,7 +297,7 @@ impl App {
         }
         rows.push(self.theme.fg(
             "statusline",
-            "Full detail · ←/→ switch · ctrl o close · ↑↓ scroll · Esc close",
+            "Full detail · ←/→ switch · ↑↓/pgup·pgdn scroll · ctrl o close · Esc close",
         ));
         rows
     }
@@ -1794,7 +1794,10 @@ pub async fn run(
                                 KeyCode::Down => panel.step(1),
                                 KeyCode::Left => setting_error = panel.change(-1).err(),
                                 KeyCode::Right => setting_error = panel.change(1).err(),
-                                KeyCode::Esc | KeyCode::Enter => app.settings = None,
+                                // Esc alone closes: Enter opens the panel
+                                // from the command menu, so it must not be
+                                // the same key that dismisses it.
+                                KeyCode::Esc => app.settings = None,
                                 _ => {}
                             }
                             if let Some(error) = setting_error {
@@ -1843,7 +1846,10 @@ pub async fn run(
                                     app.auth_key(choice);
                                 }
                                 (_, KeyCode::Esc) => {
-                                    let waiting = matches!(&*stage, AuthStage::Waiting);
+                                    // Esc closes the whole panel from any
+                                    // depth; an in-flight flow is cancelled
+                                    // with it.
+                                    let waiting = matches!(&*stage, AuthStage::Waiting { .. });
                                     let cancelled = app.cancel_login();
                                     app.auth = None;
                                     app.pending_key = None;
@@ -1852,6 +1858,52 @@ pub async fn run(
                                     if waiting && cancelled {
                                         app.notice("login cancelled".into());
                                     }
+                                }
+                                (AuthStage::Account { .. }, KeyCode::Backspace) => {
+                                    *stage = AuthStage::Choose { selected: 0 };
+                                }
+                                (AuthStage::Key { .. }, KeyCode::Backspace) => {
+                                    *stage = AuthStage::Choose { selected: 1 };
+                                }
+                                // The entry keeps Backspace for editing while
+                                // there is text; an empty input navigates back.
+                                (AuthStage::ApiKey { .. }, KeyCode::Backspace)
+                                    if app.editor.is_empty() =>
+                                {
+                                    let provider = match &*stage {
+                                        AuthStage::ApiKey { provider } => provider.clone(),
+                                        _ => unreachable!(),
+                                    };
+                                    app.pending_key = None;
+                                    app.editor.mask = false;
+                                    let selected = crate::core::providers::registry::key_providers()
+                                        .iter()
+                                        .position(|p| p.name == provider)
+                                        .unwrap_or(0);
+                                    *stage = AuthStage::Key { selected };
+                                }
+                                (AuthStage::Waiting { back }, KeyCode::Backspace) => {
+                                    let back = *back;
+                                    let cancelled = app.cancel_login();
+                                    match back {
+                                        Some(selected) => {
+                                            app.auth = Some(AuthStage::Account { selected });
+                                            if cancelled {
+                                                app.notice("login cancelled".into());
+                                            }
+                                        }
+                                        // Launched by `/login <provider>`: no
+                                        // list to return to, so close.
+                                        None => {
+                                            app.auth = None;
+                                            if cancelled {
+                                                app.notice("login cancelled".into());
+                                            }
+                                        }
+                                    }
+                                }
+                                (AuthStage::Done { back, .. }, KeyCode::Enter | KeyCode::Backspace) => {
+                                    *stage = back.stage();
                                 }
                                 (AuthStage::ApiKey { .. }, _) => {
                                     if let Some(key) = key_of(&k, &app.keymap) {
@@ -2110,11 +2162,21 @@ pub async fn run(
                 // Control flow hangs off the typed outcome; the human-readable
                 // notice arrives separately on `jobs`.
                 match outcome {
-                    Some(crate::core::auth::login::Outcome::SignedIn { flow_id, .. })
-                        if app.login_outcome_is_current(flow_id) => {
+                    Some(crate::core::auth::login::Outcome::SignedIn { flow_id, provider })
+                        if app.login_outcome_is_current(flow_id) =>
+                    {
                             app.login_task.take();
-                            if matches!(app.auth, Some(AuthStage::Waiting)) {
-                                app.auth = None;
+                            // Stay in the panel: show the outcome beat, then
+                            // land back on the account list.
+                            if let Some(AuthStage::Waiting { back }) = &app.auth {
+                                let back = back.unwrap_or(0);
+                                let display =
+                                    crate::core::providers::catalog::display_name(&provider);
+                                app.auth = Some(AuthStage::Done {
+                                    ok: true,
+                                    message: format!("{display} connected"),
+                                    back: authpanel::BackTarget::Account(back),
+                                });
                             }
                             tokio::spawn(crate::core::providers::catalog::refresh_remote());
                             // A fresh credential may make new models available:
@@ -2131,7 +2193,18 @@ pub async fn run(
                     Some(crate::core::auth::login::Outcome::Failed { flow_id })
                         if app.login_outcome_is_current(Some(flow_id)) => {
                             app.login_task.take();
-                            app.auth = None;
+                            if let Some(AuthStage::Waiting { back }) = &app.auth {
+                                let back = back.unwrap_or(0);
+                                app.auth = Some(AuthStage::Done {
+                                    ok: false,
+                                    message:
+                                        "sign-in did not complete — details in the notice below"
+                                            .into(),
+                                    back: authpanel::BackTarget::Account(back),
+                                });
+                            } else {
+                                app.auth = None;
+                            }
                         }
                     // A canceled flow can finish just before its task aborts.
                     // Its queued outcome must not affect the replacement flow.

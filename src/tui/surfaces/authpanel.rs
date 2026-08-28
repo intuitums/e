@@ -7,14 +7,21 @@
 //! Stages: Choose (account vs API key, the reference flow's wording) →
 //! Account or Key (which provider, labeled by display name) → ApiKey (inline
 //! `┃ •••` entry mirroring the composer) or Waiting (browser authorization
-//! in flight).
+//! in flight) → Done (the outcome beat, returning to the list).
+//!
+//! Navigation contract: Backspace goes back one level (in the API-key entry
+//! it deletes while there is text and only navigates when the input is
+//! empty); Esc always closes the whole panel. Providers already signed in
+//! are marked in the description column so a return visit shows the result.
 
+use crate::core::auth::{self};
 use crate::tui::markdown::visible_width;
-use crate::tui::render::bold;
+use crate::tui::render::{self, bold};
 use crate::tui::theme::Theme;
 
 pub enum AuthStage {
-    /// The method choice; `selected` indexes the two options.
+    /// The method choice; `selected` indexes the two options. The root:
+    /// Esc closes the panel, Backspace has nowhere to go.
     Choose { selected: usize },
     /// Which subscription to sign in with.
     Account { selected: usize },
@@ -22,8 +29,34 @@ pub enum AuthStage {
     Key { selected: usize },
     /// Key entry for a provider; the composer holds the (masked) secret.
     ApiKey { provider: String },
-    /// Browser OAuth in flight.
-    Waiting,
+    /// Browser OAuth in flight. `back` is the account-list row that launched
+    /// the flow, or None when it was launched by a direct `/login <provider>`
+    /// command (canceling that returns nowhere — the panel closes).
+    Waiting { back: Option<usize> },
+    /// The flow's outcome beat: shows the result, then any key but Esc
+    /// returns to the list the flow belongs to.
+    Done {
+        ok: bool,
+        message: String,
+        back: BackTarget,
+    },
+}
+
+/// Where a finished flow returns: the list it belongs to, selection preserved.
+#[derive(Clone, Copy)]
+pub enum BackTarget {
+    Account(usize),
+    Key(usize),
+}
+
+impl BackTarget {
+    /// The stage this target returns to.
+    pub fn stage(self) -> AuthStage {
+        match self {
+            BackTarget::Account(selected) => AuthStage::Account { selected },
+            BackTarget::Key(selected) => AuthStage::Key { selected },
+        }
+    }
 }
 
 const DESCRIPTION_COL: usize = 34;
@@ -79,20 +112,30 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
                 dim("   Sign in with an account"),
                 String::new(),
             ];
+            let auth = auth::load();
             for (i, provider) in crate::core::providers::registry::oauth_providers()
                 .iter()
                 .enumerate()
             {
+                let connected = auth::signed_in(&auth, &provider.name);
+                let description = if connected {
+                    "signed in"
+                } else {
+                    &provider.auth.oauth_hint
+                };
                 rows.push(choice_row(
                     theme,
                     *selected == i,
                     &provider.display,
-                    &provider.auth.oauth_hint,
+                    description,
                     width,
                 ));
             }
             rows.push(String::new());
-            rows.push(dim("   ↑↓ Choose · Enter Continue · Esc Cancel"));
+            rows.push(dim(&format!(
+                "   ↑↓ Choose · Enter Continue · {} Back · Esc Close",
+                render::backspace_label(),
+            )));
             rows
         }
         AuthStage::Key { selected } => {
@@ -101,20 +144,30 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
                 dim("   Sign in with an API key"),
                 String::new(),
             ];
+            let auth = auth::load();
             for (i, provider) in crate::core::providers::registry::key_providers()
                 .iter()
                 .enumerate()
             {
+                let connected = auth::signed_in(&auth, &provider.name);
+                let description = if connected {
+                    "signed in"
+                } else {
+                    &provider.auth.key_hint
+                };
                 rows.push(choice_row(
                     theme,
                     *selected == i,
                     &provider.display,
-                    &provider.auth.key_hint,
+                    description,
                     width,
                 ));
             }
             rows.push(String::new());
-            rows.push(dim("   ↑↓ Choose · Enter Continue · Esc Cancel"));
+            rows.push(dim(&format!(
+                "   ↑↓ Choose · Enter Continue · {} Back · Esc Close",
+                render::backspace_label(),
+            )));
             rows
         }
         AuthStage::ApiKey { provider } => {
@@ -140,15 +193,35 @@ pub fn render(stage: &AuthStage, theme: &Theme, width: usize, mask_count: usize)
                     crate::core::providers::catalog::display_name(provider)
                 )),
                 entry,
-                dim("   Enter saves · Esc cancels"),
+                dim(&format!(
+                    "   Enter saves · {} Back · Esc Close",
+                    render::backspace_label()
+                )),
             ]
         }
-        AuthStage::Waiting => vec![
+        AuthStage::Waiting { .. } => vec![
             String::new(),
             dim("   Sign in with an account"),
             String::new(),
             dim("   Waiting for authorization in the browser…"),
-            dim("   Esc cancels sign-in"),
+            dim(&format!(
+                "   {} cancels sign-in · Esc Close",
+                render::backspace_label()
+            )),
         ],
+        AuthStage::Done { ok, message, .. } => {
+            let head = if *ok {
+                bold(&theme.fg("userMessageText", "   Login successful"))
+            } else {
+                bold(&theme.fg("userMessageText", "   Sign-in failed"))
+            };
+            vec![
+                String::new(),
+                head,
+                dim(&format!("   {message}")),
+                String::new(),
+                dim("   Enter Continue · Esc Close"),
+            ]
+        }
     }
 }

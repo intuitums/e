@@ -28,6 +28,17 @@ pub fn dim(s: &str) -> String {
     format!("{DIM_ON}{s}{WEIGHT_OFF}")
 }
 
+/// The user-facing label for the backspace key: Apple's keyboards legibly
+/// say "delete", so on macOS the hints name the key the user can find;
+/// everywhere else the key says Backspace.
+pub fn backspace_label() -> &'static str {
+    if std::env::consts::OS == "macos" {
+        "delete"
+    } else {
+        "Backspace"
+    }
+}
+
 /// Heading styles per level: bold+underline / bold / underline / bold+dim /
 /// dim+underline / dim — the reference level table, byte-pinned.
 pub fn heading_style(level: u8, text: &str) -> String {
