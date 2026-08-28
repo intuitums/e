@@ -24,7 +24,7 @@ fn regex_lite_date(s: &str) -> bool {
 
 fn with_home<F: FnOnce()>(name: &str, f: F) {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let home = std::env::temp_dir().join(format!("e-prompt-{name}"));
+    let home = std::env::temp_dir().join(format!("e-prompt-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).unwrap();
     std::env::set_var("E_HOME", &home);

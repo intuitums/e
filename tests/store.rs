@@ -20,7 +20,9 @@ fn unversioned_configuration_fixtures_remain_json_objects() {
 }
 
 fn home(name: &str) -> PathBuf {
-    let h = std::env::temp_dir().join(format!("e-store-{name}"));
+    // Unique per process so concurrent CI users on a shared box can't collide
+    // on a fixed path (a stale other-user dir would make writes EPERM).
+    let h = std::env::temp_dir().join(format!("e-store-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&h);
     std::fs::create_dir_all(&h).unwrap();
     std::env::set_var("E_HOME", &h);

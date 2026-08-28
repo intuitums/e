@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   guard:
+    # Cheap and trust-sensitive; stays on GitHub-hosted.
     name: Guard (security surface)
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -26,13 +27,18 @@ jobs:
         run: ./scripts/guard.sh
 
   test:
+    # Linux leg runs on the self-hosted runner in the intuitum fleet naming
+    # scheme (Blacksmith-style): 24-core Ubuntu 26.04 box, systemd service
+    # actions.runner.intuitumxyz-e.intuitum-24vcpu-ubuntu-2604-01, user `anvil`.
+    # Fork PRs are held for approval by GitHub's external-contributor gate and
+    # must never be approved onto it; macOS stays GitHub-hosted.
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [intuitum-24vcpu-ubuntu-2604-01, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,7 +51,7 @@ jobs:
 
   performance:
     name: Performance budgets
-    runs-on: ubuntu-latest
+    runs-on: intuitum-24vcpu-ubuntu-2604-01
     timeout-minutes: 20
     steps:
       - name: Checkout
