@@ -383,6 +383,64 @@ fn failed_turns_end_in_error_color() {
 }
 
 #[test]
+fn running_write_and_edit_rows_stay_lean() {
+    use e::tui::transcript::{Block, ToolChild};
+    let theme = e::tui::theme::resolve("dark", false);
+    let mut group = Block::tool_group(vec![ToolChild::pending(
+        1,
+        "write".into(),
+        "Writing".into(),
+        "Wrote".into(),
+        "src/lib.rs".into(),
+    )]);
+    group.start_tool(1);
+    // A write streams no inline content: the tree says "Writing src/lib.rs"
+    // and nothing more — the thinking indicator row is not displaced by a
+    // file dump. (Full content still lands behind ctrl+o.)
+    group.append_tool_output(1, "hello\nworld\n");
+    let rows = group.lines_for_test(&theme, 80);
+    assert!(rows[1].contains("Writing src/lib.rs"));
+    assert!(!rows.iter().any(|line| line.contains('│')));
+
+    // Edits are the same; the completion summary rides the row itself.
+    group.finish_tool(
+        1,
+        e::core::tools::ToolOutcome::Completed,
+        "+2 -0".into(),
+        "hello\nworld\n",
+    );
+    let rows = group.lines_for_test(&theme, 80);
+    assert!(rows[1].contains("Wrote src/lib.rs") && rows[1].contains("+2 -0"));
+    assert!(!rows.iter().any(|line| line.contains('│')));
+}
+
+#[test]
+fn picker_band_holds_a_fixed_height() {
+    use e::tui::menu::{Menu, MenuItem, MenuKind, HINT_USE};
+    let theme = e::tui::theme::resolve("dark", false);
+    let items: Vec<MenuItem> = (0..17)
+        .map(|i| MenuItem::new(&format!("/cmd{i}"), "description", &format!("/cmd{i}")))
+        .collect();
+    let mut menu = Menu::new(MenuKind::Commands, "Commands", HINT_USE, items);
+    let full = menu.render(&theme, 80);
+    assert_eq!(full.len(), 6 + 4, "divider, header, blank, 6 rows, divider");
+
+    // Filtering down to one match keeps the band the same size: the match
+    // sits at the top, the remaining slots stay blank.
+    menu.set_query("cmd15");
+    let filtered = menu.render(&theme, 80);
+    assert_eq!(filtered.len(), full.len());
+    assert!(filtered[3].contains("/cmd15"));
+    assert!(filtered[4].is_empty() && filtered[8].is_empty());
+
+    // No match at all: the same size, the notice on the first body row.
+    menu.set_query("zzz");
+    let empty = menu.render(&theme, 80);
+    assert_eq!(empty.len(), full.len());
+    assert!(empty[3].contains("Nothing found."));
+}
+
+#[test]
 fn interrupted_tools_wear_the_cancelled_glyph() {
     use e::tui::transcript::{Block, Kind, Transcript};
     let theme = e::tui::theme::resolve("dark", false);

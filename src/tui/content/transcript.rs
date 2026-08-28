@@ -170,9 +170,10 @@ impl Block {
                 ToolOutcome::Cancelled => ToolState::Cancelled,
             };
             child.result = Some(summary);
-            if child.output.is_empty()
-                && matches!(child.category.as_str(), "command" | "edit" | "write")
-            {
+            // Command output is the only thing the live preview draws; keep
+            // it captured for a bash tool still running when a late finish
+            // lands.
+            if child.output.is_empty() && child.category == "command" {
                 child.output = crate::core::tools::sanitize_display(content);
             }
         }
@@ -468,12 +469,14 @@ fn clip_plain(text: &str, width: usize) -> String {
 
 /// Pipe rows appear only while the command owns execution focus — the
 /// reference grammar. Completion withdraws them; full output lives behind
-/// ctrl+o, never inline.
+/// ctrl+o, never inline. Live rows are a shell thing: a write or edit shows
+/// in the tree as its one action row, never as the file's content streaming
+/// beneath it.
 fn append_tool_preview(rows: &mut Vec<String>, child: &ToolChild, theme: &Theme) {
     if child.state != ToolState::Running {
         return;
     }
-    if !matches!(child.category.as_str(), "command" | "edit" | "write") {
+    if child.category != "command" {
         return;
     }
     let output: Vec<&str> = child

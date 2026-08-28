@@ -8,6 +8,18 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- The footer picker band (commands, files, skills, sessions, models) is a
+  fixed height: it always shows six selectable rows, padded blank below a
+  short match list, so typing a filter — `/set` narrowing to one command —
+  no longer shrinks and grows the box under the composer.
+
+- Write and edit tool rows stay lean while running: the tree says
+  "Writing src/lib.rs" and nothing more, instead of streaming the file's
+  content as pipe rows beneath the action and displacing the thinking
+  indicator. Commands keep their live output rows; full content for every
+  tool still lands behind ctrl+o, and a completed write still shows its
+  "Wrote … +2 -0" summary on the row itself.
+
 - Launch starts from a clean slate: whatever the terminal showed before e
   started is scrolled into the scrollback instead of staying on screen, so
   launching in a terminal with recent commands no longer paints the frame

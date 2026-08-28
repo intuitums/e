@@ -14,7 +14,9 @@
 //! ```
 //!
 //! Selection is bold-ink vs default — no caret glyph, the reference
-//! convention.
+//! convention. The band is a fixed height: it always shows MAX_VISIBLE
+//! selectable rows, padded blank below a short match list, so the box never
+//! grows or shrinks while typing a filter.
 
 use crate::tui::markdown::visible_width;
 use crate::tui::render::bold;
@@ -259,6 +261,11 @@ impl Menu {
                     + "…";
             }
             body.push(line);
+        }
+        // Fixed band height: blank rows below a short match list, so the
+        // box holds the same size at first keystroke and after filtering.
+        while body.len() < MAX_VISIBLE {
+            body.push(String::new());
         }
         crate::tui::panel::frame(theme, width, header, body)
     }
