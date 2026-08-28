@@ -29,15 +29,18 @@ jobs:
               --description "$description" --force
             gh pr edit "$PR" --repo "$REPO" --add-label "$name"
           }
+          # `|| true` on every probe: a non-matching grep must read as
+          # "no label", not fail the run — the final statement's status is
+          # the script's exit code under `set -eu`.
           echo "$files" | grep -q '^src/core/' && \
-            add_label area/core 1d76db 'Agent, providers, tools, storage, and extensions'
+            add_label area/core 1d76db 'Agent, providers, tools, storage, and extensions' || true
           echo "$files" | grep -q '^src/tui/' && \
-            add_label area/tui 5319e7 'Terminal interface and rendering'
+            add_label area/tui 5319e7 'Terminal interface and rendering' || true
           echo "$files" | grep -Eq '^(docs/|README.md|SECURITY.md|CONTRIBUTING.md)' && \
-            add_label documentation 0075ca 'Documentation changes'
+            add_label documentation 0075ca 'Documentation changes' || true
           echo "$files" | grep -Eq '^(\.github/|scripts/|x$|rust-toolchain.toml)' && \
-            add_label area/infra 6f42c1 'Build, CI, release, or repository automation'
+            add_label area/infra 6f42c1 'Build, CI, release, or repository automation' || true
           echo "$files" | grep -Eq '^(Cargo.toml|Cargo.lock|\.github/dependabot.yml)' && \
-            add_label dependencies 0366d6 'Dependency or toolchain changes'
+            add_label dependencies 0366d6 'Dependency or toolchain changes' || true
           echo "$files" | grep -Eq '^(src/core/(api|auth|config|providers|tools|update)/|src/core/session.rs|install.sh|SECURITY.md)' && \
-            add_label security-surface b60205 'Touches a reviewed trust boundary'
+            add_label security-surface b60205 'Touches a reviewed trust boundary' || true

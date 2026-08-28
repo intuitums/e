@@ -8,6 +8,13 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- Launch starts from a clean slate: whatever the terminal showed before e
+  started is scrolled into the scrollback instead of staying on screen, so
+  launching in a terminal with recent commands no longer paints the frame
+  (trust panel, status line) over the old content. The pre-launch output
+  stays reachable by scrolling up, and the transcript reads as one
+  continuous flow.
+
 - Internal hardening pass, no user-visible behavior change. The turn loop's
   session-file writes (`TurnLog::commit`, `load_compacted`) now run on the
   blocking pool instead of inline on the async task, matching the built-in

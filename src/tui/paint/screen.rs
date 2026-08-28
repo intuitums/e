@@ -10,6 +10,11 @@
 //! blank rows at the bottom get painted. Paints are wrapped in synchronized
 //! output (?2026) to kill flicker where supported.
 //!
+//! Launch starts from a clean slate: whatever the terminal showed before e
+//! started is scrolled into the scrollback with newlines (so it stays
+//! reachable by scrolling up, and the transcript reads as one continuous
+//! flow), and the screen is marked known-blank before the first frame.
+//!
 //! There is deliberately no cursor arithmetic. Every row run starts with a
 //! `\r` followed by an absolute position, so no relative move can ever
 //! interact with the terminal's pending-wrap state — the `\x1b[F` off-by-one
@@ -30,6 +35,8 @@ pub struct Screen {
     /// when the shadow never painted them — the terminal reflowed stale
     /// content into them.
     clear_unpainted: bool,
+    /// Set by `clear_slate` so the launch scroll cannot run twice.
+    cleared: bool,
     pub cols: u16,
     pub rows: u16,
     debug_frames: bool,
@@ -47,7 +54,8 @@ pub(crate) struct RowAction<'a> {
 /// `shadow` of what each row currently shows. The window is the frame's
 /// last `height` lines; rows outside it are cleared when they may hold
 /// stale content (`clear_unpainted`), and left alone when they are already
-/// blank or were never painted (the pre-launch terminal content stays).
+/// blank or were never painted (launch's `clear_slate` leaves no unknown
+/// rows, so this is pure conservatism for the differ's callers).
 pub(crate) fn plan<'a>(
     lines: &'a [String],
     height: usize,
@@ -104,10 +112,32 @@ impl Screen {
             prev: Vec::new(),
             shadow: vec![None; rows as usize],
             clear_unpainted: false,
+            cleared: false,
             cols,
             rows,
             debug_frames: std::env::var("E_DEBUG_FRAMES").is_ok(),
         }
+    }
+
+    /// Scrolls whatever the terminal currently shows into the scrollback
+    /// (newlines from the bottom row, so it stays reachable above the
+    /// transcript) and marks every row known-blank, so launch paints onto a
+    /// clean slate and nothing of the pre-launch shell session can show
+    /// through below the frame. Runs once; later calls are no-ops.
+    pub fn clear_slate(&mut self) -> io::Result<()> {
+        if self.cleared {
+            return Ok(());
+        }
+        self.cleared = true;
+        let mut out = io::stdout().lock();
+        write!(out, "\x1b[?2026h\r\x1b[{};1H", self.rows)?;
+        for _ in 0..self.rows {
+            writeln!(out)?;
+        }
+        write!(out, "\x1b[?2026l")?;
+        out.flush()?;
+        self.shadow = vec![Some(String::new()); self.rows as usize];
+        Ok(())
     }
 
     /// A resize never clears the display: the shadow goes unknown and the
@@ -255,13 +285,26 @@ mod tests {
         assert_eq!(actions[0].write, None);
         // Already blank: left alone.
         assert!(plan(&lines, 3, &shadow(&[Some("a"), Some(""), None]), false).is_empty());
-        // Never painted and not forced: left alone (launch keeps the
-        // pre-existing terminal content, the reference behavior).
+        // Never painted and not forced: left alone (plan stays conservative;
+        // in practice `clear_slate` marks every row known-blank at launch).
         assert!(plan(&lines, 3, &shadow(&[Some("a"), None, None]), false).is_empty());
         // Never painted but forced (after a resize): cleared.
         let actions = plan(&lines, 3, &shadow(&[Some("a"), None, None]), true);
         assert_eq!(actions.len(), 2);
         assert!(actions.iter().all(|a| a.write.is_none()));
+    }
+
+    #[test]
+    fn after_clear_slate_a_short_frame_paints_its_rows_on_the_blank_screen() {
+        let mut screen = Screen::new(10, 3);
+        screen.shadow = vec![Some(String::new()); 3];
+        let lines = vec!["a".to_string()];
+        // Every frame row writes (nothing is unknown), and no other row
+        // needs touching — the slate is known-blank.
+        let actions = plan(&lines, 3, &screen.shadow, false);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].row, 0);
+        assert_eq!(actions[0].write, Some("a"));
     }
 
     #[test]
@@ -307,6 +350,8 @@ impl Painter {
         let shared = mailbox.clone();
         let thread = std::thread::spawn(move || {
             let mut screen = Screen::new(cols, rows);
+            // Launch starts from a clean slate (see `clear_slate`).
+            let _ = screen.clear_slate();
             let (lock, wake) = &*shared;
             loop {
                 let (frame, resize, shutdown) = {
