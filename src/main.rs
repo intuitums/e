@@ -1,9 +1,11 @@
 //! The `e` binary: CLI subcommands and handoff to the interactive frame.
 //!
 //! Session UI lives in `tui::app` — this file owns flags, one-shot commands
-//! (`auth`, `ask`, `docs`, `update`), then opens the frame loop.
+//! (`auth`, `ask`, `docs`, `update`), prompt text arriving on piped stdin,
+//! then opens the frame loop.
 
 use crossterm::terminal;
+use std::io::IsTerminal as _;
 
 use e::core::agent::{Agent, AgentOptions, SessionEvent};
 use e::core::cli::{self, Options};
@@ -21,27 +23,67 @@ fn auth_status_requested(args: &[String]) -> Result<bool, &'static str> {
     }
 }
 
-/// The subcommand after stripping any leading extension typed flags
-/// (`--flag value`), which `cli::parse` leaves in `positional`. This lets
-/// diagnostics stay extension-free even when a typed flag precedes the
-/// command (e.g. `e --worktree feature doctor`): the flag is not the
-/// subcommand, and `doctor`/`providers` must run without launching
-/// extensions.
-fn effective_subcommand(positional: &[String]) -> Option<&str> {
-    let mut i = 0;
-    while i < positional.len() {
-        let token = &positional[i];
-        if token.starts_with("--") {
-            i += 1;
-            // A typed flag's value is the next token unless it is itself a flag.
-            if i < positional.len() && !positional[i].starts_with("--") {
-                i += 1;
-            }
-            continue;
-        }
-        return Some(token.as_str());
+/// The subcommand when the first positional is one, unless a `--` delimiter
+/// marked everything after it as prompt text. Parsing is strict, so the
+/// positional head is the only place a subcommand can live.
+fn leading_positional_subcommand(options: &Options) -> Option<&str> {
+    if options.delimited {
+        return None;
     }
-    None
+    options.positional.first().map(String::as_str)
+}
+
+/// A single standalone word that is almost a subcommand is a typo, not a
+/// prompt: suggest the real command instead of silently starting a session.
+/// Multi-word input stays a prompt — only isolated words are judged.
+fn unknown_command_hint(options: &Options) -> Option<String> {
+    if options.delimited || options.positional.len() != 1 {
+        return None;
+    }
+    let word = options.positional[0].as_str();
+    if word == "help" {
+        return Some("help is not a command — did you mean `e --help`?".into());
+    }
+    if word == "version" {
+        return Some("version is not a command — did you mean `e --version`?".into());
+    }
+    if cli::SUBCOMMANDS.contains(&word) {
+        return None;
+    }
+    let suggestion = cli::did_you_mean(
+        word,
+        &cli::SUBCOMMANDS
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+    )?;
+    Some(format!(
+        "unknown command `{word}` — did you mean `e {suggestion}`?"
+    ))
+}
+
+/// Report a usage error — themed on a terminal, JSON on stdout when
+/// requested — shut extensions down, and exit with the usage status code.
+async fn usage_error(host: &e::core::api::ExtensionHost, json: bool, message: String) -> ! {
+    if json {
+        println!("{}", serde_json::json!({"error": message}));
+    } else if std::io::stderr().is_terminal() {
+        let theme = e::tui::theme::resolve(&e::core::config::settings::theme(), false);
+        eprintln!("{} {message}", theme.fg("error", "error:"));
+    } else {
+        eprintln!("error: {message}");
+    }
+    host.shutdown().await;
+    std::process::exit(2);
+}
+
+/// Append the subcommand's usage line when the failing argv names one, so
+/// `e doctor --unknown` points at `e doctor` instead of generic help.
+fn with_subcommand_usage(message: String, args: &[String]) -> String {
+    match cli::leading_subcommand(args).and_then(cli::subcommand_usage) {
+        Some(usage) => format!("{message}\n{usage}"),
+        None => message,
+    }
 }
 
 #[tokio::main]
@@ -53,17 +95,15 @@ async fn main() -> std::io::Result<()> {
     }
     // Diagnostics are deliberately extension-free: launching a user-owned
     // executable would violate `doctor`'s local/no-network contract before
-    // the report could even begin. Other commands still start extensions
-    // before normal argument parsing so the startup hook can
+    // the report could even begin. Extension flags cannot precede these
+    // commands — stripping them requires starting extensions — so parsing
+    // rejects such an argv instead of guessing. Other commands still start
+    // extensions before normal argument parsing so the startup hook can
     // consume custom flags and safely relaunch this same binary in a new cwd,
     // and so --help can list the flags and commands extensions declare.
     let (jobs_tx, jobs_rx) = tokio::sync::mpsc::channel::<String>(256);
-    let diagnostic_requested = cli::parse(args.clone()).ok().is_some_and(|options| {
-        matches!(
-            effective_subcommand(&options.positional),
-            Some("doctor" | "providers")
-        )
-    });
+    let diagnostic_requested =
+        matches!(cli::leading_subcommand(&args), Some("doctor" | "providers"));
     let host = if cli::extensions_disabled(&args) || diagnostic_requested {
         e::core::api::ExtensionHost::empty()
     } else {
@@ -72,7 +112,7 @@ async fn main() -> std::io::Result<()> {
     if cli::has_flag(&args, &["--help", "-h"]) {
         println!(
             "e — a coding agent for your terminal\n\n\
-usage:\n  e [message]           start a session (optionally with a first prompt)\n  \
+usage:\n  e [message]           start a session (optionally with a first prompt;\n                        piped stdin counts as prompt text)\n  \
 e -c, --continue      continue this directory's most recent session\n  \
 e -r, --resume        pick a session to resume\n  \
 e ask \"prompt\"        one agent turn, no TUI; plain text when piped\n  \
@@ -116,37 +156,29 @@ e -v, --version"
     // Diagnostics must remain available when a startup hook is the thing
     // being diagnosed. Extensions are initialized for health reporting, but
     // their startup hooks do not get to intercept or relaunch these commands.
-    if let Ok(diagnostic_options) = cli::parse(args.clone()) {
+    if let Ok(diagnostic_options) = cli::parse(args.clone(), &[]) {
         let diagnostic_args = &diagnostic_options.positional;
-        let sub = effective_subcommand(diagnostic_args);
+        let sub = leading_positional_subcommand(&diagnostic_options);
         if sub == Some("doctor") || sub == Some("providers") {
             let doctor = sub == Some("doctor");
-            // Everything before the subcommand is extension typed flags; after
-            // it, only `--no-network` is accepted for doctor.
+            // Parsing accepts `--no-network` (a no-op: diagnostics are
+            // always local-only); any positional word after the command is
+            // a usage error.
             let sub_idx = diagnostic_args
                 .iter()
                 .position(|a| a == "doctor" || a == "providers")
                 .unwrap();
-            let after: Vec<&str> = diagnostic_args[sub_idx + 1..]
-                .iter()
-                .map(String::as_str)
-                .collect();
-            let valid = if doctor {
-                after.is_empty() || after == ["--no-network"]
-            } else {
-                after.is_empty()
-            };
-            if !valid {
-                eprintln!(
-                    "usage: e {}",
+            if sub_idx != diagnostic_args.len() - 1 {
+                usage_error(
+                    &host,
+                    false,
                     if doctor {
-                        "doctor [--no-network]"
+                        "usage: e doctor [--no-network]".into()
                     } else {
-                        "providers"
-                    }
-                );
-                host.shutdown().await;
-                std::process::exit(2);
+                        "usage: e providers".into()
+                    },
+                )
+                .await;
             }
 
             let report = e::core::providers::diagnostics::report(&host);
@@ -197,19 +229,19 @@ e -v, --version"
     }
 
     let json_requested = cli::has_flag(&args, &["--json", "-j"]);
-    let options = match cli::parse(args) {
+    let extension_flags: Vec<String> = host.flags().into_iter().map(|(token, _)| token).collect();
+    let options = match cli::parse(args.clone(), &extension_flags) {
         Ok(options) => options,
         Err(message) => {
-            if json_requested {
-                println!("{}", serde_json::json!({"error": message}));
-            } else {
-                eprintln!("{message}");
-            }
-            host.shutdown().await;
-            std::process::exit(2);
+            usage_error(&host, json_requested, with_subcommand_usage(message, &args)).await;
         }
     };
     let args = &options.positional;
+
+    // One isolated near-miss word is a mistyped command, not a prompt.
+    if let Some(message) = unknown_command_hint(&options) {
+        usage_error(&host, false, message).await;
+    }
 
     match auth_status_requested(args) {
         Ok(true) => {
@@ -224,9 +256,7 @@ e -v, --version"
         }
         Ok(false) => {}
         Err(message) => {
-            eprintln!("{message}");
-            host.shutdown().await;
-            std::process::exit(2);
+            usage_error(&host, false, message.to_string()).await;
         }
     }
     if args.first().map(String::as_str) == Some("rpc") {
@@ -245,7 +275,15 @@ e -v, --version"
                 std::process::exit(2);
             }
         };
-        return ask(args[1..].join(" "), host, selected, &options).await;
+        let piped = match read_piped_prompt().await {
+            Ok(piped) => piped,
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(2);
+            }
+        };
+        let prompt = combine_prompt(args[1..].join(" "), &piped);
+        return ask(prompt, host, selected, &options).await;
     }
     if options.json {
         eprintln!("--json is supported by `e ask`, `e doctor`, and `e providers`");
@@ -301,6 +339,42 @@ e -v, --version"
         return Ok(());
     }
 
+    // Piped stdin is prompt text, not a terminal for the frame loop to own:
+    // run the headless ask path instead of opening the TUI.
+    let stdin_tty = std::io::stdin().is_terminal();
+    if !stdin_tty {
+        if options.continue_session || options.resume_session {
+            usage_error(
+                &host,
+                false,
+                "--continue and --resume need an interactive terminal".into(),
+            )
+            .await;
+        }
+        let piped = match read_piped_prompt().await {
+            Ok(piped) => piped,
+            Err(message) => {
+                eprintln!("{message}");
+                host.shutdown().await;
+                std::process::exit(2);
+            }
+        };
+        let prompt = combine_prompt(args.join(" "), &piped);
+        if prompt.trim().is_empty() {
+            usage_error(
+                &host,
+                false,
+                "no prompt — pass one as an argument or pipe text into e".into(),
+            )
+            .await;
+        }
+        let selected = match resolve_model(&options) {
+            Ok(model) => model,
+            Err(message) => usage_error(&host, false, message).await,
+        };
+        return ask(prompt, host, selected, &options).await;
+    }
+
     let selected = match resolve_model(&options) {
         Ok(model) => model,
         Err(message) => {
@@ -337,6 +411,42 @@ e -v, --version"
         jobs_rx,
     )
     .await
+}
+
+/// Upper bound on a piped prompt — generous for pasted diffs and logs (the
+/// same bound the RPC line protocol uses) but never unbounded: a writer
+/// that never closes stdin must not grow this process without limit.
+const MAX_PIPED_PROMPT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Prompt text arriving on piped stdin; empty when stdin is a terminal.
+/// Err when the pipe exceeds the bound or the read fails.
+async fn read_piped_prompt() -> Result<String, String> {
+    use tokio::io::AsyncReadExt as _;
+    if std::io::stdin().is_terminal() {
+        return Ok(String::new());
+    }
+    let mut buf = Vec::new();
+    tokio::io::stdin()
+        .take(MAX_PIPED_PROMPT_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|error| format!("reading piped prompt: {error}"))?;
+    if buf.len() > MAX_PIPED_PROMPT_BYTES {
+        return Err(format!(
+            "piped prompt exceeds the {} MiB limit",
+            MAX_PIPED_PROMPT_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Typed words and piped text become one prompt, piped text last.
+fn combine_prompt(typed: String, piped: &str) -> String {
+    match (typed.trim().is_empty(), piped.trim().is_empty()) {
+        (true, _) => piped.to_string(),
+        (false, true) => typed,
+        (false, false) => format!("{typed}\n\n{piped}"),
+    }
 }
 
 fn resolve_model(options: &Options) -> Result<Model, String> {
@@ -834,5 +944,81 @@ mod tests {
         result.finish();
         assert!(result.failed());
         assert_eq!(result.output, "partial");
+    }
+
+    #[test]
+    fn near_miss_single_words_suggest_commands_not_sessions() {
+        assert!(super::unknown_command_hint(&super::Options {
+            positional: args(&["docss"]),
+            ..Default::default()
+        })
+        .unwrap()
+        .contains("did you mean `e docs`?"));
+        assert_eq!(
+            super::unknown_command_hint(&super::Options {
+                positional: args(&["help"]),
+                ..Default::default()
+            })
+            .unwrap(),
+            "help is not a command — did you mean `e --help`?"
+        );
+        // Real subcommands, ordinary words, multi-word prompts, and
+        // `--`-escaped text all stay prompts.
+        for positional in [
+            vec!["ask".to_string()],
+            vec!["hello".to_string()],
+            vec!["docss".to_string(), "world".to_string()],
+        ] {
+            assert_eq!(
+                super::unknown_command_hint(&super::Options {
+                    positional,
+                    ..Default::default()
+                }),
+                None
+            );
+        }
+        assert_eq!(
+            super::unknown_command_hint(&super::Options {
+                delimited: true,
+                positional: args(&["docss"]),
+                ..Default::default()
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn piped_text_joins_typed_words_with_pipe_text_last() {
+        assert_eq!(
+            super::combine_prompt(String::new(), "from pipe"),
+            "from pipe"
+        );
+        assert_eq!(
+            super::combine_prompt("typed words".into(), ""),
+            "typed words"
+        );
+        assert_eq!(
+            super::combine_prompt("review:".into(), "the diff"),
+            "review:\n\nthe diff"
+        );
+        assert_eq!(super::combine_prompt(String::new(), ""), "");
+    }
+
+    #[test]
+    fn subcommand_head_is_none_when_delimited() {
+        let options = super::Options {
+            positional: args(&["doctor"]),
+            delimited: true,
+            ..Default::default()
+        };
+        assert_eq!(super::leading_positional_subcommand(&options), None);
+        let options = super::Options {
+            positional: args(&["doctor"]),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::leading_positional_subcommand(&options),
+            Some("doctor")
+        );
     }
 }
