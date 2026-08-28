@@ -90,7 +90,7 @@ impl App {
         self.auth = Some(AuthStage::Waiting {
             back: Some(selected),
         });
-        self.notice(format!("starting the {} sign-in…", provider.display));
+        // The panel carries the state; the transcript stays out of it.
         match provider.auth.oauth.as_deref() {
             Some("xai-device") => self.start_xai_login(),
             _ => self.start_codex_login(provider.name.clone()),
@@ -113,7 +113,8 @@ impl App {
     }
 
     /// Key entry ended: save, then show the outcome beat and return to the
-    /// provider list.
+    /// provider list. The whole flow — including the failure detail — stays
+    /// inside the panel; nothing lands in the transcript.
     pub(super) fn submit_api_key(&mut self, key: &str) {
         let Some(secret_for) = self.pending_key.take() else {
             return;
@@ -142,10 +143,9 @@ impl App {
                     });
             }
             Err(e) => {
-                self.notice(format!("{secret_for}: {e}"));
                 self.auth = Some(AuthStage::Done {
                     ok: false,
-                    message: format!("the {secret_for} key was not saved"),
+                    message: format!("the {secret_for} key was not saved — {e}"),
                     back,
                 });
             }
@@ -153,8 +153,9 @@ impl App {
     }
 
     /// `/login` — bare lists providers and methods; with a provider, runs
-    /// that provider's method: Account (browser OAuth) or API key (masked
-    /// paste into the composer).
+    /// that provider's method: Account (browser OAuth opens the waiting
+    /// stage) or API key (opens the panel's masked key entry). The flow
+    /// lives in the auth panel, never in the transcript.
     pub(super) fn login(&mut self, provider: String) {
         if provider.is_empty() {
             self.open_login_menu();
@@ -163,26 +164,18 @@ impl App {
         let flow =
             crate::core::providers::registry::find(&provider).and_then(|p| p.auth.oauth.clone());
         if flow.as_deref() == Some("codex") {
-            self.notice(format!(
-                "starting the {} sign-in…",
-                model::display_name(&provider)
-            ));
             self.auth = Some(AuthStage::Waiting { back: None });
             self.start_codex_login(provider);
         } else if flow.as_deref() == Some("xai-device") {
-            self.notice(format!(
-                "starting the {} sign-in…",
-                model::display_name(&provider)
-            ));
             self.auth = Some(AuthStage::Waiting { back: None });
             self.start_xai_login();
         } else {
             self.cancel_login();
-            self.notice(format!(
-                "paste the {provider} API key and press enter (esc cancels)"
-            ));
-            self.pending_key = Some(provider);
+            let name = provider.clone();
+            self.auth = Some(AuthStage::ApiKey { provider });
+            self.pending_key = Some(name);
             self.editor.mask = true;
+            self.editor.set_text("");
         }
     }
 }

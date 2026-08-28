@@ -98,8 +98,9 @@ impl App {
                 }
             }
             SessionEvent::ToolBatchStart { calls } => {
-                // The pre-batch reasoning collapses where it sits; the next
-                // burst starts fresh below the tools.
+                // The pre-batch reasoning collapses where it sits; the tree
+                // then continues if the agent has not spoken since the last
+                // batch — one tree per working stretch, not one per batch.
                 self.end_thinking_burst();
                 if let Some(s) = &mut self.active {
                     s.block = None;
@@ -118,7 +119,7 @@ impl App {
                             )
                         })
                         .collect();
-                    let idx = self.transcript.push(Block::tool_group(children));
+                    let idx = self.transcript.extend_tool_group(children);
                     for call in calls {
                         s.tool_blocks.insert(call.id, idx);
                     }

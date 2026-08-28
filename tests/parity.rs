@@ -415,6 +415,55 @@ fn running_write_and_edit_rows_stay_lean() {
 }
 
 #[test]
+fn silent_batches_continue_one_tree_and_long_trees_cap_rows() {
+    use e::tui::transcript::{Block, Kind, ToolChild, Transcript};
+    let theme = e::tui::theme::resolve("dark", false);
+    let read = |id: u64, target: &str| {
+        ToolChild::pending(
+            id,
+            "read".into(),
+            "Reading".into(),
+            "Read".into(),
+            target.into(),
+        )
+    };
+
+    // Batches with no assistant voice between them continue the same tree;
+    // the collapsed thinking between batches is absorbed, not left to
+    // fragment it.
+    let mut t = Transcript::default();
+    t.extend_tool_group(vec![read(1, "a.rs")]);
+    t.push(Block::new(Kind::Thinking, "Thought for 2s"));
+    t.extend_tool_group(vec![read(2, "b.rs")]);
+    assert_eq!(t.blocks.len(), 1, "one tree across the silent batch");
+    assert_eq!(t.blocks[0].text, "2 tool calls \u{b7} 2 read");
+
+    // Assistant text separates trees; the next batch starts a new one.
+    t.push(Block::new(Kind::Assistant, "Now the second stretch."));
+    t.extend_tool_group(vec![read(3, "c.rs")]);
+    assert_eq!(t.blocks.len(), 3);
+    assert_eq!(t.blocks[2].text, "1 tool call \u{b7} 1 read");
+
+    // Past the row cap the tallies stay complete; the most recent calls
+    // keep their rows and the earliest ones collapse into a count above
+    // them. (Rows render once a call leaves its pending state, so start
+    // them.)
+    let many = (0..12).map(|i| read(10 + i, &format!("{i}.rs"))).collect();
+    t.extend_tool_group(many);
+    assert_eq!(t.blocks[2].text, "13 tool calls \u{b7} 13 read");
+    for id in (3..=3).chain(10..22) {
+        t.blocks[2].start_tool(id);
+    }
+    let rows = t.blocks[2].lines_for_test(&theme, 80);
+    assert_eq!(rows.len(), 1 + 1 + 7, "header, overflow count, recent rows");
+    assert!(rows[1].contains("\u{2026} 6 earlier tool calls"));
+    // The recent tail survives; the oldest work is what got folded away.
+    assert!(rows[2].contains("Reading 5.rs"));
+    assert!(rows.last().unwrap().contains("Reading 11.rs"));
+    assert!(!rows.iter().any(|line| line.contains("Reading c.rs")));
+}
+
+#[test]
 fn picker_band_holds_a_fixed_height() {
     use e::tui::menu::{Menu, MenuItem, MenuKind, HINT_USE};
     let theme = e::tui::theme::resolve("dark", false);
