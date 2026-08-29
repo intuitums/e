@@ -8,6 +8,10 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- `/tree` now restores the selected prompt text in the composer after
+  rewinding. Edit it or resend it to grow the new branch without recreating
+  the original prompt.
+
 - The footer picker band (commands, files, skills, sessions, models) is a
   fixed height: it always shows six selectable rows, padded blank below a
   short match list, so typing a filter — `/set` narrowing to one command —

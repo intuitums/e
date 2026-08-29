@@ -646,11 +646,10 @@ impl App {
         self.menu = Some(Menu::new(MenuKind::Tree, "Rewind to", HINT_USE, items));
     }
 
-    /// Apply a /tree choice: rewind to just before the chosen user message
-    /// and replay everything up to that point into the transcript and the
-    /// agent's history. The file is untouched — the next message committed
-    /// attaches after the rewind point, growing a sibling branch next to
-    /// the one being left behind rather than overwriting it.
+    /// Apply a /tree choice: rewind to just before the chosen user message,
+    /// restore its text in the composer, and replay everything before it
+    /// into the transcript and agent history. The file stays untouched. The
+    /// edited or resent message grows a sibling branch beside the old tail.
     fn rewind_to_node(&mut self, node_id: &str) {
         if self.active.is_some() || self.agent.is_streaming() {
             self.notice("a turn is running — press Esc to stop it, then /tree".into());
@@ -666,7 +665,7 @@ impl App {
                 return;
             }
         };
-        let Some((head, messages)) = rewind_target(&nodes, node_id) else {
+        let Some((head, messages, prompt)) = rewind_target(&nodes, node_id) else {
             self.notice("that point no longer exists".into());
             return;
         };
@@ -677,8 +676,9 @@ impl App {
         self.compact_requested = false;
         self.rebuild_transcript(&messages);
         self.agent.rewind_to(head, messages);
+        self.editor.set_text(&prompt);
         self.session_epoch += 1;
-        self.notice("rewound — your next message branches from here".into());
+        self.notice("edit or resend the restored prompt to branch".into());
     }
 
     fn open_settings(&mut self) {
@@ -1428,16 +1428,17 @@ fn tree_items(nodes: &[crate::core::session::Node]) -> Vec<(String, String, bool
         .collect()
 }
 
-/// The rewind target for a chosen node: its parent (the new head) and the
-/// linear message history from root up to but not including the node
-/// itself — what gets replayed. None only when the id no longer resolves (a
-/// stale picker selection against a session that changed underneath it). A
-/// broken ancestor link mid-walk just truncates the replayed path there
-/// rather than failing the whole rewind.
+/// The rewind target for a chosen node: its parent, the message history before
+/// it, and its prompt text for the composer. None means the id no longer
+/// resolves. A broken ancestor link truncates the replayed path there.
 fn rewind_target(
     nodes: &[crate::core::session::Node],
     node_id: &str,
-) -> Option<(Option<String>, Vec<crate::core::providers::ChatMessage>)> {
+) -> Option<(
+    Option<String>,
+    Vec<crate::core::providers::ChatMessage>,
+    String,
+)> {
     let by_id: std::collections::HashMap<&str, &crate::core::session::Node> =
         nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let target = *by_id.get(node_id)?;
@@ -1456,7 +1457,7 @@ fn rewind_target(
         .iter()
         .filter_map(|id| by_id.get(id.as_str()).map(|n| n.message.clone()))
         .collect();
-    Some((head, messages))
+    Some((head, messages, target.message.content.clone()))
 }
 
 /// The composer's editing keymap: a user's `~/.e/keybindings.json` chord
@@ -2377,27 +2378,29 @@ mod tests {
     }
 
     #[test]
-    fn rewind_target_replays_the_path_to_but_not_including_the_chosen_node() {
+    fn rewind_target_replays_ancestors_and_restores_the_chosen_prompt() {
         use crate::core::providers::ChatMessage;
         let nodes = vec![
             node("1", None, ChatMessage::user("first")),
             node("2", Some("1"), ChatMessage::assistant("reply", Vec::new())),
-            node("3", Some("2"), ChatMessage::user("second")),
+            node("3", Some("2"), ChatMessage::user("second\nwith details")),
         ];
-        let (head, messages) = rewind_target(&nodes, "3").expect("node 3 exists");
+        let (head, messages, prompt) = rewind_target(&nodes, "3").expect("node 3 exists");
         assert_eq!(head.as_deref(), Some("2"), "rewinds to just before node 3");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "first");
         assert_eq!(messages[1].content, "reply");
+        assert_eq!(prompt, "second\nwith details");
     }
 
     #[test]
     fn rewind_target_to_the_root_yields_an_empty_history_and_no_head() {
         use crate::core::providers::ChatMessage;
         let nodes = vec![node("1", None, ChatMessage::user("only message"))];
-        let (head, messages) = rewind_target(&nodes, "1").expect("node 1 exists");
+        let (head, messages, prompt) = rewind_target(&nodes, "1").expect("node 1 exists");
         assert!(head.is_none());
         assert!(messages.is_empty());
+        assert_eq!(prompt, "only message");
     }
 
     #[test]
