@@ -145,6 +145,17 @@ pub struct ToolResultMeta {
     pub summary: String,
 }
 
+/// Token usage for one assistant step, persisted beside the message so a
+/// session file can answer "where did the time and tokens go" without the
+/// provider. `input` is the request's full context (cached tokens included,
+/// matching the dialects' Usage event), `output` what the step generated.
+#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
+pub struct MessageUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+}
+
 #[derive(Clone, Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     pub role: String, // "user" | "assistant" | "tool" | "system"
@@ -157,6 +168,8 @@ pub struct ChatMessage {
     pub tool_meta: Option<ToolResultMeta>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<MessageUsage>,
     /// True for harness-authored user-role messages — steering echoes and
     /// wake continuations. They fill the history but are not user turns
     /// (the /resume picker's "N turns" excludes them); the flag never
@@ -178,6 +191,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_meta: None,
             images: Vec::new(),
+            usage: None,
             internal: false,
         }
     }
@@ -189,8 +203,15 @@ impl ChatMessage {
             tool_call_id: None,
             tool_meta: None,
             images: Vec::new(),
+            usage: None,
             internal: false,
         }
+    }
+    /// Attach the step's real usage — the agent commits assistant turns with
+    /// it so the session file carries token accounting, not just text.
+    pub fn with_usage(mut self, usage: MessageUsage) -> Self {
+        self.usage = Some(usage);
+        self
     }
     /// A dialect-owned reasoning item (signed thinking block, Responses
     /// reasoning JSON) that must replay ahead of its assistant turn.
@@ -202,6 +223,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_meta: None,
             images: Vec::new(),
+            usage: None,
             internal: false,
         }
     }
@@ -213,6 +235,7 @@ impl ChatMessage {
             tool_call_id: Some(call_id.into()),
             tool_meta: None,
             images: Vec::new(),
+            usage: None,
             internal: false,
         }
     }
@@ -233,6 +256,7 @@ impl ChatMessage {
                 summary: summary.into(),
             }),
             images: Vec::new(),
+            usage: None,
             internal: false,
         }
     }
@@ -289,6 +313,13 @@ pub enum FailureCause {
     /// HTTP 429, or a provider error frame naming a rate limit. Retry,
     /// honoring `Retry-After` when the provider sent one.
     RateLimited,
+    /// The account cannot run this request at all — a subscription or
+    /// free-tier wall (quota, billing, budget), not a transient throttle.
+    /// Retrying only burns the backoff ladder against a hard limit; fail
+    /// fast instead. Classified from the error body's own wording, since
+    /// gateways (notably OpenCode Zen Go) return these as 429s or 403s
+    /// that a status-only classifier would retry forever.
+    QuotaExhausted,
     /// HTTP 408/500/502/503/504, or a provider error frame naming an outage
     /// — the provider is unwell right now, not that the request was bad.
     /// Retry.
@@ -331,6 +362,7 @@ impl FailureCause {
             FailureCause::Stalled => "No response from provider",
             FailureCause::RateLimited => "Rate limited",
             FailureCause::ProviderUnavailable => "Provider unavailable",
+            FailureCause::QuotaExhausted => "Quota exhausted",
             FailureCause::Rejected => "Request failed",
         }
     }
@@ -349,6 +381,104 @@ pub struct ProviderError {
     pub cause: FailureCause,
     /// Seconds the provider asked us to wait (`Retry-After`), if it sent one.
     pub retry_after: Option<u64>,
+}
+
+/// Error-body wording that marks a hard account limit: retrying cannot
+/// help, so the classifier must say so even when the transport answered
+/// 429/403 — a status-only policy would burn the whole retry ladder on a
+/// wall. Pattern list follows the reference client (pi), which named
+/// OpenCode Zen Go's own limit errors from production experience.
+const QUOTA_EXHAUSTED_PATTERNS: &[&str] = &[
+    "GoUsageLimitError",
+    "FreeUsageLimitError",
+    "monthly usage limit reached",
+    "available balance",
+    "insufficient_quota",
+    "out of budget",
+    "quota exceeded",
+    "billing limit",
+    "billing quota",
+    "billing cap",
+];
+
+/// Error-body wording that marks a transient failure worth retrying
+/// regardless of the HTTP status it traveled with (gateways wrap 503s in
+/// 400s; streams die with transport phrasing). Also pi's list.
+const RETRYABLE_TEXT_PATTERNS: &[&str] = &[
+    "overloaded",
+    "service.?unavailable",
+    "server.?error",
+    "internal.?error",
+    "provider.?returned.?error",
+    "exceeded request buffer limit while retrying upstream",
+    "network.?error",
+    "connection.?error",
+    "connection.?refused",
+    "connection.?lost",
+    "other side closed",
+    "fetch failed",
+    "getaddrinfo",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+    "upstream.?connect",
+    "reset before headers",
+    "socket hang up",
+    "socket connection was closed",
+    "timed.?out",
+    "timeout",
+    "terminated",
+    "websocket.?closed",
+    "websocket.?error",
+    "ended without",
+    "stream ended before message_stop",
+    "stream ended before a terminal response event",
+    "http2 request did not get a response",
+    "retry delay",
+    "you can retry your request",
+    "try your request again",
+    "please retry your request",
+];
+
+/// Throttle wording — retried with the `Retry-After`-aware delay rather
+/// than the generic ladder.
+const RATE_LIMITED_TEXT_PATTERNS: &[&str] =
+    &["rate.?limit", "too many requests", "ResourceExhausted"];
+
+fn compile(patterns: &[&str]) -> regex::Regex {
+    regex::Regex::new(&format!("(?i){}", patterns.join("|"))).expect("pattern lists compile")
+}
+
+struct TextMatchers {
+    quota: regex::Regex,
+    rate: regex::Regex,
+    retryable: regex::Regex,
+}
+
+fn text_matchers() -> &'static TextMatchers {
+    static MATCHERS: std::sync::OnceLock<TextMatchers> = std::sync::OnceLock::new();
+    MATCHERS.get_or_init(|| TextMatchers {
+        quota: compile(QUOTA_EXHAUSTED_PATTERNS),
+        rate: compile(RATE_LIMITED_TEXT_PATTERNS),
+        retryable: compile(RETRYABLE_TEXT_PATTERNS),
+    })
+}
+
+/// Classify an error message or HTTP body by its own wording, for the two
+/// cases a status code cannot see: a hard quota wall wearing a 429, and a
+/// transient failure wearing a generic 400. `None` when the text names no
+/// recognizable cause — the caller's status-based classification stands.
+pub fn classify_text(text: &str) -> Option<FailureCause> {
+    let m = text_matchers();
+    if m.quota.is_match(text) {
+        return Some(FailureCause::QuotaExhausted);
+    }
+    if m.rate.is_match(text) {
+        return Some(FailureCause::RateLimited);
+    }
+    if m.retryable.is_match(text) {
+        return Some(FailureCause::ProviderUnavailable);
+    }
+    None
 }
 
 impl ProviderError {
@@ -400,9 +530,21 @@ impl ProviderError {
         }
     }
     /// Classify an HTTP status the provider actually returned; `body` is the
-    /// response text the caller already read.
+    /// response text the caller already read. The body's own wording wins
+    /// where it is more specific than the status: a quota wall inside a 429
+    /// is not a retryable throttle, and a wrapped 503 inside a 400 is not a
+    /// rejected request.
     pub fn from_status(status: reqwest::StatusCode, body: &str) -> Self {
-        let cause = FailureCause::from_status(status);
+        let status_cause = FailureCause::from_status(status);
+        let quota_can_override = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || (status.is_client_error() && status != reqwest::StatusCode::UNAUTHORIZED);
+        let cause = match classify_text(body) {
+            Some(FailureCause::QuotaExhausted) if quota_can_override => {
+                FailureCause::QuotaExhausted
+            }
+            Some(text_cause) if status_cause == FailureCause::Rejected => text_cause,
+            _ => status_cause,
+        };
         let short = format!(
             "{} {}",
             status.as_u16(),
@@ -867,6 +1009,65 @@ mod tests {
         assert!(FailureCause::Stalled.is_retryable());
         assert!(!FailureCause::Auth.is_retryable());
         assert!(!FailureCause::Rejected.is_retryable());
+        assert!(!FailureCause::QuotaExhausted.is_retryable());
+    }
+
+    #[test]
+    fn body_wording_overrides_the_status_when_more_specific() {
+        use reqwest::StatusCode;
+        let err = |code: u16, body: &str| {
+            ProviderError::from_status(StatusCode::from_u16(code).unwrap(), body)
+        };
+        // A hard quota wall wearing a 429 is not a transient throttle —
+        // this exact shape is what OpenCode Zen Go returns.
+        let walled = err(
+            429,
+            r#"{"error":{"type":"GoUsageLimitError","message":"Monthly usage limit reached"}}"#,
+        );
+        assert_eq!(walled.cause, FailureCause::QuotaExhausted);
+        assert!(!walled.cause.is_retryable());
+        assert_eq!(
+            err(403, "enable available balance").cause,
+            FailureCause::QuotaExhausted
+        );
+        assert_eq!(
+            err(400, "insufficient_quota").cause,
+            FailureCause::QuotaExhausted
+        );
+        // A transient failure wrapped in a generic 4xx stays retryable.
+        let wrapped = err(400, r#"{"error":{"message":"upstream connect error"}}"#);
+        assert_eq!(wrapped.cause, FailureCause::ProviderUnavailable);
+        assert!(wrapped.cause.is_retryable());
+        // Rate-limit wording rides the Retry-After-aware cause.
+        assert_eq!(
+            err(400, "too many requests, slow down").cause,
+            FailureCause::RateLimited
+        );
+        // Status wins where the body names nothing, and auth keeps
+        // precedence over generic retryable wording.
+        assert_eq!(err(400, "model not found").cause, FailureCause::Rejected);
+        assert_eq!(err(401, "overloaded").cause, FailureCause::Auth);
+        assert_eq!(err(429, "").cause, FailureCause::RateLimited);
+        // Generic billing prose is not proof of exhausted quota, and a 5xx
+        // remains retryable even if its body mentions account-limit wording.
+        assert_eq!(
+            err(500, "billing service temporarily unavailable").cause,
+            FailureCause::ProviderUnavailable
+        );
+        assert_eq!(
+            err(500, "monthly usage limit reached").cause,
+            FailureCause::ProviderUnavailable
+        );
+    }
+
+    #[test]
+    fn quota_errors_never_reach_the_retry_ladder() {
+        // The whole point of the classifier: a rate-limited error retries,
+        // a quota-walled one cannot, so the agent fails fast instead of
+        // spending its backoff ladder on requests that cannot succeed.
+        assert!(FailureCause::RateLimited.is_retryable());
+        assert!(!FailureCause::QuotaExhausted.is_retryable());
+        assert_eq!(FailureCause::QuotaExhausted.label(), "Quota exhausted");
     }
 
     #[test]

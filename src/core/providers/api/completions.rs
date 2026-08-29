@@ -68,6 +68,12 @@ pub async fn run(
         "stream": true,
         "stream_options": {"include_usage": true},
     });
+    // Reasoning effort rides the OpenAI-standard field; only sent when the
+    // model declares a knob, so gateways that never heard of it never see
+    // it. `off` has no wire encoding here — absence is the closest thing.
+    if let Some(effort) = request.effort.as_deref().filter(|e| *e != "off") {
+        body["reasoning_effort"] = json!(effort);
+    }
     if !request.tools.is_empty() {
         body["tools"] = json!(request.tools);
     }

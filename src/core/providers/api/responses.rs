@@ -303,10 +303,16 @@ pub async fn run(
                         .as_str()
                         .unwrap_or("response failed")
                         .to_string();
-                    let cause = match value["response"]["error"]["code"].as_str().unwrap_or("") {
-                        "rate_limit_exceeded" => FailureCause::RateLimited,
-                        "server_error" | "internal_error" => FailureCause::ProviderUnavailable,
-                        _ => FailureCause::Rejected,
+                    let text_cause = crate::core::providers::classify_text(&message);
+                    let cause = if text_cause == Some(FailureCause::QuotaExhausted) {
+                        FailureCause::QuotaExhausted
+                    } else {
+                        match value["response"]["error"]["code"].as_str().unwrap_or("") {
+                            "rate_limit_exceeded" => FailureCause::RateLimited,
+                            "server_error" | "internal_error" => FailureCause::ProviderUnavailable,
+                            // Unknown codes still get the message classifier.
+                            _ => text_cause.unwrap_or(FailureCause::Rejected),
+                        }
                     };
                     return Err(ProviderError::frame(message, cause));
                 }

@@ -56,21 +56,15 @@ fn clip(s: &str, max_chars: usize) -> String {
 /// re-exported under its long-standing name.
 pub use crate::core::output::format_elapsed;
 
-/// Per-turn token flow and focused activity phase.
+/// Per-turn token flow and focused activity phase. The display moves only
+/// on real provider usage frames — streamed bytes and request size are never
+/// estimated into it, so invisible reasoning or cached context can't balloon
+/// the numbers ahead of the truth (pi's model).
 pub struct Turn {
-    /// Latest request's full context, from real usage (a chars/4 seed until
-    /// the first report lands).
+    /// Latest request's full context, from real provider usage.
     pub input: u64,
-    /// True until a provider Usage frame replaces the chars/4 seed.
-    pub input_estimated: bool,
     /// Output tokens of completed steps, from real usage.
     pub output: u64,
-    /// chars/4 estimate of the current step's streamed text + reasoning.
-    pub estimated_output: u64,
-    streamed_chars: u64,
-    /// Cumulative tool-call argument bytes streamed this step (real output
-    /// the token estimate must count).
-    assembly_bytes: u64,
     pub phase: TurnPhase,
     /// Set while `phase == Retrying`.
     pub retry: Option<RetryStatus>,
@@ -88,65 +82,31 @@ impl Turn {
     pub fn new() -> Self {
         Turn {
             input: 0,
-            input_estimated: false,
             output: 0,
-            estimated_output: 0,
-            streamed_chars: 0,
-            assembly_bytes: 0,
             phase: TurnPhase::Thinking,
             retry: None,
             recovered: None,
         }
     }
 
-    pub fn note_text(&mut self, text: &str) {
-        self.streamed_chars = self
-            .streamed_chars
-            .saturating_add(text.chars().count() as u64);
-        self.refresh_estimate();
-    }
-
-    /// Record the cumulative argument bytes the agent reported for this step.
-    pub fn note_assembly(&mut self, cumulative_bytes: u64) {
-        self.assembly_bytes = cumulative_bytes;
-        self.refresh_estimate();
-    }
-
-    /// A real usage report landed: fold it in and reset the estimate — from
-    /// here the estimate covers only what the *next* step streams, so the
-    /// live display is real tokens plus the current step's delta, never an
-    /// estimate of tokens already counted for real.
+    /// A real usage report landed: `input` is this request's full context —
+    /// every step resends the whole conversation, so latest wins rather
+    /// than summing; `output` is what this step alone generated and
+    /// accumulates across the turn.
     pub fn note_usage(&mut self, input: u64, output: u64) {
         self.input = input;
-        self.input_estimated = false;
         self.output = self.output.saturating_add(output);
-        self.streamed_chars = 0;
-        self.assembly_bytes = 0;
-        self.estimated_output = 0;
-    }
-
-    pub fn seed_input(&mut self, input: u64) {
-        self.input = input;
-        self.input_estimated = true;
-    }
-
-    fn refresh_estimate(&mut self) {
-        self.estimated_output = (self.streamed_chars + self.assembly_bytes).div_ceil(4);
     }
 
     pub fn tokens(&self) -> String {
-        let output = self.output.saturating_add(self.estimated_output);
-        if self.input == 0 && output == 0 {
+        if self.input == 0 && self.output == 0 {
             String::new()
         } else {
-            // The reference compacts past a thousand — `(↑31 ↓9.6k)`. The
-            // `~` marks a chars/4 seed the reference doesn't have; it
-            // clears once real usage lands.
-            let estimate = if self.input_estimated { "~" } else { "" };
+            // The reference compacts past a thousand — `(↑31 ↓9.6k)`.
             format!(
-                "(↑{estimate}{} ↓{})",
+                "(↑{} ↓{})",
                 format_tokens(self.input),
-                format_tokens(output)
+                format_tokens(self.output)
             )
         }
     }
@@ -350,41 +310,12 @@ mod tests {
     }
 
     #[test]
-    fn assembly_bytes_count_toward_the_estimate_while_thinking() {
+    fn usage_lands_in_the_counters_it_belongs_to() {
         let mut turn = Turn::new();
-        turn.note_usage(50_000, 200);
-        turn.note_assembly(8_000); // ~2k tokens of argument JSON so far
-        assert_eq!(
-            turn.label(7).as_deref(),
-            Some("Thinking (7s) (↑50k ↓2.2k)"),
-            "argument streaming stays in the Thinking phase — the tool row, not the footer, owns the activity"
-        );
-        // The next cumulative report ticks the same counter.
-        turn.note_assembly(12_000);
-        assert_eq!(turn.tokens(), "(↑50k ↓3.2k)");
-    }
-
-    #[test]
-    fn usage_resets_the_streaming_estimate() {
-        let mut turn = Turn::new();
-        turn.note_text(&"x".repeat(4_000)); // ~1k estimated
-        assert_eq!(turn.tokens(), "(↑0 ↓1k)");
-        // Real usage lands: the estimate must not double what is now
-        // counted for real.
+        // No live estimate: only real usage moves the display.
+        assert_eq!(turn.tokens(), "");
         turn.note_usage(9_000, 800);
         assert_eq!(turn.tokens(), "(↑9k ↓800)");
-        // The next step's streaming adds on top of the real total.
-        turn.note_text("abcd");
-        assert_eq!(turn.tokens(), "(↑9k ↓801)");
-    }
-
-    #[test]
-    fn seeded_input_is_visibly_an_estimate() {
-        let mut turn = Turn::new();
-        turn.seed_input(5_208_000);
-        assert_eq!(turn.tokens(), "(↑~5208k ↓0)");
-        turn.note_usage(10_000, 2);
-        assert_eq!(turn.tokens(), "(↑10k ↓2)");
     }
 
     #[test]

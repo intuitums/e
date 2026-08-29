@@ -350,6 +350,47 @@ async fn a_blank_successful_stream_surfaces_an_error_not_silence() {
     assert!(saw_error, "a second blank success must surface an error");
 }
 
+/// A zero attempt budget means the unavoidable initial request is the only
+/// request: neither ordinary failures nor blank successes get a follow-up.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_attempt_budget_disables_every_retry_path() {
+    let _lock = env_lock();
+    let fail = "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+    let blank = concat!(
+        "data: {\"choices\":[{\"delta\":{}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (failure_port, failure_server) = serve_raw(vec![fail.into()]);
+    let (blank_port, blank_server) = serve_sse(&[blank]);
+    let home = mock_home();
+    home.write("settings.json", r#"{"retry_max_attempts":0}"#);
+
+    for port in [failure_port, blank_port] {
+        let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
+        agent.submit("hi".into(), "sys".into());
+        let mut retries = 0;
+        let mut error = None;
+        while let Some(event) = rx.recv().await {
+            match event {
+                SessionEvent::Retry { .. } => retries += 1,
+                SessionEvent::Error(message) => error = Some(message),
+                SessionEvent::TurnEnd { .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(retries, 0, "zero budget must not emit a retry");
+        let error = error.expect("the initial failure must still be surfaced");
+        assert!(
+            !error.contains("/0 attempts"),
+            "invalid attempt count: {error}"
+        );
+    }
+
+    assert_eq!(failure_server.join().unwrap().len(), 1);
+    assert_eq!(blank_server.join().unwrap().len(), 1);
+}
+
 /// The queued-prompt review pauses the queue: a paused turn neither steers
 /// pending prompts nor ends while any remain — it holds open until the
 /// review commits its edits and releases, then delivers what the review

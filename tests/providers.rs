@@ -448,6 +448,54 @@ async fn collect_stream(
     (text, reasoning, calls, usage, finish)
 }
 
+async fn collect_error(request: Request) -> e::core::providers::ProviderError {
+    let (mut rx, _handle) = providers::stream(request);
+    while let Some(event) = rx.recv().await {
+        match event {
+            Event::Error(error) => return error,
+            Event::Done(_) => panic!("stream completed instead of failing"),
+            _ => {}
+        }
+    }
+    panic!("stream ended without an error")
+}
+
+/// Recognized streaming rate-limit codes can still carry a hard quota wall in
+/// their message; the more specific, non-retryable cause must win.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_rate_limit_codes_respect_quota_messages() {
+    let _lock = env_lock();
+    let anthropic = concat!(
+        "data: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",",
+        "\"message\":\"monthly usage limit reached\"}}\n\n",
+    );
+    let responses = concat!(
+        "data: {\"type\":\"response.failed\",\"response\":{\"error\":{",
+        "\"code\":\"rate_limit_exceeded\",\"message\":\"insufficient_quota\"}}}\n\n",
+    );
+    let (anthropic_port, _anthropic_server) = serve_sse(&[anthropic]);
+    let (responses_port, _responses_server) = serve_sse(&[responses]);
+    let home = Home::new("streaming-quota");
+    home.auth(r#"{"anthropic":{"key":"k"},"openai":{"key":"k"}}"#);
+
+    for (provider, port, api) in [
+        ("anthropic", anthropic_port, Api::Anthropic),
+        ("openai", responses_port, Api::Responses),
+    ] {
+        let error = collect_error(Request {
+            model: test_model(provider, port, api),
+            system: "sys".into(),
+            messages: vec![ChatMessage::user("hi")],
+            effort: None,
+            tools: Vec::new(),
+        })
+        .await;
+        assert_eq!(error.cause, FailureCause::QuotaExhausted, "{provider}");
+        assert!(!error.cause.is_retryable(), "{provider}");
+    }
+}
+
 /// Chat Completions may interleave fragments for parallel calls. Progress
 /// must retain a stable per-call key; one anonymous byte counter cannot prove
 /// that fragments were attributed or assembled correctly.
@@ -845,6 +893,7 @@ async fn signed_thinking_blocks_are_captured_and_replayed() {
                 tool_call_id: None,
                 tool_meta: None,
                 images: Vec::new(),
+                usage: None,
                 internal: false,
             },
             ChatMessage::assistant("", calls.clone()),
@@ -1831,4 +1880,49 @@ async fn anthropic_model_refresh_speaks_the_messages_dialect() {
     assert!(!catalog
         .iter()
         .any(|m| m.provider == "anthropic" && m.id.contains("embed")));
+}
+
+/// The completions dialect carries the model's effort knob on the
+/// OpenAI-standard `reasoning_effort` field — sent whenever the agent
+/// resolved one, absent when there is none or the knob is `off` (which has
+/// no wire encoding here). This was the one dialect silently dropping it.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn completions_send_reasoning_effort_when_the_model_has_a_knob() {
+    let _lock = env_lock();
+    let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+    let stream = |effort: Option<&'static str>| async move {
+        let (port, server) = serve_sse(&[sse]);
+        let home = Home::new(&format!("effort-{}", effort.unwrap_or("none")));
+        home.auth(r#"{"mock":{"key":"k"}}"#);
+        let model = test_model("mock", port, Api::Completions);
+        let request = Request {
+            model,
+            system: "sys".into(),
+            messages: vec![ChatMessage::user("hi")],
+            effort: effort.map(str::to_string),
+            tools: Vec::new(),
+        };
+        collect_stream(request).await;
+        server.join().unwrap().remove(0)
+    };
+
+    let sent = stream(Some("low")).await;
+    assert_eq!(
+        request_json(&sent)["reasoning_effort"],
+        "low",
+        "resolved effort must reach the completions wire: {sent}"
+    );
+
+    let sent = stream(None).await;
+    assert!(
+        request_json(&sent).get("reasoning_effort").is_none(),
+        "a model with no knob must not send the field: {sent}"
+    );
+
+    let sent = stream(Some("off")).await;
+    assert!(
+        request_json(&sent).get("reasoning_effort").is_none(),
+        "`off` has no completions encoding — absence is the closest thing: {sent}"
+    );
 }

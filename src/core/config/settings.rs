@@ -159,7 +159,10 @@ pub fn all(effort_levels: Vec<String>) -> Vec<Setting> {
             label: "Show thinking".into(),
             category: "Interface",
             options: vec!["on".into(), "off".into()],
-            default: "off".into(),
+            // On by default: with it off, a reasoning model's long silent
+            // thinking phases look exactly like a hung stream. Set `off` to
+            // get the old quiet behavior back.
+            default: "on".into(),
         },
         Setting {
             key: "auto_update".into(),

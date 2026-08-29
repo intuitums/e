@@ -23,15 +23,6 @@ impl App {
                     pending_tools: 0,
                     cost_usd: self.agent.model.pricing.as_ref().map(|_| 0.0),
                 });
-                // Seed the token counters from request size so the activity
-                // row shows ↑ from the first second, like the reference.
-                if let Some(s) = &mut self.active {
-                    let estimate = crate::core::agent::compact::estimate_request_tokens(
-                        &system_prompt(),
-                        &self.agent.history_snapshot(),
-                    );
-                    s.turn.seed_input(estimate);
-                }
             }
             SessionEvent::Steered(text) => {
                 // A mid-turn message: show it as a user turn where it landed.
@@ -50,7 +41,6 @@ impl App {
                 self.end_thinking_burst();
                 if let Some(s) = &mut self.active {
                     s.turn.phase = TurnPhase::AssistantText;
-                    s.turn.note_text(&delta);
                     // Model output is untrusted: strip control sequences
                     // before it can reach the paint stream. (The raw text
                     // still goes to the model's own history in core.)
@@ -71,7 +61,6 @@ impl App {
             // assistant text.
             SessionEvent::ReasoningDelta(delta) => {
                 if let Some(s) = &mut self.active {
-                    s.turn.note_text(&delta);
                     if self.show_thinking {
                         if s.thinking_block.is_none() {
                             s.thinking_started = Some(Instant::now());
@@ -88,15 +77,13 @@ impl App {
                     }
                 }
             }
-            SessionEvent::ToolCallAssembly { bytes } => {
+            SessionEvent::ToolCallAssembly { bytes: _ } => {
                 // The model is streaming tool-call arguments. No phase of
                 // its own — the footer stays on Thinking (the model is
-                // still generating), the bytes count toward the token
-                // estimate, and the tool row appears in the tree when the
-                // call actually starts.
-                if let Some(s) = &mut self.active {
-                    s.turn.note_assembly(bytes);
-                }
+                // still generating), and the tool row appears in the tree
+                // when the call actually starts. Argument bytes are real
+                // output but are never estimated into the token display:
+                // usage frames own the numbers.
             }
             SessionEvent::ToolBatchStart { calls } => {
                 // The pre-batch reasoning collapses where it sits; the tree
@@ -274,9 +261,6 @@ impl App {
                         reason,
                     });
                     s.turn.recovered = None;
-                    // The abandoned attempt's argument bytes die with it —
-                    // the fresh attempt streams from scratch.
-                    s.turn.note_assembly(0);
                 }
                 // The abandoned attempt's thinking collapses with its
                 // duration; the retry streams a fresh burst.
@@ -365,9 +349,8 @@ impl App {
                     let tokens = if s.turn.input == 0 && s.turn.output == 0 {
                         String::new()
                     } else {
-                        let estimate = if s.turn.input_estimated { "~" } else { "" };
                         format!(
-                            " (↑{estimate}{} ↓{})",
+                            " (↑{} ↓{})",
                             format_tokens(s.turn.input),
                             format_tokens(s.turn.output)
                         )

@@ -55,6 +55,12 @@ enum Entry {
         id: String,
         #[serde(default)]
         parent: Option<String>,
+        /// Wall-clock write time, epoch milliseconds. Absent (0) on records
+        /// written before timestamps existed; diagnosis of a session — where
+        /// did the time and tokens go — reads this beside each message's
+        /// `usage`.
+        #[serde(default)]
+        timestamp: u64,
         message: ChatMessage,
     },
     /// A display name an extension set via session_name — shown in /resume,
@@ -238,6 +244,7 @@ impl Session {
         let mut line = serde_json::to_string(&Entry::Message {
             id: id.clone(),
             parent: self.current.clone(),
+            timestamp: now_ms(),
             message: message.clone(),
         })?;
         line.push('\n');
@@ -369,6 +376,7 @@ impl Session {
                 Ok(Entry::Message {
                     id,
                     parent,
+                    timestamp: _,
                     message,
                 }) => {
                     let (id, parent) = if id.is_empty() {
@@ -669,16 +677,19 @@ mod tests {
             Entry::Message {
                 id: "a".into(),
                 parent: None,
+                timestamp: 0,
                 message: ChatMessage::user("the real prompt"),
             },
             Entry::Message {
                 id: "b".into(),
                 parent: Some("a".into()),
+                timestamp: 0,
                 message: steered,
             },
             Entry::Message {
                 id: "c".into(),
                 parent: Some("b".into()),
+                timestamp: 0,
                 message: ChatMessage::assistant("reply", Vec::new()),
             },
         ];
@@ -714,21 +725,25 @@ mod tests {
             Entry::Message {
                 id: "root".into(),
                 parent: None,
+                timestamp: 0,
                 message: ChatMessage::user("root"),
             },
             Entry::Message {
                 id: "abandoned".into(),
                 parent: Some("root".into()),
+                timestamp: 0,
                 message: ChatMessage::assistant("old tail", Vec::new()),
             },
             Entry::Message {
                 id: "branch".into(),
                 parent: Some("root".into()),
+                timestamp: 0,
                 message: ChatMessage::user("new branch"),
             },
             Entry::Message {
                 id: "head".into(),
                 parent: Some("branch".into()),
+                timestamp: 0,
                 message: ChatMessage::assistant("new answer", Vec::new()),
             },
         ];

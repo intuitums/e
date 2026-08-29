@@ -8,6 +8,31 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- Provider failures are classified by the error body's own wording, not
+  just the HTTP status: a hard quota or billing wall (OpenCode Zen Go's
+  `GoUsageLimitError`, `insufficient_quota`, "available balance", and
+  friends) fails the step immediately instead of burning the retry ladder
+  on requests that cannot succeed, while transient wording wrapped in a
+  generic 400 stays retryable. The computed backoff also carries downward
+  jitter, and the attempt budget is settable via `retry_max_attempts` in
+  `~/.e/settings.json` (0–20, default 10).
+
+- Sessions record what happened, not just what was said: every message
+  entry carries a wall-clock `timestamp`, and assistant entries carry the
+  step's real token `usage` (input, output, cached). A session file can
+  now answer "where did the time and tokens go" on its own.
+
+- The footer's token counts come only from real provider usage frames —
+  the chars÷4 live estimate of streamed output is gone. A reasoning model
+  streaming minutes of invisible thinking no longer balloons ↓ into a
+  number nothing on screen can explain.
+
+- Streamed thinking is shown by default (`show_thinking: on`), so a long
+  thinking phase reads as thinking rather than as a hung stream. Set it
+  back to `off` for the old quiet behavior.
+
+- The completions dialect now sends `reasoning_effort` for models that
+  declare an effort knob — the one wire dialect that silently dropped it.
 - A preference pass — five deliberate departures from the reference where
   its choices didn't earn their keep here:
   - The statusline slims back to just the model (accent-bright) and the
