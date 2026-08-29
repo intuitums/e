@@ -845,6 +845,7 @@ async fn signed_thinking_blocks_are_captured_and_replayed() {
                 tool_call_id: None,
                 tool_meta: None,
                 images: Vec::new(),
+                internal: false,
             },
             ChatMessage::assistant("", calls.clone()),
             ChatMessage::tool_result("tu_1", "contents"),

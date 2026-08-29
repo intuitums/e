@@ -166,7 +166,7 @@ fn lock_owner_alive(lock_path: &Path) -> bool {
     }
 }
 
-fn normalized_cwd(cwd: &Path) -> PathBuf {
+pub fn normalized_cwd(cwd: &Path) -> PathBuf {
     cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf())
 }
 
@@ -480,6 +480,10 @@ pub struct SessionInfo {
     pub title: String,
     pub modified: u64,
     pub message_count: usize,
+    /// User messages only — the picker's "N turns" count.
+    pub user_turns: usize,
+    /// The workspace the session was recorded in, from its header.
+    pub cwd: PathBuf,
     /// A name an extension set, overriding the derived title.
     pub name: Option<String>,
 }
@@ -513,28 +517,99 @@ pub fn most_recent(cwd: &Path) -> Option<PathBuf> {
     list(cwd).into_iter().next().map(|s| s.path)
 }
 
+/// Every saved session across all workspaces, newest first — the resume
+/// picker's "All workspaces" scope.
+pub fn list_all() -> Vec<SessionInfo> {
+    let Ok(workspaces) = std::fs::read_dir(home::sessions_dir()) else {
+        return Vec::new();
+    };
+    let mut sessions = Vec::new();
+    for workspace in workspaces.flatten() {
+        let Ok(entries) = std::fs::read_dir(workspace.path()) else {
+            continue;
+        };
+        sessions.extend(
+            entries
+                .flatten()
+                .filter(|e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false))
+                .filter_map(|e| info(&e.path(), None)),
+        );
+    }
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
+    sessions
+}
+
 fn info(path: &Path, expected_cwd: Option<&Path>) -> Option<SessionInfo> {
-    // Read messages and any extension-set name in one pass.
+    // One lean pass over the log. Listing needs the header, the name, the
+    // message and user-turn counts, and the first user line for the title —
+    // not the full content of every recorded tool result. A full ChatMessage
+    // parse materializes megabytes of content per session; the lean shape
+    // tokenizes the same lines without allocating them, so /resume across
+    // every workspace stays fast. Only the title line is parsed in full.
+    #[derive(Deserialize)]
+    struct LeanMessage {
+        role: String,
+        #[serde(default)]
+        internal: bool,
+    }
+    #[derive(Deserialize)]
+    #[serde(tag = "type")]
+    enum LeanEntry {
+        #[serde(rename = "session")]
+        Header {
+            #[serde(default)]
+            format_version: u32,
+            cwd: String,
+        },
+        #[serde(rename = "message")]
+        Message { message: LeanMessage },
+        #[serde(rename = "name")]
+        Name { name: String },
+    }
     let reader = BufReader::new(File::open(path).ok()?);
-    let mut messages = Vec::new();
+    let mut message_count = 0usize;
+    let mut user_turns = 0usize;
     let mut name = None;
     let mut session_cwd = None;
+    let mut title: Option<String> = None;
     for line in reader.lines() {
         let line = line.ok()?;
-        match serde_json::from_str(&line) {
-            Ok(Entry::Header {
+        match serde_json::from_str::<LeanEntry>(&line) {
+            Ok(LeanEntry::Header {
                 cwd,
                 format_version,
-                ..
-            }) if validate_format(format_version).is_ok() => session_cwd = Some(PathBuf::from(cwd)),
-            Ok(Entry::Header { .. }) => return None,
-            Ok(Entry::Message { message, .. }) => messages.push(message),
-            Ok(Entry::Name { name: n }) => name = Some(n),
+            }) => {
+                // Same contract as the full parse: a header this build
+                // cannot read means the whole file is unreadable.
+                if validate_format(format_version).is_err() {
+                    return None;
+                }
+                session_cwd = Some(PathBuf::from(cwd));
+            }
+            Ok(LeanEntry::Message { message }) => {
+                message_count += 1;
+                if message.role != "user" {
+                    continue;
+                }
+                // Harness-authored messages (steering, continuations) fill
+                // the log as user rows but are not user turns.
+                if !message.internal {
+                    user_turns += 1;
+                }
+                if title.is_none() {
+                    title = match serde_json::from_str::<Entry>(&line) {
+                        Ok(Entry::Message { message, .. }) => Some(title_of(&message.content)),
+                        _ => None,
+                    };
+                }
+            }
+            Ok(LeanEntry::Name { name: n }) => name = Some(n),
             Err(_) => {}
         }
     }
+    let session_cwd = session_cwd.unwrap_or_default();
     if let Some(expected_cwd) = expected_cwd {
-        if normalized_cwd(&session_cwd?) != expected_cwd {
+        if session_cwd.as_os_str().is_empty() || normalized_cwd(&session_cwd) != expected_cwd {
             return None;
         }
     }
@@ -547,15 +622,14 @@ fn info(path: &Path, expected_cwd: Option<&Path>) -> Option<SessionInfo> {
         .as_millis() as u64;
     // A session begins with user intent. Header-only files, or malformed logs
     // containing only assistant/tool entries, never appear in /resume or -c.
-    let title = messages
-        .iter()
-        .find(|message| message.role == "user")
-        .map(|message| title_of(&message.content))?;
+    let title = title?;
     Some(SessionInfo {
         path: path.to_path_buf(),
         title: name.clone().unwrap_or(title),
         modified,
-        message_count: messages.len(),
+        message_count,
+        user_turns,
+        cwd: session_cwd,
         name,
     })
 }
@@ -574,6 +648,53 @@ fn title_of(content: &str) -> String {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listing_counts_user_turns_not_harness_messages() {
+        let path = std::env::temp_dir().join(format!(
+            "e-session-turns-{}-{}.jsonl",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let mut steered = ChatMessage::user("steering echo");
+        steered.internal = true;
+        let entries = [
+            Entry::Header {
+                format_version: FORMAT_VERSION,
+                id: "session".into(),
+                cwd: "/tmp".into(),
+                created: 0,
+                model: "test/model".into(),
+            },
+            Entry::Message {
+                id: "a".into(),
+                parent: None,
+                message: ChatMessage::user("the real prompt"),
+            },
+            Entry::Message {
+                id: "b".into(),
+                parent: Some("a".into()),
+                message: steered,
+            },
+            Entry::Message {
+                id: "c".into(),
+                parent: Some("b".into()),
+                message: ChatMessage::assistant("reply", Vec::new()),
+            },
+        ];
+        let body = entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, format!("{body}\n")).unwrap();
+
+        let info = info(&path, None).unwrap();
+        assert_eq!(info.user_turns, 1);
+        assert_eq!(info.message_count, 3);
+        assert_eq!(info.title, "the real prompt");
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn load_restores_only_the_most_recent_branch() {

@@ -116,6 +116,34 @@ fn agents_md_layers_as_project_instructions() {
 }
 
 #[test]
+fn trusting_an_ancestor_covers_its_children_but_declining_does_not() {
+    with_home("trust-ancestor", || {
+        let home = std::env::var("E_HOME").unwrap();
+        let root = std::path::PathBuf::from(&home).join("code");
+        let child = root.join("clones").join("e-1");
+        let sibling = root.join("clones").join("e-2");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let root = root.canonicalize().unwrap();
+        let child = child.canonicalize().unwrap();
+
+        // Trusting the top ancestor extends to everything inside it; the
+        // child needs no first-visit question of its own.
+        e::core::config::trust::set(&root, true).unwrap();
+        assert_eq!(e::core::config::trust::status(&child), Some(true));
+
+        // The child's own explicit answer wins over the ancestor's.
+        e::core::config::trust::set(&child, false).unwrap();
+        assert_eq!(e::core::config::trust::status(&child), Some(false));
+
+        // A *declined* ancestor answers only for itself: its other
+        // children still get their own question.
+        e::core::config::trust::set(&root, false).unwrap();
+        assert_eq!(e::core::config::trust::status(&sibling), None);
+    });
+}
+
+#[test]
 fn trust_gates_project_instructions() {
     with_home("trust", || {
         let home = std::env::var("E_HOME").unwrap();

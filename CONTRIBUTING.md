@@ -45,8 +45,7 @@ the guard only when the boundary itself is intentionally changing.
 Changes to the extension host, authentication, configuration store, provider
 wire code, and `.github/` require code-owner review.
 
-Use [REVIEW.md](REVIEW.md) for the checks specific to protocol, persistence,
-security-boundary, terminal, and release changes. Any supported-surface change
+Any supported-surface change
 must follow [the compatibility policy](docs/compatibility.md) and update or add
 a retained fixture.
 

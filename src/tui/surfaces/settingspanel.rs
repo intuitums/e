@@ -15,7 +15,6 @@ pub struct SettingsPanel {
     pub selected: usize,
 }
 
-const VALUE_COL: usize = 20;
 pub const HINT: &str = "↑↓ Navigate     ←→ Change     Esc Close";
 
 impl SettingsPanel {
@@ -46,7 +45,21 @@ impl SettingsPanel {
     }
 
     pub fn render(&self, theme: &Theme, width: usize) -> Vec<String> {
-        let header = bold(&theme.fg("userMessageText", "Settings"));
+        let header = bold(&theme.fg(
+            "userMessageText",
+            &format!("Settings {}", self.settings.len()),
+        ));
+        // The value column rides the widest label plus the reference's
+        // four-space gap, clamped to the frame — never a fixed stop.
+        let value_col = (2
+            + self
+                .settings
+                .iter()
+                .map(|s| visible_width(&s.label))
+                .max()
+                .unwrap_or(0)
+            + 4)
+        .min(width);
         let mut body: Vec<String> = Vec::new();
         let mut last_category = "";
         for (i, setting) in self.settings.iter().enumerate() {
@@ -64,7 +77,7 @@ impl SettingsPanel {
                 theme.fg("dim", &setting.label)
             };
             let mut line = format!("  {label}");
-            let pad = VALUE_COL.saturating_sub(visible_width(&line));
+            let pad = value_col.saturating_sub(visible_width(&line));
             line.push_str(&" ".repeat(pad));
             let current = setting.current();
             let opts: Vec<String> = setting

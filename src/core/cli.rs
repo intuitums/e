@@ -21,7 +21,8 @@ impl ToolMode {
     pub fn allows(self, name: &str) -> bool {
         match self {
             ToolMode::All => true,
-            ToolMode::ReadOnly => matches!(name, "read" | "grep"),
+            // Asking the user mutates nothing; read-only sessions keep it.
+            ToolMode::ReadOnly => matches!(name, "read" | "grep" | "ask"),
             ToolMode::None => false,
         }
     }

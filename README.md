@@ -89,9 +89,8 @@ The repository pins Rust and exposes one development entry point:
 ./x bench                 # portable performance budgets
 ```
 
-Start with [CONTRIBUTING.md](CONTRIBUTING.md), the
-[architecture map](docs/architecture.md), and the situational
-[review guide](REVIEW.md).
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[architecture map](docs/architecture.md).
 
 `e` keeps the harness small: four normalized provider dialects, one ordered
 agent event stream, five built-in tools, append-only branchable sessions, and

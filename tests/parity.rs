@@ -101,6 +101,7 @@ fn the_palette_carries_the_reference_values() {
         ("comment", 243, 245),
         ("code", 241, 250),
         ("selected", 251, 239),
+        ("selectedInk", 237, 255),
     ];
     for (name, l, d) in expected {
         assert_eq!(light.vars.get(*name), Some(l), "light var {name}");
@@ -117,19 +118,29 @@ fn dark() -> Theme {
 #[test]
 fn code_panel_geometry_matches_the_reference() {
     let t = dark();
+    // The reference's own literals: a dim `─ label ─…` rule, flush-left
+    // code, a dim solid rule below — no side rails, no padding.
     assert_eq!(
         code_panel(&t, "x", "zig", 80),
-        vec!["┌ \x1b[2mzig\x1b[22m ─┐", "│ x    │", "└──────┘"]
+        vec!["\x1b[2m─ zig ─\x1b[22m", "x", "\x1b[2m───────\x1b[22m"]
     );
     assert_eq!(
         code_panel(&t, "x", "", 80),
-        vec!["┌────┐", "│ x  │", "└────┘"]
+        vec!["\x1b[2m──────\x1b[22m", "x", "\x1b[2m──────\x1b[22m"]
     );
-    // Label truncated to panel_width - 5 when the terminal is narrow.
+    // Label truncated by display width to panel_width - 4 when narrow.
     assert_eq!(
         code_panel(&t, "x", "typescript", 8),
-        vec!["┌ \x1b[2mtyp\x1b[22m ─┐", "│ x    │", "└──────┘"]
+        vec!["\x1b[2m─ type ─\x1b[22m", "x", "\x1b[2m────────\x1b[22m"]
     );
+    // A wide rune measures two cells, so the frame stays square.
+    assert_eq!(
+        code_panel(&t, "x", "漢", 6),
+        vec!["\x1b[2m─ 漢 ─\x1b[22m", "x", "\x1b[2m──────\x1b[22m"]
+    );
+    // An unlabeled fence with recognizable content names itself.
+    let inferred = code_panel(&t, "{\"a\": 1}", "", 80);
+    assert!(inferred[0].contains("─ json ─"), "{:?}", inferred[0]);
 }
 
 #[test]
@@ -147,9 +158,122 @@ fn code_panel_survives_a_degenerate_terminal_width() {
 fn lists_match_the_reference_glyphs_and_indent() {
     let t = dark();
     let out = render_markdown(&t, "- one\n  - nested\n\n1. numbered\n", 40).join("\n");
-    assert!(out.contains("\x1b[2m•\x1b[22m one"), "bullet: {out:?}");
-    assert!(out.contains("  \x1b[2m•\x1b[22m nested"), "nested: {out:?}");
-    assert!(out.contains("1. numbered"), "ordered: {out:?}");
+    // The reference keeps the bullet's trailing space inside the dim run,
+    // and dims ordered markers the same way.
+    assert!(out.contains("\x1b[2m• \x1b[22mone"), "bullet: {out:?}");
+    assert!(out.contains("  \x1b[2m• \x1b[22mnested"), "nested: {out:?}");
+    assert!(
+        out.contains("\x1b[2m1.\x1b[22m numbered"),
+        "ordered: {out:?}"
+    );
+
+    // Ordered markers echo the author's numbering instead of renumbering.
+    let echoed = render_markdown(&t, "1. a\n1. b\n", 40).join("\n");
+    assert!(echoed.contains("\x1b[2m1.\x1b[22m a"), "{echoed:?}");
+    assert!(echoed.contains("\x1b[2m1.\x1b[22m b"), "{echoed:?}");
+
+    // Task lists: a dim ☐ replaces the bullet; a done ✓ wears the accent.
+    let tasks = render_markdown(&t, "- [ ] open\n- [x] done\n", 40).join("\n");
+    assert!(tasks.contains("\x1b[2m☐ \x1b[22mopen"), "{tasks:?}");
+    assert!(
+        tasks.contains(&format!("{} done", t.fg("accent", "✓"))),
+        "{tasks:?}"
+    );
+}
+
+#[test]
+fn tables_render_the_reference_boxed_ladder() {
+    let t = dark();
+    // Fits the frame → the boxed grid: ┌┬┐ top, padded cells, ├┼┤ after the
+    // header and between every body row, └┴┘ bottom.
+    let out = render_markdown(&t, "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n", 80);
+    assert_eq!(out[0], "┌───┬───┐");
+    assert!(
+        out[1].contains("│ ") && out[1].contains("\x1b[1ma\x1b[22m"),
+        "{:?}",
+        out[1]
+    );
+    assert_eq!(out[2], "├───┼───┤");
+    assert_eq!(out[3], "│ 1 │ 2 │");
+    assert_eq!(out[4], "├───┼───┤", "a separator rides between body rows");
+    assert_eq!(out[5], "│ 3 │ 4 │");
+    assert_eq!(out[6], "└───┴───┘");
+
+    // A header cell's inline bold re-asserts the row bold after its close.
+    let strong = render_markdown(&t, "| prefix **strong** suffix |\n|---|\n| value |\n", 80);
+    assert!(
+        strong
+            .iter()
+            .any(|l| l.contains("\x1b[1mprefix \x1b[1mstrong\x1b[22m\x1b[1m suffix\x1b[22m")),
+        "{strong:?}"
+    );
+
+    // Too wide for the grid → the vertical key/value box at frame width.
+    let vertical = render_markdown(
+        &t,
+        "| name | detail |\n|---|---|\n| one | aaaaaaaaaa |\n| two | bbbbbbbbbb |\n",
+        16,
+    );
+    assert_eq!(vertical[0], "┌──────────────┐");
+    assert!(
+        vertical
+            .iter()
+            .any(|l| l.starts_with("│") && l.contains("name: one")),
+        "{vertical:?}"
+    );
+    assert!(
+        vertical.iter().any(|l| l == "├──────────────┤"),
+        "records separate: {vertical:?}"
+    );
+    assert_eq!(vertical.last().unwrap(), "└──────────────┘");
+}
+
+#[test]
+fn wrapping_reopens_styles_and_avoids_orphans() {
+    use e::tui::markdown::wrap_styled;
+    // A bold span crossing a seam closes at the row end and reopens on the
+    // next row — a repainted row never leans on the row above it.
+    let rows = wrap_styled("\x1b[1mbold words that wrap\x1b[22m tail", 12);
+    assert!(rows.len() >= 2, "{rows:?}");
+    assert!(rows[0].ends_with("\x1b[0m"), "{:?}", rows[0]);
+    assert!(rows[1].starts_with("\x1b[1m"), "{:?}", rows[1]);
+
+    // The reference's orphan rule: a lone last word pulls the previous word
+    // down with it.
+    let rows = wrap_styled("alpha beta gamma delta", 16);
+    assert_eq!(rows, vec!["alpha beta", "gamma delta"]);
+
+    // A link crossing a seam closes and reopens so each row hyperlinks.
+    let link = "\x1b]8;;https://x.dev\x1b\\\x1b[4mspanning link text\x1b[24m\x1b]8;;\x1b\\";
+    let rows = wrap_styled(link, 9);
+    assert!(rows.len() >= 2);
+    assert!(rows[0].ends_with("\x1b]8;;\x1b\\\x1b[0m"), "{:?}", rows[0]);
+    assert!(
+        rows[1].starts_with("\x1b]8;;https://x.dev\x1b\\"),
+        "{:?}",
+        rows[1]
+    );
+
+    // A hard-wrapped token may have several active SGR attributes. Every one
+    // closes at the seam and reopens on the continuation row.
+    let styled = "\x1b[1m\x1b[3m\x1b[4m\x1b[9m\x1b[38;5;245mabcdefgh\x1b[0m";
+    let rows = wrap_styled(styled, 4);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows[0].ends_with("\x1b[0m"), "{:?}", rows[0]);
+    assert!(
+        rows[1].starts_with("\x1b[1m\x1b[3m\x1b[4m\x1b[9m\x1b[38;5;245m"),
+        "{:?}",
+        rows[1]
+    );
+}
+
+#[test]
+fn soft_breaks_keep_the_authors_rows() {
+    let t = dark();
+    // The reference preserves the author's line breaks inside a paragraph
+    // instead of reflowing them into one.
+    let out = render_markdown(&t, "first line\nsecond line\n", 80);
+    assert_eq!(out, vec!["first line", "second line"]);
 }
 
 #[test]
@@ -173,12 +297,33 @@ fn inline_spans_match_the_reference() {
     assert!(out.contains("\x1b[1mbold\x1b[22m"));
     // Inline code: the palette's dedicated inline-code gray (dim var = 245 dark).
     assert!(out.contains("\x1b[38;5;245mcode\x1b[39m"), "{out:?}");
-    // Links: underline only, OSC 8 wrapped, no printed URL.
+    // Links: underline only, OSC 8 wrapped with a document-scoped id (so a
+    // wrapped link stays one link), no printed URL.
     assert!(
-        out.contains("\x1b]8;;https://x.dev\x1b\\\x1b[4mlink\x1b[24m\x1b]8;;\x1b\\"),
+        out.contains("\x1b]8;id=e-1;https://x.dev\x1b\\\x1b[4mlink\x1b[24m\x1b]8;;\x1b\\"),
         "{out:?}"
     );
     assert!(!out.contains("(https://x.dev)"));
+}
+
+#[test]
+fn image_inside_link_restores_the_outer_hyperlink() {
+    let t = dark();
+    let out = render_markdown(
+        &t,
+        "[before ![alt](https://image.test/i.png) https://label.test](https://outer.test)",
+        120,
+    )
+    .join("\n");
+    let outer = "\x1b]8;id=e-1;https://outer.test\x1b\\";
+    let image_close = format!("\x1b[24m\x1b]8;;\x1b\\{outer}\x1b[4m https://label.test");
+
+    assert_eq!(out.matches(outer).count(), 2, "{out:?}");
+    assert!(out.contains(&image_close), "{out:?}");
+    assert!(
+        !out.contains("id=e-3"),
+        "outer label was autolinked: {out:?}"
+    );
 }
 
 #[test]
@@ -333,12 +478,19 @@ fn live_tool_group_replaces_running_state_and_streams_output() {
     assert_eq!(group.text, "2 tool calls · 1 read · 1 command");
 
     group.start_tool(1);
+    // The focused running call paints as the transient overlay row, not a
+    // tree row; the still-pending sibling shows nowhere yet.
     let running = group.lines_for_test(&theme, 80);
-    assert!(running[1].contains("Reading src/core/mod.rs"));
-    assert!(!running.iter().any(|line| line.contains("cargo test")));
-    let narrow = group.lines_for_test(&theme, 20);
+    assert_eq!(running.len(), 1, "only the header while the call runs");
+    let overlay = group.overlay_rows(&theme, 80);
     assert!(
-        narrow[1].contains('…'),
+        overlay[0].contains("Reading src/core/mod.rs"),
+        "{overlay:?}"
+    );
+    assert!(!running.iter().any(|line| line.contains("cargo test")));
+    let narrow = group.overlay_rows(&theme, 20);
+    assert!(
+        narrow[0].contains('…'),
         "long targets need an explicit ellipsis"
     );
 
@@ -350,14 +502,21 @@ fn live_tool_group_replaces_running_state_and_streams_output() {
     );
     group.start_tool(2);
     group.append_tool_output(2, "one\ntwo\nthree\nfour\nfive\nsix\n");
+    // The finished call keeps `├` — the tree stays open while the focused
+    // call is out — and the live output streams under the overlay row.
     let streaming = group.lines_for_test(&theme, 80);
     assert!(streaming[1].contains("Read src/core/mod.rs"));
-    assert!(streaming[2].contains("Running cargo test"));
-    assert!(streaming.iter().any(|line| line.contains("one")));
-    assert!(streaming
+    assert!(streaming[1].contains('├'), "{:?}", streaming[1]);
+    assert!(!streaming.iter().any(|line| line.contains("cargo test")));
+    let overlay = group.overlay_rows(&theme, 80);
+    assert!(overlay[0].contains("Running cargo test"));
+    assert!(overlay[0].contains('└'), "a tree's focused call wears └");
+    assert!(overlay.iter().any(|line| line.contains("one")));
+    // The reference pluralizes the elision row: one hidden line is a "line".
+    assert!(overlay
         .last()
         .unwrap()
-        .contains("1 lines more (ctrl o to view)"));
+        .contains("1 line more (ctrl o to view)"));
 
     group.finish_tool(
         2,
@@ -367,9 +526,10 @@ fn live_tool_group_replaces_running_state_and_streams_output() {
     );
     let done = group.lines_for_test(&theme, 80);
     // The reference withdraws pipe rows on completion — full output lives
-    // behind ctrl+o, never inline. Failure shows in the label and the tally.
+    // behind ctrl+o, never inline. A non-zero exit keeps its `Ran` row; the
+    // failure lives in the header tally.
     assert!(group.text.ends_with("· 1 failed"));
-    assert!(done[2].contains("Failed cargo test"));
+    assert!(done[2].contains("Ran cargo test"));
     assert!(!done.iter().any(|line| line.contains('│')));
 }
 
@@ -379,7 +539,16 @@ fn failed_turns_end_in_error_color() {
     let theme = e::tui::theme::resolve("dark", false);
     let block = Block::new(Kind::Error, "error: boom");
     let rows = block.lines_for_test(&theme, 80);
-    assert_eq!(rows[0], theme.fg("error", "  error: boom"));
+    // The reference notice grammar: `● Error:` in the error tone, the body
+    // in the system-notice text gray.
+    assert_eq!(
+        rows[0],
+        format!(
+            "{} {}",
+            theme.fg("error", "● Error:"),
+            theme.fg("customMessageText", "error: boom")
+        )
+    );
 }
 
 #[test]
@@ -394,12 +563,15 @@ fn running_write_and_edit_rows_stay_lean() {
         "src/lib.rs".into(),
     )]);
     group.start_tool(1);
-    // A write streams no inline content: the tree says "Writing src/lib.rs"
-    // and nothing more — the thinking indicator row is not displaced by a
-    // file dump. (Full content still lands behind ctrl+o.)
+    // A write streams no inline content: the overlay says "Writing
+    // src/lib.rs" and nothing more — no file dump. (Full content still
+    // lands behind ctrl+o.)
     group.append_tool_output(1, "hello\nworld\n");
+    let overlay = group.overlay_rows(&theme, 80);
+    assert!(overlay[0].contains("Writing src/lib.rs"), "{overlay:?}");
+    assert!(overlay[0].contains('●'), "a lone call wears the ● marker");
+    assert!(!overlay.iter().any(|line| line.contains('│')));
     let rows = group.lines_for_test(&theme, 80);
-    assert!(rows[1].contains("Writing src/lib.rs"));
     assert!(!rows.iter().any(|line| line.contains('│')));
 
     // Edits are the same; the completion summary rides the row itself.
@@ -410,7 +582,10 @@ fn running_write_and_edit_rows_stay_lean() {
         "hello\nworld\n",
     );
     let rows = group.lines_for_test(&theme, 80);
-    assert!(rows[1].contains("Wrote src/lib.rs") && rows[1].contains("+2 -0"));
+    // The reference stat suffix drops a zero side: `+2`, no ` -0`, with the
+    // diff-marker hue on the count.
+    assert!(rows[1].contains("Wrote src/lib.rs") && rows[1].contains("+2"));
+    assert!(!rows[1].contains("-0"));
     assert!(!rows.iter().any(|line| line.contains('│')));
 }
 
@@ -444,10 +619,10 @@ fn silent_batches_continue_one_tree_and_long_trees_cap_rows() {
     assert_eq!(t.blocks.len(), 3);
     assert_eq!(t.blocks[2].text, "1 tool call \u{b7} 1 read");
 
-    // Past the row cap the tallies stay complete; the most recent calls
-    // keep their rows and the earliest ones collapse into a count above
-    // them. (Rows render once a call leaves its pending state, so start
-    // them.)
+    // The reference never caps the tree: every started call keeps its row
+    // and the header carries the full tallies. The latest running call is
+    // the focused one — out of the tree, on the overlay. (Rows render once
+    // a call leaves its pending state, so start them.)
     let many = (0..12).map(|i| read(10 + i, &format!("{i}.rs"))).collect();
     t.extend_tool_group(many);
     assert_eq!(t.blocks[2].text, "13 tool calls \u{b7} 13 read");
@@ -455,16 +630,24 @@ fn silent_batches_continue_one_tree_and_long_trees_cap_rows() {
         t.blocks[2].start_tool(id);
     }
     let rows = t.blocks[2].lines_for_test(&theme, 80);
-    assert_eq!(rows.len(), 1 + 1 + 7, "header, overflow count, recent rows");
-    assert!(rows[1].contains("\u{2026} 6 earlier tool calls"));
-    // The recent tail survives; the oldest work is what got folded away.
-    assert!(rows[2].contains("Reading 5.rs"));
-    assert!(rows.last().unwrap().contains("Reading 11.rs"));
-    assert!(!rows.iter().any(|line| line.contains("Reading c.rs")));
+    assert_eq!(
+        rows.len(),
+        1 + 12,
+        "header plus every started call but the focused one"
+    );
+    assert!(rows[1].contains("Reading c.rs"));
+    assert!(rows.last().unwrap().contains("Reading 10.rs"));
+    assert!(
+        !rows.iter().any(|line| line.contains('└')),
+        "the tree stays open while the focused call is out"
+    );
+    let overlay = t.blocks[2].overlay_rows(&theme, 80);
+    assert!(overlay[0].contains("Reading 11.rs"), "{overlay:?}");
+    assert!(!rows.iter().any(|line| line.contains("earlier tool calls")));
 }
 
 #[test]
-fn picker_band_holds_a_fixed_height() {
+fn picker_band_shrinks_with_its_rows() {
     use e::tui::menu::{Menu, MenuItem, MenuKind, HINT_USE};
     let theme = e::tui::theme::resolve("dark", false);
     let items: Vec<MenuItem> = (0..17)
@@ -473,20 +656,391 @@ fn picker_band_holds_a_fixed_height() {
     let mut menu = Menu::new(MenuKind::Commands, "Commands", HINT_USE, items);
     let full = menu.render(&theme, 80);
     assert_eq!(full.len(), 6 + 4, "divider, header, blank, 6 rows, divider");
+    // The header is uniformly dim, count and filter hint included.
+    assert!(
+        full[1].contains("Commands 17 · Type to filter"),
+        "{:?}",
+        full[1]
+    );
+    assert!(full[1].starts_with(theme.fg_prefix("dim")), "{:?}", full[1]);
+    // The selected row fills: selection background and ink, no caret.
+    assert!(full[3].contains("\x1b[48;5;239m"), "{:?}", full[3]);
+    assert!(full[3].contains("\x1b[38;5;255m"), "{:?}", full[3]);
 
-    // Filtering down to one match keeps the band the same size: the match
-    // sits at the top, the remaining slots stay blank.
+    // Filtering down to one match shrinks the band with it — the reference
+    // never blank-pads a short list — and drops the filter clause from the
+    // header.
     menu.set_query("cmd15");
     let filtered = menu.render(&theme, 80);
-    assert_eq!(filtered.len(), full.len());
-    assert!(filtered[3].contains("/cmd15"));
-    assert!(filtered[4].is_empty() && filtered[8].is_empty());
+    assert_eq!(filtered.len(), 1 + 4);
+    // The matched chars are brightened, so compare the escape-stripped row.
+    let strip = |row: &str| -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for e in chars.by_ref() {
+                    if e.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            out.push(c);
+        }
+        out
+    };
+    assert!(strip(&filtered[3]).contains("/cmd15"), "{:?}", filtered[3]);
+    // The match highlight itself: a bold mark rides inside the row.
+    assert!(filtered[3].contains("\x1b[1mc"), "{:?}", filtered[3]);
+    assert!(filtered[1].contains("Commands 1"), "{:?}", filtered[1]);
+    assert!(!filtered[1].contains("Type to filter"), "{:?}", filtered[1]);
 
-    // No match at all: the same size, the notice on the first body row.
+    // No match at all: the notice alone, in the reference's own words.
     menu.set_query("zzz");
     let empty = menu.render(&theme, 80);
-    assert_eq!(empty.len(), full.len());
-    assert!(empty[3].contains("Nothing found."));
+    assert_eq!(empty.len(), 1 + 4);
+    assert!(empty[3].contains("no matching slash commands"));
+}
+
+#[test]
+fn trust_panel_offers_the_broader_ancestor_between_its_rows() {
+    use e::tui::trustpanel::{render, TrustStage};
+    let theme = e::tui::theme::resolve("dark", false);
+    let mut stage = TrustStage {
+        selected: 0,
+        parent: Some(std::path::PathBuf::from("/home/u/code")),
+    };
+    let rows = render(&stage, &theme, 100, "/home/u/code/clones/e-1");
+    // Three choices: this directory, the ancestor, decline — descriptions
+    // three spaces past the longest label, not flung across the frame.
+    assert!(
+        rows[4].contains("Trust this directory   remembered"),
+        "{:?}",
+        rows[4]
+    );
+    assert!(rows[5].contains("Trust /home/u/code"), "{:?}", rows[5]);
+    assert!(rows[5].contains("everything inside it"), "{:?}", rows[5]);
+    assert!(rows[6].contains("Not now"), "{:?}", rows[6]);
+    // Selection cycles through all three and wraps.
+    stage.step(-1);
+    assert_eq!(stage.selected, 2);
+    assert_eq!(stage.choice(), (None, false), "the last row declines");
+    stage.step(-1);
+    assert_eq!(
+        stage.choice(),
+        (Some(std::path::PathBuf::from("/home/u/code")), true),
+        "the middle row trusts the ancestor"
+    );
+    // Without a parent the panel keeps its two rows.
+    let bare = TrustStage {
+        selected: 0,
+        parent: None,
+    };
+    assert_eq!(bare.row_count(), 2);
+    assert_eq!(render(&bare, &theme, 100, "/w").len(), rows.len() - 1);
+}
+
+#[test]
+fn footnotes_number_by_first_use_and_flush_dim_definitions() {
+    let theme = e::tui::theme::resolve("dark", false);
+    let md = "First[^b] then[^a].\n\n[^a]: alpha note\n[^b]: beta note";
+    let out = render_markdown(&theme, md, 80);
+    let joined = out.join("\n");
+    // References number by first use, dim.
+    assert!(joined.contains(&theme.fg("dim", "[1]")), "{joined:?}");
+    // Definitions flush at the end in number order, marker dim, body plain.
+    assert!(out.iter().any(|r| r.contains("beta note")), "{out:?}");
+    let beta = out.iter().position(|r| r.contains("beta note")).unwrap();
+    let alpha = out.iter().position(|r| r.contains("alpha note")).unwrap();
+    assert!(beta < alpha, "first-used note leads: {out:?}");
+    assert!(
+        out[beta].starts_with(&theme.fg("dim", "[1] ")),
+        "{:?}",
+        out[beta]
+    );
+    // A definition nobody references never prints.
+    let unused = render_markdown(&theme, "plain text\n\n[^x]: hidden", 80).join("\n");
+    assert!(!unused.contains("hidden"), "{unused:?}");
+}
+
+#[test]
+fn footnote_lists_and_code_stay_in_the_definition_body() {
+    let theme = e::tui::theme::resolve("dark", false);
+    let md = "Body[^n].\n\n[^n]: intro\n\n    - nested item\n\n    ```text\n    code line\n    ```";
+    let out = render_markdown(&theme, md, 80);
+    let note = out.iter().position(|row| row.contains("intro")).unwrap();
+    let item = out
+        .iter()
+        .position(|row| row.contains("nested item"))
+        .unwrap();
+    let code = out
+        .iter()
+        .position(|row| row.contains("code line"))
+        .unwrap();
+
+    assert!(note < item && item < code, "{out:?}");
+    assert!(
+        out[item].starts_with("    "),
+        "list escaped footnote: {out:?}"
+    );
+    assert!(
+        out[code].starts_with("    "),
+        "code escaped footnote: {out:?}"
+    );
+}
+
+#[test]
+fn footnote_blockquotes_and_rules_stay_in_the_definition_body() {
+    let theme = e::tui::theme::resolve("dark", false);
+    let md = "Body[^n]. After.\n\n[^n]: intro\n\n    > quoted note\n\n    ---";
+    let out = render_markdown(&theme, md, 80);
+    let flow = out.iter().position(|r| r.contains("After.")).unwrap();
+    let note = out.iter().position(|r| r.contains("intro")).unwrap();
+    let quote = out.iter().position(|r| r.contains("quoted note")).unwrap();
+    // The definition's own blocks render under the definition, never in
+    // the message flow between the body and the footer.
+    assert!(note > flow && quote > note, "{out:?}");
+    assert!(out[quote].contains('│'), "the rail rode along: {out:?}");
+}
+
+#[test]
+fn file_rows_segment_paths_the_reference_way() {
+    use e::tui::menu::project_path;
+    let plain = |width: usize, label: &str| -> String {
+        project_path(label, width).iter().map(|(c, _)| c).collect()
+    };
+    // A path that fits shows whole.
+    assert_eq!(
+        plain(40, "src/tui/surfaces/menu.rs"),
+        "src/tui/surfaces/menu.rs"
+    );
+    // Too long: the dirname middle-ellipsizes into its narrow budget
+    // (w/3 clamped to 3–12), the basename keeps its prefix-biased tail.
+    assert_eq!(plain(20, "src/tui/surfaces/menu.rs"), "src…es/menu.rs");
+    // Directories carry their trailing slash through every projection.
+    assert_eq!(plain(10, "src/core/providers/"), "s…e/pro…s/");
+    assert_eq!(plain(40, "src/"), "src/");
+    // Below the segmentation floor: basename alone, prefix-biased.
+    assert_eq!(plain(7, "deep/dir/some-name.rs"), "some-…s");
+}
+
+#[test]
+fn picker_tabs_follow_the_reference_grammar() {
+    use e::tui::menu::{degrade_hint, Menu, MenuItem, MenuKind, HINT_MODELS, HINT_SKILLS};
+    let theme = e::tui::theme::resolve("dark", false);
+    let mut items = vec![
+        MenuItem::new("alpha", "Global", "alpha"),
+        MenuItem::new("beta", "Workspace", "beta"),
+    ];
+    items[0].tab = Some(1);
+    items[1].tab = Some(2);
+    let mut menu = Menu::new(MenuKind::Skills, "Skills", HINT_SKILLS, items).with_tabs(
+        vec!["All".into(), "Global".into(), "Workspace".into()],
+        Some(0),
+        0,
+        "Source",
+    );
+    // The header brightens its `{title} {count}`, lays the tabs two spaces
+    // apart, and brackets only the active one; inactive tabs stay dim.
+    let rows = menu.render(&theme, 80);
+    assert!(rows[1].contains("Skills 2"), "{:?}", rows[1]);
+    assert!(rows[1].contains("[All]"), "{:?}", rows[1]);
+    assert!(rows[1].contains("\x1b[1m"), "{:?}", rows[1]);
+    assert!(
+        rows[1].contains(&theme.fg("dim", "Global")),
+        "{:?}",
+        rows[1]
+    );
+    assert_eq!(rows.len(), 2 + 4, "both skills under the All tab");
+
+    // Tab narrows to one source at a time; counts and rows follow.
+    menu.cycle_tab();
+    let global = menu.render(&theme, 80);
+    assert!(global[1].contains("[Global]"), "{:?}", global[1]);
+    assert!(global[1].contains("Skills 1"), "{:?}", global[1]);
+    assert_eq!(global.len(), 1 + 4);
+    menu.cycle_tab();
+    let workspace = menu.render(&theme, 80);
+    assert!(workspace[3].contains("beta"), "{:?}", workspace[3]);
+
+    // An empty narrower tab names the source it searched.
+    menu.set_query("alpha");
+    let empty = menu.render(&theme, 80);
+    assert!(
+        empty[3].contains("No Workspace skills found."),
+        "{:?}",
+        empty[3]
+    );
+
+    // The model picker degrades by windowing its tabs around the active
+    // one, marking a clipped end with a dim ellipsis.
+    let mut models = vec![
+        MenuItem::new("a-model", "", "a"),
+        MenuItem::new("b-model", "", "b"),
+    ];
+    models[0].tab = Some(1);
+    models[1].tab = Some(2);
+    let models = Menu::new(MenuKind::Models, "Models", HINT_MODELS, models).with_tabs(
+        vec!["All".into(), "Anthropic".into(), "OpenAI".into()],
+        Some(0),
+        0,
+        "",
+    );
+    let narrow = models.render(&theme, 20);
+    assert!(narrow[1].contains("[All]"), "{:?}", narrow[1]);
+    assert!(narrow[1].contains('…'), "{:?}", narrow[1]);
+    assert!(!narrow[1].contains("Anthropic"), "{:?}", narrow[1]);
+
+    // The hints degrade stepwise through the reference's ladders.
+    assert_eq!(
+        degrade_hint(HINT_SKILLS, 45),
+        "↑↓ Navigate  Tab Source  Enter Use  Esc Close"
+    );
+    assert_eq!(degrade_hint(HINT_MODELS, 12), "Enter Esc");
+}
+
+#[test]
+fn question_panel_frames_options_with_brightness_selection() {
+    use e::tui::questionpanel::Question;
+    let theme = e::tui::theme::resolve("dark", false);
+    let mut q = Question::new(
+        7,
+        "Pick a color".into(),
+        vec![
+            ("blue".into(), "the calm one".into()),
+            ("red".into(), String::new()),
+        ],
+        true,
+    );
+    let rows = q.render(&theme, 80);
+    // Framed like every footer surface: divider, question, blank, options,
+    // freeform slot, divider.
+    assert_eq!(rows.len(), 4 + 3);
+    assert!(rows[1].contains("Pick a color") && rows[1].contains("\x1b[1m"));
+    assert!(rows[3].contains("1) blue") && rows[3].contains("the calm one"));
+    assert!(rows[4].contains("2) red"));
+    assert!(rows[5].contains("3) Type an answer…"));
+    // Selection is brightness alone — no caret anywhere.
+    assert!(!rows.iter().any(|r| r.contains('›')));
+    assert_eq!(q.answer().as_deref(), Some("blue"));
+
+    // The freeform slot answers with the typed text, or refuses empty.
+    q.selected = 2;
+    assert!(q.freeform_selected());
+    assert_eq!(q.answer(), None);
+    q.freeform = "teal".into();
+    assert_eq!(q.answer().as_deref(), Some("teal"));
+    assert!(q.hint(80).starts_with("Type answer"));
+
+    // Hints degrade stepwise with the frame, like every picker's.
+    assert_eq!(
+        q.hint(12),
+        "Enter Answer  Esc Cancel",
+        "nothing longer fits at twelve cells"
+    );
+    q.selected = 0;
+    assert_eq!(
+        q.hint(80),
+        "1–2 Choose now    ↑↓ Options    Enter Answer    Esc Cancel"
+    );
+    assert_eq!(q.hint(40), "↑↓ Options    Enter Answer    Esc Cancel");
+
+    // The description column clears the widest label in display cells, so
+    // the wide-glyph row keeps the same three-cell gap as the narrow one.
+    let wide = Question::new(
+        8,
+        "pick".into(),
+        vec![
+            ("日本語".into(), "desc-a".into()),
+            ("ab".into(), "desc-b".into()),
+        ],
+        false,
+    );
+    let rows = wide.render(&theme, 80);
+    let col = |row: &str| {
+        let at = row.find("desc-").unwrap();
+        e::tui::markdown::visible_width(&row[..at])
+    };
+    let a = rows.iter().find(|r| r.contains("desc-a")).unwrap();
+    let b = rows.iter().find(|r| r.contains("desc-b")).unwrap();
+    // "  1) 日本語" is 2+3+6 = 11 cells; the description starts 3 past it.
+    assert_eq!(col(a), 14, "wide label clears the gap: {rows:?}");
+    assert_eq!(col(b), 14, "one shared column: {rows:?}");
+}
+
+#[test]
+fn review_projection_shows_every_child_with_its_detail_link() {
+    use e::tui::transcript::{Block, ToolChild};
+    let theme = e::tui::theme::resolve("dark", false);
+    let mut group = Block::tool_group(vec![
+        ToolChild::pending(
+            1,
+            "read".into(),
+            "Reading".into(),
+            "Read".into(),
+            "a.rs".into(),
+        ),
+        ToolChild::pending(
+            2,
+            "read".into(),
+            "Reading".into(),
+            "Read".into(),
+            "b.rs".into(),
+        ),
+    ]);
+    group.start_tool(1);
+    group.finish_tool(1, e::core::tools::ToolOutcome::Completed, "done".into(), "");
+    group.tool_children[0].detail = Some(41);
+    group.start_tool(2);
+
+    // The review screen has no overlay: the focused running call keeps a
+    // row here, the last child wears └, and finished rows carry their
+    // stored-detail id for the splice.
+    let rows = group.review_lines(&theme, 80);
+    assert_eq!(rows.len(), 3);
+    assert!(rows[1].0.contains("Read a.rs"));
+    assert_eq!(rows[1].1, Some(41));
+    assert!(rows[2].0.contains("Reading b.rs"), "{:?}", rows[2].0);
+    assert!(rows[2].0.contains('└'));
+    assert_eq!(rows[2].1, None);
+}
+
+#[test]
+fn sealed_groups_report_missing_results_instead_of_hiding_them() {
+    use e::tui::transcript::{Block, ToolChild};
+    let theme = e::tui::theme::resolve("dark", false);
+    let mut group = Block::tool_group(vec![
+        ToolChild::pending(
+            1,
+            "read".into(),
+            "Reading".into(),
+            "Read".into(),
+            "a.rs".into(),
+        ),
+        ToolChild::pending(
+            2,
+            "read".into(),
+            "Reading".into(),
+            "Read".into(),
+            "b.rs".into(),
+        ),
+    ]);
+    group.start_tool(1);
+    group.finish_tool(1, e::core::tools::ToolOutcome::Completed, "done".into(), "");
+    // Live: the second call is pending — no row, no unreported tally.
+    let live = group.lines_for_test(&theme, 80);
+    assert_eq!(live.len(), 2);
+    assert!(!group.text.contains("unreported"));
+
+    // Sealed (a restored session): the recorded call whose result never
+    // came gets an explicit row and an `unreported` tally — a header that
+    // says "2 tool calls" sits above two rows, not one.
+    group.seal();
+    assert!(group.text.contains("· 1 unreported"), "{}", group.text);
+    let sealed = group.lines_for_test(&theme, 80);
+    assert_eq!(sealed.len(), 3);
+    assert!(sealed[2].contains("Tool completion was not reported"));
 }
 
 #[test]
@@ -550,11 +1104,19 @@ fn sleep_events_speak_in_the_system_grammar() {
         ),
     );
     let rows = resumed.lines_for_test(&theme, 80);
+    // The reference notice grammar: bold accent label, notice-gray body.
     assert_eq!(
         rows[0],
-        theme.fg(
-            "dim",
-            "● System: the device was asleep for 3m 10s — continuing"
+        format!(
+            "\x1b[1m{}\x1b[22m {}",
+            theme.fg("customMessageLabel", "● System:"),
+            theme.fg(
+                "customMessageText",
+                &format!(
+                    "the device was asleep for {} — continuing",
+                    format_elapsed(190)
+                )
+            )
         )
     );
 
@@ -570,9 +1132,16 @@ fn sleep_events_speak_in_the_system_grammar() {
     let rows = stopped.lines_for_test(&theme, 80);
     assert_eq!(
         rows[0],
-        theme.fg(
-            "dim",
-            "● System: run stopped — the device was asleep for 22m 00s"
+        format!(
+            "\x1b[1m{}\x1b[22m {}",
+            theme.fg("customMessageLabel", "● System:"),
+            theme.fg(
+                "customMessageText",
+                &format!(
+                    "run stopped — the device was asleep for {}",
+                    format_elapsed(22 * 60)
+                )
+            )
         )
     );
 }

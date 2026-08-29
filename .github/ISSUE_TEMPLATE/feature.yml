@@ -6,7 +6,7 @@ body:
     id: problem
     attributes:
       label: What problem does this solve?
-      description: Describe the need, not the implementation. Check ROADMAP.md first.
+      description: Describe the need, not the implementation.
     validations:
       required: true
   - type: textarea

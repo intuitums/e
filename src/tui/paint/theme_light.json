@@ -9,6 +9,7 @@
 		"comment": 243,
 		"code": 241,
 		"selected": 251,
+		"selectedInk": 237,
 		"shell": 28
 	},
 	"colors": {
@@ -24,6 +25,7 @@
 		"text": "",
 		"thinkingText": "statusline",
 		"selectedBg": "selected",
+		"selectedText": "selectedInk",
 		"scrollbarThumb": "divider",
 		"searchMatchBg": "selected",
 		"searchMatchText": "",
@@ -49,6 +51,10 @@
 		"mdListBullet": "dim",
 		"toolDiffAdded": "accent",
 		"toolDiffRemoved": "accent",
+		"toolDiffAddedMarker": "#30A46C",
+		"toolDiffAddedMarkerFallback": 71,
+		"toolDiffRemovedMarker": "#E5484D",
+		"toolDiffRemovedMarkerFallback": 167,
 		"toolDiffContext": "statusline",
 		"syntaxComment": "comment",
 		"syntaxKeyword": "accent",

@@ -19,17 +19,17 @@ pub fn schema() -> Value {
 }
 
 pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
-    let err = |m: String| ToolOutput {
+    let err = |m: String, target: &str| ToolOutput {
+        summary: super::failure_summary(&m, "edit", target),
         content: m,
         outcome: ToolOutcome::Failed,
-        summary: "error".into(),
         display: None,
     };
     let Some(path) = args["path"].as_str() else {
-        return err("edit: missing path".into());
+        return err("edit: missing path".into(), "");
     };
     let (Some(old), Some(new)) = (args["old_string"].as_str(), args["new_string"].as_str()) else {
-        return err("edit: missing old_string or new_string".into());
+        return err("edit: missing old_string or new_string".into(), "");
     };
     let full = resolve(cwd, path);
     if let Err(output) = super::require_regular_file(&full, "edit", path) {
@@ -43,16 +43,17 @@ pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
     }
     let text = match std::fs::read_to_string(&full) {
         Ok(t) => t,
-        Err(e) => return err(format!("edit {path}: {e}")),
+        Err(e) => return err(format!("edit {path}: {e}"), path),
     };
     let occurrences = text.matches(old).count();
     if occurrences == 0 {
-        return err(format!("edit {path}: old_string not found"));
+        return err(format!("edit {path}: old_string not found"), path);
     }
     if occurrences > 1 {
-        return err(format!(
-            "edit {path}: old_string occurs {occurrences} times; make it unique"
-        ));
+        return err(
+            format!("edit {path}: old_string occurs {occurrences} times; make it unique"),
+            path,
+        );
     }
     let updated = text.replacen(old, new, 1);
     match std::fs::write(&full, &updated) {
@@ -63,17 +64,14 @@ pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
             let deletions = old.lines().count();
             // The model authored old_string and new_string one message ago —
             // echoing them back would pay for the diff a second time on
-            // every later request. The diff goes to the detail viewer.
+            // every later request. The diff goes to the detail viewer: real
+            // file line numbers, context, and elision, computed against the
+            // whole file so the numbers are the ones an editor would show.
             let mut detail = format!("edited {path}");
-            if !old.is_empty() || !new.is_empty() {
-                detail.push_str("\n--- before\n");
-                for line in old.lines() {
-                    detail.push_str(&format!("-{line}\n"));
-                }
-                detail.push_str("+++ after\n");
-                for line in new.lines() {
-                    detail.push_str(&format!("+{line}\n"));
-                }
+            let diff = super::diffview::render(&text, &updated);
+            if !diff.is_empty() {
+                detail.push('\n');
+                detail.push_str(&diff);
             }
             ToolOutput {
                 content: format!("edited {path}"),
@@ -86,6 +84,6 @@ pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
                 display: Some(super::truncate(detail.trim_end().to_string())),
             }
         }
-        Err(e) => err(format!("edit {path}: {e}")),
+        Err(e) => err(format!("edit {path}: {e}"), path),
     }
 }

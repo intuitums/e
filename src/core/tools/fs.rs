@@ -14,11 +14,11 @@ fn ok(content: String, summary: String) -> ToolOutput {
         display: None,
     }
 }
-fn err(message: String) -> ToolOutput {
+fn err(message: String, tool: &str, target: &str) -> ToolOutput {
     ToolOutput {
+        summary: super::failure_summary(&message, tool, target),
         content: message,
         outcome: ToolOutcome::Failed,
-        summary: "error".into(),
         display: None,
     }
 }
@@ -38,7 +38,7 @@ pub fn read_schema() -> Value {
 
 pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
     let Some(path) = args["path"].as_str() else {
-        return err("read: missing path".into());
+        return err("read: missing path".into(), "read", "");
     };
     let full = resolve(cwd, path);
     // Reads and mutations share the same stable path lock. Record the stamp
@@ -52,7 +52,7 @@ pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
         let before = super::file_stamp(&full);
         let text = match read_window(&full, args["offset"].as_u64(), args["limit"].as_u64()) {
             Ok(t) => t,
-            Err(e) => return err(format!("read {path}: {e}")),
+            Err(e) => return err(format!("read {path}: {e}"), "read", path),
         };
         let after = super::file_stamp(&full);
         if before.is_some() && before == after {
@@ -61,9 +61,11 @@ pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
         }
     }
     let Some((text, stamp)) = stable else {
-        return err(format!(
-            "read {path}: the file changed while it was being read"
-        ));
+        return err(
+            format!("read {path}: the file changed while it was being read"),
+            "read",
+            path,
+        );
     };
     super::note_seen_stamp(&full, stamp);
     let count = text.lines().count();
@@ -186,10 +188,10 @@ pub fn write_schema() -> Value {
 
 pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
     let Some(path) = args["path"].as_str() else {
-        return err("write: missing path".into());
+        return err("write: missing path".into(), "write", "");
     };
     let Some(content) = args["content"].as_str() else {
-        return err("write: content must be a string".into());
+        return err("write: content must be a string".into(), "write", "");
     };
     let full = resolve(cwd, path);
     if let Err(output) = super::require_regular_file(&full, "write", path) {
@@ -204,11 +206,20 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
     let before_lines = match count_text_lines(&full) {
         Ok(lines) => lines,
         Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
-        Err(error) => return err(format!("write {path}: {error}")),
+        Err(error) => return err(format!("write {path}: {error}"), "write", path),
+    };
+    // Capture the previous content while it still exists, so the detail
+    // viewer can show a real diff. Bounded: a huge or non-UTF-8 previous
+    // file degrades to the summary-only detail, never an error.
+    const DIFF_SOURCE_CAP: u64 = 2 * 1024 * 1024;
+    let before_text = match std::fs::metadata(&full) {
+        Ok(meta) if meta.len() <= DIFF_SOURCE_CAP => std::fs::read_to_string(&full).ok(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(String::new()),
+        _ => None,
     };
     if let Some(parent) = full.parent() {
         if let Err(error) = std::fs::create_dir_all(parent) {
-            return err(format!("write {path}: {error}"));
+            return err(format!("write {path}: {error}"), "write", path);
         }
     }
     match std::fs::write(&full, content) {
@@ -219,19 +230,25 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
             // The model wrote this content one message ago — echoing it back
             // would bill the whole file into the context a second time (and
             // again on every later request). The full diff goes to the
-            // detail viewer instead.
-            let detail = format!(
-                "wrote {path}\n[replaced {before_lines} line(s) with {} line(s)]",
-                content.lines().count()
-            );
+            // detail viewer instead: line numbers, context, elision.
+            let detail = match before_text
+                .as_deref()
+                .map(|before| super::diffview::render(before, content))
+            {
+                Some(diff) if !diff.is_empty() => format!("wrote {path}\n{diff}"),
+                _ => format!(
+                    "wrote {path}\n[replaced {before_lines} line(s) with {} line(s)]",
+                    content.lines().count()
+                ),
+            };
             ToolOutput {
                 content: format!("wrote {path} ({} lines)", content.lines().count()),
                 outcome: ToolOutcome::Completed,
                 summary: format!("+{additions} -{deletions}"),
-                display: Some(detail),
+                display: Some(super::truncate(detail)),
             }
         }
-        Err(e) => err(format!("write {path}: {e}")),
+        Err(e) => err(format!("write {path}: {e}"), "write", path),
     }
 }
 
@@ -315,18 +332,18 @@ pub fn grep_schema() -> Value {
 
 pub fn grep(args: &Value, cwd: &Path) -> ToolOutput {
     let Some(pattern) = args["pattern"].as_str() else {
-        return err("grep: missing pattern".into());
+        return err("grep: missing pattern".into(), "grep", "");
     };
     let re = match regex::Regex::new(pattern) {
         Ok(r) => r,
-        Err(e) => return err(format!("grep: bad pattern: {e}")),
+        Err(e) => return err(format!("grep: bad pattern: {e}"), "grep", ""),
     };
     // A glob with no slash matches the bare file name anywhere in the tree;
     // one with a slash addresses the workspace-relative path itself.
     let glob = match args["glob"].as_str() {
         Some(g) => match glob_regex(g) {
             Ok(r) => Some((r, !g.contains('/'))),
-            Err(e) => return err(format!("grep: bad glob: {e}")),
+            Err(e) => return err(format!("grep: bad glob: {e}"), "grep", ""),
         },
         None => None,
     };

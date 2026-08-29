@@ -1,8 +1,15 @@
-# Review guide
+---
+name: review
+description: The e repo's review guide — situational checks for behavioral, protocol, security-boundary, performance, and release changes when reviewing or finishing work here.
+---
+
+# Reviewing e
 
 Every review checks correctness, a focused diff, updated tests/docs, and the
 repository contract in `./x check`. Apply the relevant situational checks
-below; ordinary changes do not need to discuss every section.
+below; ordinary changes do not need to discuss every section. The `/review`
+prompt covers review mechanics — choosing a base ref, forge state, report
+shape — this skill carries the checks specific to this repository.
 
 ## Behavioral changes
 

@@ -1,9 +1,55 @@
 use std::io::Write as _;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 mod common;
 
 use common::{env_lock, request_json, serve_sse, Home};
+
+/// Collect a child process without letting a hanging CLI regression stall the suite.
+fn output_with_timeout(mut child: std::process::Child) -> Output {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "CLI did not terminate; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Configure one isolated home with a single mock model endpoint.
+fn mock_home(name: &str, port: u16) -> Home {
+    let home = Home::new(name);
+    home.write(
+        "models.json",
+        format!(
+            r#"{{"providers":{{"mock":{{"base_url":"http://127.0.0.1:{port}","api":"completions","models":["test"]}}}}}}"#
+        ),
+    );
+    home.write("auth.json", r#"{"format_version":1,"mock":{"key":"k"}}"#);
+    home
+}
+
+/// Provider turns that ask once, then recover after the question is cancelled.
+fn question_turns() -> [&'static str; 2] {
+    [
+        concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"ask-1\",",
+            "\"function\":{\"name\":\"ask\",\"arguments\":\"{\\\"question\\\":\\\"Need input\\\"}\"}}]},",
+            "\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ),
+        "data: {\"choices\":[{\"delta\":{\"content\":\"continued\"}}]}\n\ndata: [DONE]\n\n",
+    ]
+}
 
 #[test]
 fn ask_json_keeps_validation_errors_on_stdout_as_json() {
@@ -28,6 +74,80 @@ fn ask_json_keeps_validation_errors_on_stdout_as_json() {
         .unwrap()
         .starts_with("--model requires a value"));
     assert!(value["error"].as_str().unwrap().contains("usage: e ask"));
+}
+
+#[test]
+fn noninteractive_modes_cancel_questions_and_terminate() {
+    let _lock = env_lock();
+
+    let turns = question_turns();
+    let (port, server) = serve_sse(&turns);
+    let home = mock_home("headless-question", port);
+    let child = Command::new(env!("CARGO_BIN_EXE_e"))
+        .args(["--no-extensions", "--no-save", "ask", "run"])
+        .env("E_HOME", &home.dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = output_with_timeout(child);
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "continued");
+    assert!(String::from_utf8_lossy(&output.stderr).contains(
+        "ask tool question cancelled: headless mode does not support interactive answers"
+    ));
+    assert!(server.join().unwrap()[1].contains("dismissed the question"));
+
+    let turns = question_turns();
+    let (port, server) = serve_sse(&turns);
+    let home = mock_home("json-question", port);
+    let child = Command::new(env!("CARGO_BIN_EXE_e"))
+        .args(["--no-extensions", "--no-save", "--json", "ask", "run"])
+        .env("E_HOME", &home.dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = output_with_timeout(child);
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["final_output"], "continued");
+    assert_eq!(body["tools"]["failures"], 1);
+    assert!(body["warnings"].as_array().unwrap().iter().any(|warning| {
+        warning == "ask tool question cancelled: headless mode does not support interactive answers"
+    }));
+    assert!(server.join().unwrap()[1].contains("dismissed the question"));
+
+    let turns = question_turns();
+    let (port, server) = serve_sse(&turns);
+    let home = mock_home("rpc-question", port);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
+        .args(["--no-extensions", "rpc"])
+        .env("E_HOME", &home.dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"{\"id\":7,\"prompt\":\"run\"}\n")
+        .unwrap();
+    drop(child.stdin.take());
+    let output = output_with_timeout(child);
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["id"], 7);
+    assert_eq!(body["final_output"], "continued");
+    assert_eq!(body["tools"]["failures"], 1);
+    assert!(body["warnings"].as_array().unwrap().iter().any(|warning| {
+        warning == "ask tool question cancelled: RPC does not support interactive answers"
+    }));
+    assert!(server.join().unwrap()[1].contains("dismissed the question"));
 }
 
 #[test]

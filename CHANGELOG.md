@@ -8,14 +8,143 @@ release notes are that section verbatim), open a fresh empty
 
 ## Unreleased
 
+- A preference pass — five deliberate departures from the reference where
+  its choices didn't earn their keep here:
+  - The statusline slims back to just the model (accent-bright) and the
+    context percent, muted — the extra segments (sign-in nudge, queue
+    counts, effort, session title, `Context: 12k/200k`, workspace tail and
+    git branch) are gone.
+  - The activity row's text wears one tone — verb, elapsed, and token
+    tail all dim, no second color for the counts — beside the accent
+    dot's unchanged presence-blink.
+  - The `• Thinking (Ns) (↑… ↓…)` row persists through the whole turn —
+    tool trees and streaming reply text included — instead of vanishing
+    whenever the phase changed.
+  - The running tool row's tree connector holds steady in the accent; the
+    activity dot below is the one blinker (a flickering `└` read as a
+    glitch).
+  - The trust panel's descriptions sit right beside their choices (three
+    spaces past the longest label) instead of a value column two-thirds
+    across the frame.
+
+- The trust panel gains a middle choice: trust the broader ancestor — the
+  top-most directory under home containing the workspace (`Trust ~/code`
+  for `~/code/clones/e-1`; the immediate parent outside home). Trust now
+  propagates downward: a trusted ancestor covers every workspace inside
+  it, so sibling clones and worktrees skip their first-visit question. A
+  workspace's own recorded answer still wins over an ancestor's, and a
+  *declined* ancestor answers only for itself — its other children keep
+  their own question.
+
+- An exactness batch closing the remaining gaps against the reference
+  design, each behavior verified in its source before porting:
+  - Picker tabs: the skills picker gains Source tabs (All · Global ·
+    Workspace, from e's own two skill roots), the model picker Provider
+    tabs (All plus each provider with models, degrading to a window around
+    the active tab with dim `…` markers), and /resume Scope tabs (Current
+    workspace · All workspaces, opening on the current one). Tab cycles;
+    headers brighten `{title} {count}` with the active tab `[bracketed]`,
+    degrade per the reference's ladders, and the hints name the dimension
+    (`Tab Source` / `Tab Provider` / `Tab Scope`).
+  - Selection corrected to the reference's real split: the catalog menus
+    (models, skills, sessions, /tree) signal by brightness alone; only the
+    inline completion pickers (slash commands, files) fill the row.
+  - Skills rows go single-line — name plus a right scope column, no
+    description — and sessions rows carry the `workspace · age · N turns`
+    cluster in shared fixed columns (age right-aligned, compact `now/5m/2h/1d`
+    grammar, turns = user messages), the title middle-ellipsized into its
+    column and metadata hiding below a twelve-cell title floor.
+  - /resume lists every workspace's sessions (scoped by the tabs), and
+    session logs expose their recorded workspace for the cluster.
+  - A queued-prompt banner above the composer while a turn runs with
+    messages waiting (`N steering messages · ↑ to edit`, ink-bright), and
+    the queue review behind it: ↑ on an empty composer pauses the queue
+    and loads the newest prompt for editing, ↑/↓ step entries, Enter
+    commits edits back (an emptied draft sends unchanged), Backspace on an
+    emptied draft deletes the entry, and a fresh prompt or turn end
+    resumes. With the banner above it the composer trades its leading
+    blank for its top divider — the reference's chrome rule.
+  - Composer shift-arrow selection: shift with any motion extends a
+    reverse-video range, plain arrows collapse to its edge, typing or
+    Backspace replaces it.
+  - File picker rows segment long paths the reference way — dirname
+    middle-ellipsized into a narrow fixed budget, basename prefix-biased —
+    directories list too, with a trailing slash.
+  - Markdown footnotes: `[^label]` renders a dim `[N]` numbered by first
+    use; definitions collect out of the flow and close the message with
+    dim `[N] ` markers and a hanging indent; unreferenced definitions
+    never print.
+
+- A functionality pass inheriting the reference design's behavior — all of
+  it except the sandbox/permission layer, which e deliberately does not
+  have (tools keep running without prompts; see the safety model):
+  - The `ask` tool: the model can ask one question and wait. A footer
+    question panel offers numbered options (digits answer in one stroke),
+    ↑↓ selection, a freeform typed slot, and Esc to dismiss — a dismissal
+    reads back to the model as a cancelled call, and Esc on the panel does
+    not abort the turn. Available in read-only mode too.
+  - Real diffs in the detail viewer: edits and writes render line numbers
+    against the file as it exists now, three context lines, `⋯` elision
+    between hunks, and the diff-marker green/red on the number-and-sign
+    column — the changed text itself stays neutral. Behind ctrl+o.
+  - Faithful resume: consecutive silent tool batches replay as the one
+    growing tree they were live; restored groups seal, so a recorded call
+    whose result never came renders an explicit "Tool completion was not
+    reported" row and an `unreported` tally instead of silently vanishing
+    under a header that counts it; recorded tool results come back to the
+    ctrl+o viewer; and a live batch after a resume starts its own tree
+    instead of splicing into a restored one.
+  - The composer caps at half the frame plus one row: a longer draft
+    scrolls behind a cursor-following window whose first row wears `┃↑`.
+    Pastes collapse to a placeholder only past a thousand codepoints, the
+    reference threshold — short multiline pastes insert literally.
+  - Filtered picker rows brighten the chars the query matched, so a fuzzy
+    hit shows why it matched. `/help` opens the commands picker itself
+    (browse, filter, Enter to use) instead of printing a wall of text.
+  - Link URLs are validated before entering an OSC 8 sequence — control
+    bytes or an oversized URL render as plain text instead of corrupting
+    the terminal's escape stream.
+
+- A full visual-parity pass against the current reference design. The
+  look moves to the reference's own literals across every surface:
+  - Code fences drop the box frame for the reference's dim horizontal rules
+    (`─ lang ────`) with flush-left code, a content-inferred label for
+    unlabeled fences, and bare wrapped code below six columns.
+  - The highlighter carries the reference's full language table (25
+    profiles with aliases, block comments, per-language quote sets,
+    case-insensitive SQL/Dockerfile/PowerShell), a distinct literal class in
+    the number gray, and renders unknown languages raw instead of guessing.
+  - Lists keep the author's ordered numbering, dim their markers, and speak
+    task lists (dim `☐`, accent `✓`); blockquotes nest one rail per level;
+    headings no longer lose their style to nested bold or links; tables
+    honor `:---:` alignment with plain separators; bare http(s) URLs
+    autolink; images render as `▧ alt` links.
+  - Wrapping closes and reopens SGR and OSC 8 hyperlinks at every seam,
+    avoids single-word orphan lines, and preserves the author's line breaks
+    instead of reflowing paragraphs.
+  - Tool trees: tallies order by descending count with the reference's
+    outcome grammar (`timed out · failed · denied · cancelled`), a non-zero
+    exit stays on its `Ran` row, the tree never caps its rows, edit/write
+    rows carry the `+N / -M` stat suffix with the diff-marker green/red
+    (truecolor with a 256-color fallback), and command previews wear the dim
+    gutter with width-degrading, pluralized elision wording.
+  - Errors and system rows speak the notice grammar (`● Error: …`,
+    `● System: …`); a cancelled tool row brightens its summary and asks
+    "What can e do differently?"; the welcome banner stays home on a fresh
+    session only (a resumed transcript no longer re-banners).
+  - The activity row's dot, verb, and elapsed wear the accent with the
+    compact `18m0s` elapsed grammar (the statusline later slims back to
+    the model and percent, and the token tail joins the accent — see the
+    preference pass below).
+  - Inline picker selection fills the row (selection background and ink;
+    the catalog menus brighten instead — see the exactness batch above),
+    headers are uniformly dim, empty states use the reference's wordings,
+    nav hints degrade stepwise with the frame, and the picker band shrinks
+    with its rows instead of blank-padding to six.
+
 - `/tree` now restores the selected prompt text in the composer after
   rewinding. Edit it or resend it to grow the new branch without recreating
   the original prompt.
-
-- The footer picker band (commands, files, skills, sessions, models) is a
-  fixed height: it always shows six selectable rows, padded blank below a
-  short match list, so typing a filter — `/set` narrowing to one command —
-  no longer shrinks and grows the box under the composer.
 
 - Write and edit tool rows stay lean while running: the tree says
   "Writing src/lib.rs" and nothing more, instead of streaming the file's
@@ -447,7 +576,7 @@ release notes are that section verbatim), open a fresh empty
 
 - Release notes now carry the version's changelog section and install
   instructions; `e docs models` documents env-var credentials and the
-  live catalog; ROADMAP records the 0.4 line.
+  live catalog.
 - Picker order: /models groups models by provider (registry order, live
   additions inline with their provider); /scoped-models lists the scoped
   entries first; ctrl+x on the scoped picker resets the scope entirely.

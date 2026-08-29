@@ -59,6 +59,8 @@ impl BackTarget {
     }
 }
 
+/// The narrow-frame floor for the description column, anchored to the
+/// longest choice label the panel shows.
 const DESCRIPTION_COL: usize = 34;
 
 pub(crate) fn choice_row(
@@ -68,16 +70,26 @@ pub(crate) fn choice_row(
     description: &str,
     width: usize,
 ) -> String {
-    let caret = if selected { "   › " } else { "     " };
+    // The reference caret sits at column one — `› label` selected, a plain
+    // two-space indent otherwise — and the selected row brightens its value
+    // column along with its label.
+    let caret = if selected { "› " } else { "  " };
     let head = format!("{caret}{label}");
-    let mut row = if selected {
+    let description_col = (width * 2 / 3).max(DESCRIPTION_COL).min(width);
+    let styled_head = if selected {
         bold(&theme.fg("userMessageText", &head))
     } else {
         theme.fg("dim", &head)
     };
-    if width > DESCRIPTION_COL {
-        let pad = DESCRIPTION_COL.saturating_sub(visible_width(&head));
-        row.push_str(&theme.fg("dim", &format!("{}{}", " ".repeat(pad), description)));
+    let mut row = styled_head;
+    if width > description_col {
+        let pad = description_col.saturating_sub(visible_width(&head));
+        let tail = format!("{}{}", " ".repeat(pad), description);
+        if selected {
+            row.push_str(&bold(&theme.fg("userMessageText", &tail)));
+        } else {
+            row.push_str(&theme.fg("dim", &tail));
+        }
     }
     row
 }

@@ -48,8 +48,9 @@ if out=$(grep -rnE '[~/"]\.(claude|codex|cursor|gemini|opencode|aws|ssh)\b' src/
 fi
 
 # 3. Home resolution happens in one place. HOME/E_HOME lookups outside these
-#    files are a second door into the filesystem.
-if out=$(grep -rn 'env::var("HOME")\|env::var("E_HOME")' src/ --include='*.rs' |
+#    files are a second door into the filesystem — `var_os` included, so the
+#    OsString form cannot slip past the pattern.
+if out=$(grep -rn 'env::var("HOME")\|env::var("E_HOME")\|env::var_os("HOME")\|env::var_os("E_HOME")' src/ --include='*.rs' |
     grep -v '^src/core/config/home.rs:' | grep -v '^src/tui/app/mod.rs:'); then
   bad "HOME/E_HOME read outside core/config/home.rs (or tui/app's title display):"
   say "$out"

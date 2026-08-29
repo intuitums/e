@@ -40,15 +40,50 @@ fn legacy_key(cwd: &Path) -> Option<&str> {
     cwd.as_os_str().to_str()
 }
 
-/// Some(true) trusted, Some(false) declined, None never asked.
+/// The recorded decision for exactly this directory, if any.
+fn decision(object: &serde_json::Map<String, serde_json::Value>, cwd: &Path) -> Option<bool> {
+    object
+        .get(&key(cwd))
+        .or_else(|| legacy_key(cwd).and_then(|legacy| object.get(legacy)))
+        .and_then(|v| v.get("trusted"))
+        .and_then(|v| v.as_bool())
+}
+
+/// Some(true) trusted, Some(false) declined, None never asked. A trusted
+/// ancestor extends to everything inside it — trusting `~/code` covers
+/// `~/code/clones/e-1` — while a *declined* ancestor answers only for
+/// itself, so its other children still get their own first-visit question.
+/// This directory's own recorded answer always wins over an ancestor's.
 pub fn status(cwd: &Path) -> Option<bool> {
     let cwd = canonical(cwd);
     let object = store::read_object(&file()).unwrap_or_default();
-    object
-        .get(&key(&cwd))
-        .or_else(|| legacy_key(&cwd).and_then(|legacy| object.get(legacy)))
-        .and_then(|v| v.get("trusted"))
-        .and_then(|v| v.as_bool())
+    if let Some(answer) = decision(&object, &cwd) {
+        return Some(answer);
+    }
+    cwd.ancestors()
+        .skip(1)
+        .any(|ancestor| decision(&object, ancestor) == Some(true))
+        .then_some(true)
+}
+
+/// The broader ancestor the trust panel offers as its middle choice: the
+/// top-most directory under $HOME that contains `cwd` (for
+/// `~/code/clones/e-1` that is `~/code`), or the immediate parent when the
+/// workspace lives outside home. None when nothing broader is sensible —
+/// the workspace sits directly under home, or its parent is the root.
+pub fn parent_option(cwd: &Path) -> Option<PathBuf> {
+    let cwd = canonical(cwd);
+    if let Some(home) = home::user_home() {
+        let home = canonical(&home);
+        if let Ok(relative) = cwd.strip_prefix(&home) {
+            let first = relative.components().next()?;
+            let top = home.join(first);
+            return (top != cwd).then_some(top);
+        }
+    }
+    cwd.parent()
+        .filter(|parent| parent.parent().is_some())
+        .map(Path::to_path_buf)
 }
 
 pub fn trusted(cwd: &Path) -> bool {

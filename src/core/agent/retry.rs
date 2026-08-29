@@ -1,7 +1,7 @@
 //! Retry policy for a mid-turn provider failure: how long to wait before
 //! trying again, and how many attempts one failure campaign gets before the
 //! turn gives up. The ladder shape (250ms, 1s, then doubling to a 30s
-//! ceiling) and the ten-attempt budget follow the reference client (fx).
+//! ceiling) and the ten-attempt budget follow the reference client.
 
 use std::time::Duration;
 

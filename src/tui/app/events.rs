@@ -145,6 +145,34 @@ impl App {
                     }
                 }
             }
+            SessionEvent::Question {
+                id,
+                question,
+                options,
+                allow_freeform,
+            } => {
+                // Model-authored text renders inert, like every block.
+                let sanitized = crate::tui::questionpanel::Question::new(
+                    id,
+                    crate::core::tools::sanitize_display(&question),
+                    options
+                        .into_iter()
+                        .map(|(label, description)| {
+                            (
+                                crate::core::tools::sanitize_display(&label),
+                                crate::core::tools::sanitize_display(&description),
+                            )
+                        })
+                        .collect(),
+                    allow_freeform,
+                );
+                if self.question.is_none() {
+                    self.question = Some(sanitized);
+                } else {
+                    // One panel at a time; batch-mates wait their turn.
+                    self.question_queue.push_back(sanitized);
+                }
+            }
             SessionEvent::Named(name) => {
                 self.agent.set_session_name(name.clone());
                 self.notice(format!("session: {name}"));
@@ -180,10 +208,23 @@ impl App {
                     };
                 }
                 if !content.trim().is_empty() {
-                    self.remember_output(
+                    let detail = self.remember_output(
                         title.unwrap_or_else(|| "tool output".into()),
                         crate::core::tools::sanitize_display(&content),
                     );
+                    // Link the stored detail to its row for the review
+                    // screen.
+                    if let Some(s) = &self.active {
+                        if let Some(&idx) = s.tool_blocks.get(&id) {
+                            if let Some(block) = self.transcript.blocks.get_mut(idx) {
+                                if let Some(child) =
+                                    block.tool_children.iter_mut().find(|child| child.id == id)
+                                {
+                                    child.detail = Some(detail);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             SessionEvent::Usage {
@@ -289,6 +330,13 @@ impl App {
                 ));
             }
             SessionEvent::TurnEnd { aborted } => {
+                // The turn's asks are settled either way — their tool tasks
+                // resolved or were cancelled with the turn — so a panel
+                // still showing is stale.
+                self.question = None;
+                self.question_queue.clear();
+                // The queue the review was editing died with the turn.
+                self.close_queue_review();
                 let stranded = self.agent.on_turn_end();
                 if aborted {
                     // Every started or serially pending member reaches a

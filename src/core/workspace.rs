@@ -42,6 +42,11 @@ fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
         }
         let path = entry.path();
         if path.is_dir() {
+            // Directories are pickable too — the reference's file index
+            // offers them, shown (and inserted) with a trailing slash.
+            if let Ok(relative) = path.strip_prefix(root) {
+                out.push(format!("{}/", relative.display()));
+            }
             walk(root, &path, depth + 1, out);
         } else if let Ok(relative) = path.strip_prefix(root) {
             out.push(relative.display().to_string());

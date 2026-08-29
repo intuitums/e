@@ -76,15 +76,24 @@ fn wrap_styled_hard_wraps_overlong_tokens() {
 
 /// Hard-wrapping an overlong link token never splits its OSC sequences —
 /// a mid-sequence cut counts the URL as visible columns and leaves the
-/// terminal parsing rows as OSC data.
+/// terminal parsing rows as OSC data. The reference reopens the link on
+/// every continuation row, so the opening sequence may appear whole many
+/// times — but any row that mentions the URL must carry it as a complete
+/// sequence.
 #[test]
 fn wrap_styled_never_splits_a_hyperlink_sequence() {
     let open = "\x1b]8;;https://example.com/very/long/path\x1b\\";
     let word = format!("{open}linktext\x1b]8;;\x1b\\");
     let rows = wrap_styled(&word, 4);
-    let intact = rows.iter().filter(|r| r.contains(open)).count();
-    assert_eq!(
-        intact, 1,
+    for row in &rows {
+        assert_eq!(
+            row.matches("https://").count(),
+            row.matches(open).count(),
+            "a row mentions the URL outside a complete sequence: {rows:?}"
+        );
+    }
+    assert!(
+        rows.iter().any(|r| r.contains(open)),
         "the opening sequence must survive whole: {rows:?}"
     );
     let total: usize = rows.iter().map(|r| visible_width(r)).sum();
@@ -105,7 +114,7 @@ fn composer_uses_display_width_and_one_cursor() {
     // Inner width is 8; eight CJK chars are 16 columns → at least two rows.
     let mut editor = Editor::new();
     editor.set_text("界界界界界界界界");
-    let rows = editor.render(&theme, 10);
+    let rows = editor.render(&theme, 10, 24);
     let content_rows = rows.len() - 1; // leading blank
     assert!(
         content_rows >= 2,
@@ -115,7 +124,7 @@ fn composer_uses_display_width_and_one_cursor() {
     // A cursor at a wrap boundary paints exactly one reverse-video cell.
     let mut editor = Editor::new();
     editor.set_text("abcdefghijklmnop");
-    let rows = editor.render(&theme, 10);
+    let rows = editor.render(&theme, 10, 24);
     let cursors: usize = rows.iter().map(|r| r.matches("\x1b[7m").count()).sum();
     assert_eq!(
         cursors, 1,
@@ -124,16 +133,27 @@ fn composer_uses_display_width_and_one_cursor() {
 }
 
 /// Submitting a draft retires its paste placeholders: a stale token typed
-/// later must not re-expand an old payload.
+/// later must not re-expand an old payload. Only a paste past a thousand
+/// codepoints collapses — the reference threshold — so a short multiline
+/// paste inserts literally.
 #[test]
 fn paste_placeholders_retire_on_submit() {
     use e::tui::composer::Editor;
     let mut editor = Editor::new();
     editor.insert_paste("line one\nline two\nline three");
+    assert!(
+        !editor.text().contains("[Pasted text"),
+        "a short paste must insert literally"
+    );
+
+    let mut editor = Editor::new();
+    let long = format!("line one\nline two\n{}", "x".repeat(1200));
+    editor.insert_paste(&long);
     let draft = editor.text();
     assert!(draft.contains("[Pasted text #1"));
     let expanded = editor.expand_pastes(&draft);
     assert!(expanded.contains("line two"));
+    assert!(expanded.contains("xxxx"));
     // The mapping is gone: the same token now passes through literally.
     let again = editor.expand_pastes(&draft);
     assert!(

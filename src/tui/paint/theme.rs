@@ -84,6 +84,32 @@ impl Theme {
             _ => "",
         }
     }
+
+    /// The token's value as a background prefix ("" for default). The theme
+    /// files carry one value per token; whether it paints ink or ground is
+    /// the caller's choice — the reference's filled selection rows use the
+    /// same palette entries as backgrounds.
+    pub fn bg_prefix(&self, token: &str) -> String {
+        match self.fg.get(token) {
+            Some(code) if code != "\x1b[39m" => code.replacen("\x1b[38;", "\x1b[48;", 1),
+            _ => String::new(),
+        }
+    }
+
+    /// The diff-marker token for one side of a diff: the truecolor value when
+    /// the terminal advertises 24-bit color, the reference's 256-color
+    /// fallback otherwise.
+    pub fn diff_marker_token(added: bool) -> &'static str {
+        let truecolor = std::env::var("COLORTERM")
+            .map(|v| v.contains("truecolor") || v.contains("24bit"))
+            .unwrap_or(false);
+        match (added, truecolor) {
+            (true, true) => "toolDiffAddedMarker",
+            (true, false) => "toolDiffAddedMarkerFallback",
+            (false, true) => "toolDiffRemovedMarker",
+            (false, false) => "toolDiffRemovedMarkerFallback",
+        }
+    }
 }
 
 /// The two palettes are compiled into the binary — no runtime files, no

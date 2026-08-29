@@ -157,6 +157,16 @@ pub struct ChatMessage {
     pub tool_meta: Option<ToolResultMeta>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageInput>,
+    /// True for harness-authored user-role messages — steering echoes and
+    /// wake continuations. They fill the history but are not user turns
+    /// (the /resume picker's "N turns" excludes them); the flag never
+    /// reaches the provider wire.
+    #[serde(default, skip_serializing_if = "not_internal")]
+    pub internal: bool,
+}
+
+fn not_internal(internal: &bool) -> bool {
+    !internal
 }
 
 impl ChatMessage {
@@ -168,6 +178,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_meta: None,
             images: Vec::new(),
+            internal: false,
         }
     }
     pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
@@ -178,6 +189,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_meta: None,
             images: Vec::new(),
+            internal: false,
         }
     }
     /// A dialect-owned reasoning item (signed thinking block, Responses
@@ -190,6 +202,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_meta: None,
             images: Vec::new(),
+            internal: false,
         }
     }
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
@@ -200,6 +213,7 @@ impl ChatMessage {
             tool_call_id: Some(call_id.into()),
             tool_meta: None,
             images: Vec::new(),
+            internal: false,
         }
     }
 
@@ -219,6 +233,7 @@ impl ChatMessage {
                 summary: summary.into(),
             }),
             images: Vec::new(),
+            internal: false,
         }
     }
 

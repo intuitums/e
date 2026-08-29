@@ -4,5 +4,6 @@
 pub mod authpanel;
 pub mod menu;
 pub mod panel;
+pub mod questionpanel;
 pub mod settingspanel;
 pub mod trustpanel;

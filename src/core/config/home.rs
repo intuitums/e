@@ -14,6 +14,17 @@ pub fn home() -> PathBuf {
     PathBuf::from(base).join(".e")
 }
 
+/// The user's home directory, when the platform declares one — the single
+/// sanctioned HOME read outside [`home`] itself (the guard pins every
+/// other lookup to this module). Used for `~`-relative display and the
+/// trust panel's under-home ancestor.
+pub fn user_home() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
 pub fn settings_path() -> PathBuf {
     home().join("settings.json")
 }

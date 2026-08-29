@@ -164,35 +164,88 @@ impl App {
     /// The picker itself, from the current catalog — no refresh side effects,
     /// so the rebuild-on-refresh arm cannot loop.
     pub(super) fn build_model_menu(&mut self) {
+        /// `200K context · 8K output` — exact multiples compact to K/M,
+        /// anything else stays raw, the reference's fact grammar.
+        fn model_facts(m: &crate::core::providers::catalog::Model) -> String {
+            fn token_fact(tokens: u64, suffix: &str) -> String {
+                if tokens >= 1_000_000 && tokens.is_multiple_of(1_000_000) {
+                    format!("{}M {suffix}", tokens / 1_000_000)
+                } else if tokens >= 1_000 && tokens.is_multiple_of(1_000) {
+                    format!("{}K {suffix}", tokens / 1_000)
+                } else {
+                    format!("{tokens} {suffix}")
+                }
+            }
+            let mut facts = Vec::new();
+            if m.context_window > 0 {
+                facts.push(token_fact(m.context_window, "context"));
+            }
+            if let Some(output) = m.max_output {
+                facts.push(token_fact(output, "output"));
+            }
+            facts.join(" · ")
+        }
         let available = model::provider_grouped(model::available());
         if available.is_empty() {
             self.notice("no models available — use /login to sign in to a provider".into());
             return;
         }
         let current = self.agent.model_slug();
+        // Provider tabs: All, then each provider with models available, in
+        // the grouped order the rows themselves use.
+        let mut tabs = vec!["All".to_string()];
+        for m in &available {
+            let display = crate::core::providers::catalog::display_name(&m.provider);
+            if !tabs[1..].contains(&display) {
+                tabs.push(display);
+            }
+        }
+        // The reference's model rows carry a dim compact-facts column —
+        // `200K context · 8K output` — two columns past the longest id; the
+        // current model is where the selection starts, not a marker.
         let items = available
             .iter()
             .map(|m| {
-                let slug = model::slug(m);
-                let mut item = MenuItem::new(&m.id, &m.provider, &slug);
-                if slug == current {
-                    item.meta = "current".into();
-                }
+                let mut item = MenuItem::new(&m.id, &model_facts(m), &model::slug(m));
+                let display = crate::core::providers::catalog::display_name(&m.provider);
+                item.tab = tabs.iter().position(|t| *t == display);
                 item
             })
             .collect();
-        self.menu = Some(Menu::new(MenuKind::Models, "Models", HINT_USE, items));
+        let mut menu = Menu::new(MenuKind::Models, "Models", HINT_MODELS, items).with_tabs(
+            tabs,
+            Some(0),
+            0,
+            "",
+        );
+        menu.select_value(&current);
+        self.menu = Some(menu);
     }
 
     pub(super) fn open_skills_menu(&mut self, query: &str) {
+        // Single-line rows, the reference's grammar: the skill name with a
+        // dim source scope beside it, no description — Tab cycles the
+        // source filter.
+        let global_root = crate::core::config::home::skills_dir();
         let items: Vec<MenuItem> = crate::core::resources::skills::list(&self.agent.cwd())
             .into_iter()
-            .map(|s| MenuItem::new(&s.name, &s.description, &s.name))
+            .map(|s| {
+                let global = s.dir.starts_with(&global_root);
+                let scope = if global { "Global" } else { "Workspace" };
+                let mut item = MenuItem::new(&s.name, scope, &s.name);
+                item.tab = Some(if global { 1 } else { 2 });
+                item
+            })
             .collect();
         if items.is_empty() {
             return;
         }
-        let mut menu = Menu::new(MenuKind::Skills, "Skills", HINT_USE, items);
+        let mut menu = Menu::new(MenuKind::Skills, "Skills", HINT_SKILLS, items).with_tabs(
+            vec!["All".into(), "Global".into(), "Workspace".into()],
+            Some(0),
+            0,
+            "Source",
+        );
         menu.set_query(query);
         self.menu = Some(menu);
     }
@@ -213,6 +266,16 @@ impl App {
     pub(super) fn sync_menu(&mut self) {
         let text = self.editor.text();
         if self.pending_key.is_some() {
+            return;
+        }
+        // /help opens this picker after its slash command has already left the
+        // composer. In that mode all later composer input is the query.
+        if let Some(menu) = self
+            .menu
+            .as_mut()
+            .filter(|menu| menu.kind == MenuKind::Commands && menu.filter_without_trigger)
+        {
+            menu.set_query(text.strip_prefix('/').unwrap_or(&text));
             return;
         }
         // Slash picker: leading '/', no space yet.

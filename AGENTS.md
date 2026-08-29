@@ -78,8 +78,12 @@ design's, audited value-for-value. Panel dividers (`tui/surfaces/panel.rs`)
 use the `border` token (divider_style, 240/250), not `dim` — markdown's own
 thematic-break rule and blockquote rail are a different, dimmer reference
 element and are pinned as `dim` in `tests/parity.rs`; don't conflate the two.
-Selection is brightness alone — bold bright ink for the current row, `dim`
-for the rest, no caret.
+Selection splits by surface, the reference's current rule: the catalog menus —
+models, skills, sessions (and /tree, their local sibling) — signal by
+brightness alone (bold bright ink for the current row), while the inline
+completion pickers (slash commands, files) fill the row — `selectedBg` behind
+`selectedText` ink — and unselected rows stay `dim` either way. No caret in
+pickers either way (the auth panel's `› ` is its own reference element).
 
 Every footer surface (the `/@$` pickers, `/settings`) frames through
 `tui/surfaces/panel.rs`: top divider, header, blank, body, bottom divider, with

@@ -8,6 +8,7 @@ use crate::core::tools::ToolOutcome;
 use crate::tui::markdown::{render_markdown, wrap_styled};
 use crate::tui::render::{bold, dim};
 use crate::tui::theme::Theme;
+use unicode_width::UnicodeWidthChar;
 
 /// One stable child of a provider-issued tool batch.
 pub struct ToolChild {
@@ -19,6 +20,8 @@ pub struct ToolChild {
     pub state: ToolState,
     pub result: Option<String>,
     pub output: String,
+    /// The stored full output's id, for the ctrl+o review screen.
+    pub detail: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -49,6 +52,7 @@ impl ToolChild {
             state: ToolState::Pending,
             result: None,
             output: String::new(),
+            detail: None,
         }
     }
 }
@@ -95,9 +99,13 @@ pub struct Block {
     pub cancelled: bool,
     /// Command rows: the first output lines, shown as `│` rows beneath.
     pub preview: Vec<String>,
-    /// Output lines beyond the preview (drives the elision row).
+    /// More output rows than the preview shows (drives the elision row).
     pub more: usize,
     cache: Option<(usize, bool, Vec<String>)>,
+    /// Bumped on every touch — the review screen's cache key folds these
+    /// into one fingerprint so its projection rebuilds only when a block
+    /// actually changed.
+    generation: u64,
 }
 
 impl Block {
@@ -118,10 +126,12 @@ impl Block {
             preview: Vec::new(),
             more: 0,
             cache: None,
+            generation: 0,
         }
     }
 
     pub fn touch(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.cache = None;
     }
 
@@ -169,7 +179,7 @@ impl Block {
                 ToolOutcome::Blocked => ToolState::Blocked,
                 ToolOutcome::Cancelled => ToolState::Cancelled,
             };
-            child.result = Some(summary);
+            child.result = Some(crate::core::tools::sanitize_display(&summary));
             // Command output is the only thing the live preview draws; keep
             // it captured for a bash tool still running when a late finish
             // lands.
@@ -192,18 +202,32 @@ impl Block {
         self.touch();
     }
 
+    /// Close a restored group: no more children arrive, and any child still
+    /// pending never reported — the header says so instead of silently
+    /// tallying rows that don't render.
+    pub fn seal(&mut self) {
+        self.done = true;
+        self.refresh_tool_header();
+        self.touch();
+    }
+
     fn refresh_tool_header(&mut self) {
         let mut counts: Vec<(String, usize)> = Vec::new();
+        let mut unreported = 0usize;
+        let mut timed_out = 0usize;
         let mut failed = 0usize;
+        let mut denied = 0usize;
         let mut cancelled = 0usize;
         for child in &self.tool_children {
-            if matches!(
-                child.state,
-                ToolState::Failed | ToolState::TimedOut | ToolState::Blocked
-            ) {
-                failed += 1;
-            } else if child.state == ToolState::Cancelled {
-                cancelled += 1;
+            match child.state {
+                // Live groups still have work in flight; a sealed group's
+                // pending child is a recorded call whose result never came.
+                ToolState::Pending if self.done => unreported += 1,
+                ToolState::TimedOut => timed_out += 1,
+                ToolState::Failed => failed += 1,
+                ToolState::Blocked => denied += 1,
+                ToolState::Cancelled => cancelled += 1,
+                _ => {}
             }
             if let Some((_, count)) = counts.iter_mut().find(|(kind, _)| *kind == child.category) {
                 *count += 1;
@@ -211,16 +235,26 @@ impl Block {
                 counts.push((child.category.clone(), 1));
             }
         }
+        // The reference orders category tallies by descending count (a stable
+        // sort keeps first-seen order for ties), then the outcome tallies in
+        // its fixed grammar: unreported · timed out · failed · denied ·
+        // cancelled.
+        counts.sort_by_key(|a| std::cmp::Reverse(a.1));
         let count = self.tool_children.len();
         let mut header = format!("{count} tool call{}", if count == 1 { "" } else { "s" });
         for (category, count) in counts {
             header.push_str(&format!(" · {}", category_tally(&category, count)));
         }
-        if failed > 0 {
-            header.push_str(&format!(" · {failed} failed"));
-        }
-        if cancelled > 0 {
-            header.push_str(&format!(" · {cancelled} cancelled"));
+        for (count, label) in [
+            (unreported, "unreported"),
+            (timed_out, "timed out"),
+            (failed, "failed"),
+            (denied, "denied"),
+            (cancelled, "cancelled"),
+        ] {
+            if count > 0 {
+                header.push_str(&format!(" · {count} {label}"));
+            }
         }
         self.text = header;
     }
@@ -243,20 +277,102 @@ impl Block {
         &self.cache.as_ref().unwrap().2
     }
 
-    /// Whether this block's rendering depends on the blink phase.
-    fn animates(&self) -> bool {
+    /// The child owning execution focus: the latest running call of a live
+    /// group. It leaves the tree and paints as the transient overlay row
+    /// below the transcript, the reference's running-tool presentation.
+    pub fn focused_running(&self) -> Option<usize> {
+        if self.done {
+            return None;
+        }
         self.tool_children
             .iter()
-            .any(|child| child.state == ToolState::Running)
+            .rposition(|child| child.state == ToolState::Running)
     }
 
-    fn render(&self, theme: &Theme, width: usize, blink_on: bool) -> Vec<String> {
+    /// The transient rows for the focused running child: its status row —
+    /// `└` continuing a tree, `●` for a lone call — with a steady accent
+    /// marker (the activity dot below is the one blinker; a flickering
+    /// tree connector reads as a glitch), and its live output beneath.
+    pub fn overlay_rows(&self, theme: &Theme, width: usize) -> Vec<String> {
+        let Some(index) = self.focused_running() else {
+            return Vec::new();
+        };
+        let child = &self.tool_children[index];
+        let marker = if self.tool_children.len() == 1 {
+            "●"
+        } else {
+            "└"
+        };
+        let marker = theme.fg("accent", marker);
+        let available = width.saturating_sub(2 + display_width(&child.running));
+        let target = clip_plain(&child.target, available);
+        let label = if target.is_empty() {
+            child.running.clone()
+        } else {
+            format!("{} {target}", child.running)
+        };
+        let mut rows = vec![format!("{marker} {}", theme.fg("muted", &label))];
+        append_tool_preview(&mut rows, child, theme, width);
+        rows
+    }
+
+    /// The review screen's projection of this block: every row, with child
+    /// rows carrying their stored-detail id so the screen can splice the
+    /// full output beneath. The review shows every child — the focused
+    /// running call included, since the screen has no overlay.
+    pub fn review_lines(&mut self, theme: &Theme, width: usize) -> Vec<(String, Option<u64>)> {
+        if self.kind != Kind::ToolGroup || self.tool_children.is_empty() {
+            // The cached path: the projection pays only for blocks whose
+            // content actually changed, sharing the main transcript's cache.
+            return self
+                .lines(theme, width, false)
+                .iter()
+                .cloned()
+                .map(|row| (row, None))
+                .collect();
+        }
+        let marker = theme.fg("userMessageText", "●");
+        let header = clip_plain(&self.text, width.saturating_sub(2));
+        let mut rows = vec![(format!("{marker} {}", theme.fg("muted", &header)), None)];
+        for (index, child) in self.tool_children.iter().enumerate() {
+            let last = index + 1 == self.tool_children.len();
+            let connector = if last { "└" } else { "├" };
+            if child.state == ToolState::Pending && !self.done {
+                continue;
+            }
+            if child.state == ToolState::Pending {
+                rows.push((
+                    format!(
+                        "{} {}",
+                        theme.fg("muted", connector),
+                        theme.fg("muted", "Tool completion was not reported")
+                    ),
+                    None,
+                ));
+                continue;
+            }
+            rows.push((child_row(theme, width, child, connector), child.detail));
+        }
+        rows
+    }
+
+    /// Whether this block's rendering depends on the blink phase. The
+    /// focused running row lives outside the block (the overlay), and
+    /// non-focused running rows render statically, so nothing inside a
+    /// block blinks anymore.
+    fn animates(&self) -> bool {
+        false
+    }
+
+    fn render(&self, theme: &Theme, width: usize, _blink_on: bool) -> Vec<String> {
         match self.kind {
-            // `𝑒 dogfood · Run /help for commands` — name bold, rest dim.
+            // `𝑒 dogfood · Run /help for commands` — name bold ink, the rest
+            // in the reference's dim (247 on light, one step lighter than the
+            // statusline gray).
             Kind::Banner => vec![format!(
                 "{}{}",
                 bold(&theme.fg("userMessageText", "𝑒")),
-                theme.fg("muted", &format!(" {} · Run /help for commands", self.text))
+                theme.fg("dim", &format!(" {} · Run /help for commands", self.text))
             )],
             Kind::User => {
                 let rail = format!("{} ", theme.fg("userMessageText", "┃"));
@@ -299,7 +415,9 @@ impl Block {
             Kind::Tool => {
                 // The reference shape: a finished row is just the row — no
                 // "(done)". Failure turns the marker to the error token and
-                // adds a `│ <outcome>` continuation beneath.
+                // adds a `│ <outcome>` continuation beneath. A finished row's
+                // `●` wears the system-notice text gray; a cancelled row
+                // brightens its summary and asks what to do differently.
                 let marker = if self.cancelled {
                     theme.fg("warning", "■")
                 } else if !self.done {
@@ -307,53 +425,55 @@ impl Block {
                 } else if self.is_error {
                     theme.fg("error", "●")
                 } else {
-                    "●".to_string()
+                    theme.fg("customMessageText", "●")
                 };
-                let mut rows = vec![match &self.detail {
-                    Some(target) if !target.is_empty() => {
-                        format!("{marker} {} {}", self.text, theme.fg("muted", target))
+                let mut rows = vec![if self.cancelled {
+                    let plain = match &self.detail {
+                        Some(target) if !target.is_empty() => {
+                            format!("{} {}", self.text, target)
+                        }
+                        _ => self.text.clone(),
+                    };
+                    format!(
+                        "{marker} {} · What can e do differently?",
+                        theme.fg("userMessageText", &plain)
+                    )
+                } else {
+                    match &self.detail {
+                        Some(target) if !target.is_empty() => {
+                            format!("{marker} {} {}", self.text, theme.fg("muted", target))
+                        }
+                        _ => format!("{marker} {}", self.text),
                     }
-                    _ => format!("{marker} {}", self.text),
                 }];
                 if self.done {
                     // The reference's command-output shape: the first lines
-                    // as `│` rows, an elision row for the rest, and an exit
-                    // line ("│ exit code 7") when the command failed.
+                    // as `│` rows, an exit line ("│ exit code 7") when the
+                    // command failed, and an elision row for the rest.
                     for line in &self.preview {
-                        rows.push(theme.fg("muted", &format!("│ {line}")));
+                        rows.push(theme.fg("dim", &format!("│ {line}")));
                     }
                     if self.is_error {
                         if let Some(result) = &self.result {
-                            let shown = display_outcome(result);
-                            rows.push(theme.fg("muted", &format!("│ {shown}")));
+                            let shown =
+                                clip_plain(&display_outcome(result), width.saturating_sub(2));
+                            rows.push(theme.fg("dim", &format!("│ {shown}")));
                         }
                     }
                     if self.more > 0 {
-                        rows.push(theme.fg(
-                            "muted",
-                            &format!("│ … {} lines more (ctrl o to view)", self.more),
-                        ));
+                        rows.push(theme.fg("dim", &elision_row(self.more, width)));
                     }
                 }
                 rows
             }
             Kind::ToolGroup => {
                 // The reference grammar runs the tool family flush left — the
-                // same column as the user rail — never indented.
-                let marker = bold(&theme.fg("userMessageText", "●"));
-                let mut rows = vec![format!("{marker} {}", theme.fg("statusline", &self.text))];
-                const MAX_TREE_ROWS: usize = 8;
-                let overflow = self.tool_children.len().saturating_sub(MAX_TREE_ROWS - 1);
-                // The most recent calls keep their rows — that is where the
-                // live activity is — and the earliest ones fold into a
-                // count above them. The header carries the full tallies.
-                if overflow > 0 {
-                    rows.push(format!(
-                        "{} {}",
-                        theme.fg("muted", "├"),
-                        theme.fg("muted", &format!("… {overflow} earlier tool calls"))
-                    ));
-                }
+                // same column as the user rail — never indented. The header's
+                // `●` wears the prompt-rail ink, unbolded, and the tallies the
+                // statusline gray, clipped to the frame.
+                let marker = theme.fg("userMessageText", "●");
+                let header = clip_plain(&self.text, width.saturating_sub(2));
+                let mut rows = vec![format!("{marker} {}", theme.fg("muted", &header))];
                 if self.tool_children.is_empty() {
                     for (i, child) in self.children.iter().enumerate() {
                         let connector = if i + 1 == self.children.len() {
@@ -361,55 +481,42 @@ impl Block {
                         } else {
                             "├"
                         };
-                        rows.push(format!("{connector} {}", theme.fg("statusline", child)));
+                        rows.push(format!(
+                            "{} {}",
+                            theme.fg("muted", connector),
+                            theme.fg("muted", child)
+                        ));
                     }
                     return rows;
                 }
-                for (index, child) in self.tool_children.iter().skip(overflow).enumerate() {
-                    if child.state == ToolState::Pending {
+                // The focused running call leaves the tree — it paints as
+                // the transient row below the transcript — and while it is
+                // out, the tree stays open: the last static child keeps `├`.
+                let focused = self.focused_running();
+                for (index, child) in self.tool_children.iter().enumerate() {
+                    if focused == Some(index) {
                         continue;
                     }
-                    let last = index + overflow + 1 == self.tool_children.len();
-                    let connector = if last { "└" } else { "├" };
-                    let connector = match child.state {
-                        ToolState::Running if blink_on => theme.fg("userMessageText", connector),
-                        ToolState::Running => theme.fg("dim", connector),
-                        ToolState::Failed | ToolState::TimedOut | ToolState::Blocked => {
-                            theme.fg("error", connector)
+                    if child.state == ToolState::Pending {
+                        // Mid-run, a pending call has no row yet. In a sealed
+                        // group the call is on record and its result never
+                        // came — say so, the reference's own fallback line.
+                        if !self.done {
+                            continue;
                         }
-                        ToolState::Cancelled => theme.fg("warning", connector),
-                        _ => theme.fg("muted", connector),
-                    };
-                    let action = match child.state {
-                        ToolState::Running => child.running.as_str(),
-                        ToolState::Completed => child.completed.as_str(),
-                        ToolState::Failed => "Failed",
-                        ToolState::TimedOut => "Timed out",
-                        ToolState::Blocked => "Blocked",
-                        ToolState::Cancelled => "Cancelled",
-                        ToolState::Pending => unreachable!(),
-                    };
-                    let suffix = if child.state == ToolState::Completed
-                        && matches!(child.category.as_str(), "edit" | "write")
-                    {
-                        child
-                            .result
-                            .as_deref()
-                            .map(|result| format!("  {result}"))
-                            .unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    let available =
-                        width.saturating_sub(2 + action.chars().count() + suffix.chars().count());
-                    let target = clip_plain(&child.target, available);
-                    let label = if target.is_empty() {
-                        format!("{action}{suffix}")
-                    } else {
-                        format!("{action} {target}{suffix}")
-                    };
-                    rows.push(format!("{connector} {}", theme.fg("statusline", &label)));
-                    append_tool_preview(&mut rows, child, theme);
+                        let last = index + 1 == self.tool_children.len();
+                        let connector = if last { "└" } else { "├" };
+                        rows.push(format!(
+                            "{} {}",
+                            theme.fg("muted", connector),
+                            theme.fg("muted", "Tool completion was not reported")
+                        ));
+                        continue;
+                    }
+                    let last = index + 1 == self.tool_children.len() && focused.is_none();
+                    let connector = if last { "└" } else { "├" };
+                    rows.push(child_row(theme, width, child, connector));
+                    append_tool_preview(&mut rows, child, theme, width);
                 }
                 rows
             }
@@ -437,11 +544,18 @@ impl Block {
                 .into_iter()
                 .map(|l| format!("  {l}"))
                 .collect(),
-            Kind::Error => wrap_styled(&self.text, width.saturating_sub(2).max(8))
-                .into_iter()
-                .map(|l| theme.fg("error", &format!("  {l}")))
-                .collect(),
-            Kind::System => vec![theme.fg("dim", &format!("● System: {}", self.text))],
+            // The reference notice grammar: `● Topic: body` — the marker and
+            // label in the tone's style (red for an error), the body in the
+            // system-notice text gray, continuations indented two columns.
+            Kind::Error => notice_rows(theme, "error", false, "Error", &self.text, width),
+            Kind::System => notice_rows(
+                theme,
+                "customMessageLabel",
+                true,
+                "System",
+                &self.text,
+                width,
+            ),
         }
     }
 }
@@ -461,8 +575,32 @@ fn display_outcome(result: &str) -> String {
     }
 }
 
+/// Visible cell width of plain text (no SGR).
+fn display_width(text: &str) -> usize {
+    text.chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
+}
+
+/// The width-1 prefix of `text` by display cells.
+fn prefix_by_width(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > width {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out
+}
+
+/// Clip by display cells the reference way: fits → unchanged; one cell →
+/// a bare ellipsis; otherwise a width-1 prefix plus `…`.
 fn clip_plain(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
+    if display_width(text) <= width {
         return text.to_string();
     }
     if width == 0 {
@@ -471,9 +609,106 @@ fn clip_plain(text: &str, width: usize) -> String {
     if width == 1 {
         return "…".into();
     }
-    let mut clipped: String = text.chars().take(width - 1).collect();
+    let mut clipped = prefix_by_width(text, width - 1);
     clipped.push('…');
     clipped
+}
+
+/// The command-output elision row, degrading with the frame the reference
+/// way: full wording, then `(ctrl o)`, then the bare count, then a hard
+/// prefix clip.
+fn elision_row(more: usize, width: usize) -> String {
+    let noun = if more == 1 { "line" } else { "lines" };
+    let candidates = [
+        format!("│ … {more} {noun} more (ctrl o to view)"),
+        format!("│ … {more} more (ctrl o)"),
+        format!("│ … {more} more"),
+    ];
+    for candidate in &candidates {
+        if display_width(candidate) <= width {
+            return candidate.clone();
+        }
+    }
+    prefix_by_width(&candidates[candidates.len() - 1], width)
+}
+
+/// `● Topic: body` in the reference notice grammar: the marker and label in
+/// the tone's token (bold for the information tone), the body in the
+/// system-notice text gray, continuations indented two columns.
+fn notice_rows(
+    theme: &Theme,
+    tone: &str,
+    bold_label: bool,
+    topic: &str,
+    body: &str,
+    width: usize,
+) -> Vec<String> {
+    let plain = format!("● {topic}:");
+    let label = if bold_label {
+        bold(&theme.fg(tone, &plain))
+    } else {
+        theme.fg(tone, &plain)
+    };
+    let body_width = width.saturating_sub(2).max(8);
+    let mut rows = Vec::new();
+    for line in wrap_styled(body, body_width) {
+        if rows.is_empty() {
+            rows.push(format!("{label} {}", theme.fg("customMessageText", &line)));
+        } else {
+            rows.push(format!("  {}", theme.fg("customMessageText", &line)));
+        }
+    }
+    if rows.is_empty() {
+        rows.push(label);
+    }
+    rows
+}
+
+/// The reference's edit/write stat suffix: ` +N / -M` with the diff-marker
+/// hue on each count and a dim slash; one-sided edits drop the slash, and a
+/// summary that isn't a `+N -M` pair rides muted unchanged.
+fn diff_stat_suffix(theme: &Theme, result: &str) -> String {
+    let mut adds = None;
+    let mut dels = None;
+    for part in result.split_whitespace() {
+        if let Some(n) = part.strip_prefix('+').and_then(|v| v.parse::<usize>().ok()) {
+            adds = Some(n);
+        } else if let Some(n) = part.strip_prefix('-').and_then(|v| v.parse::<usize>().ok()) {
+            dels = Some(n);
+        }
+    }
+    let add_token = Theme::diff_marker_token(true);
+    let del_token = Theme::diff_marker_token(false);
+    match (adds, dels) {
+        (Some(a), Some(d)) if a > 0 && d > 0 => format!(
+            " {} {} {}",
+            theme.fg(add_token, &format!("+{a}")),
+            theme.fg("dim", "/"),
+            theme.fg(del_token, &format!("-{d}"))
+        ),
+        (Some(a), _) if a > 0 => format!(" {}", theme.fg(add_token, &format!("+{a}"))),
+        (_, Some(d)) if d > 0 => format!(" {}", theme.fg(del_token, &format!("-{d}"))),
+        (Some(_), Some(_)) => String::new(),
+        _ => format!(" {}", theme.fg("muted", result)),
+    }
+}
+
+/// Visible width of a styled suffix (SGR stripped).
+fn suffix_stat_width(suffix: &str) -> usize {
+    let mut width = 0usize;
+    let mut chars = suffix.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        width += UnicodeWidthChar::width(ch).unwrap_or(0);
+    }
+    width
 }
 
 /// Pipe rows appear only while the command owns execution focus — the
@@ -481,7 +716,61 @@ fn clip_plain(text: &str, width: usize) -> String {
 /// ctrl+o, never inline. Live rows are a shell thing: a write or edit shows
 /// in the tree as its one action row, never as the file's content streaming
 /// beneath it.
-fn append_tool_preview(rows: &mut Vec<String>, child: &ToolChild, theme: &Theme) {
+/// One child's status row — the single grammar the live tree and the
+/// review screen both speak: state-toned connector, the reference's verb
+/// per state (a non-zero exit stays on its `Ran` row), the failure reason
+/// on the target, the edit/write stat suffix.
+fn child_row(theme: &Theme, width: usize, child: &ToolChild, connector: &str) -> String {
+    let connector = match child.state {
+        ToolState::Running => theme.fg("dim", connector),
+        ToolState::Failed | ToolState::TimedOut | ToolState::Blocked => {
+            theme.fg("error", connector)
+        }
+        ToolState::Cancelled => theme.fg("warning", connector),
+        _ => theme.fg("muted", connector),
+    };
+    let action = match child.state {
+        ToolState::Pending | ToolState::Running => child.running.as_str(),
+        ToolState::Completed => child.completed.as_str(),
+        ToolState::Failed if child.category == "command" => child.completed.as_str(),
+        ToolState::Failed => "Failed",
+        ToolState::TimedOut => "Timed out",
+        ToolState::Blocked => "Denied",
+        ToolState::Cancelled => "Cancelled",
+    };
+    let suffix = if child.state == ToolState::Completed
+        && matches!(child.category.as_str(), "edit" | "write")
+    {
+        child
+            .result
+            .as_deref()
+            .map(|result| diff_stat_suffix(theme, result))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    // The reference's failed rows name the reason: `Failed path: preflight
+    // failed`. A generic "error" summary adds nothing and stays off the row.
+    let target_plain = match (&child.state, child.result.as_deref()) {
+        (ToolState::Failed, Some(reason))
+            if child.category != "command" && !reason.is_empty() && reason != "error" =>
+        {
+            format!("{}: {reason}", child.target)
+        }
+        _ => child.target.clone(),
+    };
+    let suffix_width: usize = suffix_stat_width(&suffix);
+    let available = width.saturating_sub(2 + display_width(action) + suffix_width);
+    let target = clip_plain(&target_plain, available);
+    let label = if target.is_empty() {
+        action.to_string()
+    } else {
+        format!("{action} {target}")
+    };
+    format!("{connector} {}{suffix}", theme.fg("muted", &label))
+}
+
+fn append_tool_preview(rows: &mut Vec<String>, child: &ToolChild, theme: &Theme, width: usize) {
     if child.state != ToolState::Running {
         return;
     }
@@ -494,19 +783,14 @@ fn append_tool_preview(rows: &mut Vec<String>, child: &ToolChild, theme: &Theme)
         .filter(|line| !line.starts_with("… [killed:") && *line != "… [cancelled]")
         .collect();
     const LIVE_BUDGET: usize = 5;
+    // The reference frames every output row in the dim gray, gutter and
+    // content together — output carries no hue of its own.
     for line in output.iter().take(LIVE_BUDGET) {
-        let styled = if line.starts_with('+') && !line.starts_with("+++") {
-            theme.fg("toolDiffAdded", line)
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            theme.fg("toolDiffRemoved", line)
-        } else {
-            theme.fg("muted", line)
-        };
-        rows.push(format!("{} {styled}", theme.fg("muted", "│")));
+        rows.push(theme.fg("dim", &format!("│ {line}")));
     }
     let more = output.len().saturating_sub(LIVE_BUDGET);
     if more > 0 {
-        rows.push(theme.fg("muted", &format!("│ … {more} lines more (ctrl o to view)")));
+        rows.push(theme.fg("dim", &elision_row(more, width)));
     }
 }
 
@@ -563,7 +847,7 @@ fn tally_label(verb: &str, count: usize) -> String {
         "Wrote" => "write",
         "Edited" => "edit",
         "Ran" | "Running" => "command",
-        "Searched" => "search",
+        "Searched" => "read",
         "Listed" => "list",
         other => return format!("{count} {}", other.to_lowercase()),
     };
@@ -590,6 +874,17 @@ pub struct Transcript {
 }
 
 impl Transcript {
+    /// Everything block state can contribute to a rendering, as one
+    /// number: the block count and each block's touch generation. The
+    /// review screen folds this into its cache key.
+    pub fn fingerprint(&self) -> u64 {
+        self.blocks
+            .iter()
+            .fold(self.blocks.len() as u64, |acc, block| {
+                acc.rotate_left(1) ^ block.generation
+            })
+    }
+
     pub fn push(&mut self, block: Block) -> usize {
         self.blocks.push(block);
         self.blocks.len() - 1
@@ -707,10 +1002,12 @@ mod tests {
         );
     }
 
-    /// A running tool row genuinely blinks, so its block must re-render
-    /// across phases — and settle again once the tool finishes.
+    /// The focused running call leaves the tree for the transient overlay,
+    /// whose marker holds steady (the activity dot below is the one
+    /// blinker); the block itself stays phase-stable, so blink ticks never
+    /// invalidate its cache.
     #[test]
-    fn running_tool_block_animates_until_done() {
+    fn running_tool_paints_as_a_steady_overlay_row() {
         let theme = theme();
         let mut block = Block::tool_group(vec![ToolChild::pending(
             1,
@@ -720,14 +1017,21 @@ mod tests {
             "true".into(),
         )]);
         block.start_tool(1);
-        let on = block.lines(&theme, 80, true).to_vec();
-        let off = block.lines(&theme, 80, false).to_vec();
-        assert_ne!(on, off, "a running tool row must blink");
-        block.finish_tool(1, ToolOutcome::Completed, "done".into(), "");
+        assert_eq!(block.focused_running(), Some(0));
+        let tree = block.lines_for_test(&theme, 80);
+        assert_eq!(tree.len(), 1, "the focused call has no tree row");
+        let overlay = block.overlay_rows(&theme, 80);
+        assert!(overlay[0].contains("Running true"), "{:?}", overlay[0]);
+        assert!(overlay[0].contains('●'), "a lone call wears the ● marker");
+        // The block's own cache is phase-stable.
         block.lines(&theme, 80, true);
         let cached = block.cache.as_ref().unwrap().2.as_ptr();
         block.lines(&theme, 80, false);
         assert_eq!(block.cache.as_ref().unwrap().2.as_ptr(), cached);
+
+        block.finish_tool(1, ToolOutcome::Completed, "done".into(), "");
+        assert_eq!(block.focused_running(), None);
+        assert!(block.overlay_rows(&theme, 80).is_empty());
     }
 
     /// Thinking streams live in thinkingText; once its burst ends, the
@@ -761,6 +1065,31 @@ mod tests {
             collapsed[0].contains(theme.fg_prefix("dim")),
             "the collapsed row dims"
         );
+    }
+
+    #[test]
+    fn failed_tool_summary_is_sanitized_before_rendering() {
+        let mut block = Block::tool_group(vec![ToolChild::pending(
+            1,
+            "edit".into(),
+            "Editing".into(),
+            "Edited".into(),
+            "file.rs".into(),
+        )]);
+        block.finish_tool(
+            1,
+            ToolOutcome::Failed,
+            "bad \x1b[2Jreason\x1b]52;c;x\x07".into(),
+            "",
+        );
+        assert_eq!(block.tool_children[0].result.as_deref(), Some("bad reason"));
+        for row in block.lines_for_test(&theme(), 80) {
+            assert!(
+                !row.contains("\x1b[2J"),
+                "an erase sequence leaked: {row:?}"
+            );
+            assert!(!row.contains("\x1b]"), "an OSC sequence leaked: {row:?}");
+        }
     }
 
     /// Block text stays inert even for the thinking surface.
