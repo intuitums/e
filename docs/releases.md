@@ -15,7 +15,7 @@ the artifacts. Given a downloaded archive:
 ```sh
 sha256sum -c checksums.txt --ignore-missing
 gh attestation verify e-x86_64-unknown-linux-gnu.tar.gz \
-  --repo intuitumxyz/e
+  --repo intuitums/e
 ```
 
 On macOS use `shasum -a 256` to compare the archive with the corresponding

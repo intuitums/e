@@ -2,18 +2,18 @@
 
 Forty-nine issues filed 2026-08-23 from the post-audit pass (after #42–#47 landed in PR #50). Grouped into six epics.
 
-**GitHub epics:** [#100](https://github.com/intuitumxyz/e/issues/100)–[#105](https://github.com/intuitumxyz/e/issues/105) · **Index:** [#106](https://github.com/intuitumxyz/e/issues/106)
+**GitHub epics:** [#100](https://github.com/intuitums/e/issues/100)–[#105](https://github.com/intuitums/e/issues/105) · **Index:** [#106](https://github.com/intuitums/e/issues/106)
 
 ## Epics
 
 | Order | Epic | Issues |
 |-------|------|--------|
-| 1 | [#100 Auth, credentials, config](https://github.com/intuitumxyz/e/issues/100) | 64, 65, 66, 89, 97, 98, 99 |
-| 2 | [#101 Session persistence](https://github.com/intuitumxyz/e/issues/101) | 57, 78, 79, 80, 91 |
-| 3 | [#102 Tool execution](https://github.com/intuitumxyz/e/issues/102) | 53, 63, 95, 96 |
-| 4 | [#103 Provider streaming](https://github.com/intuitumxyz/e/issues/103) | 51, 52, 56, 58, 73, 74, 75, 76, 90 |
-| 5 | [#104 TUI hardening](https://github.com/intuitumxyz/e/issues/104) | 81–88, 93, 94 |
-| 6 | [#105 Extension lifecycle](https://github.com/intuitumxyz/e/issues/105) | 54, 55, 60–62, 67–72, 77, 92 |
+| 1 | [#100 Auth, credentials, config](https://github.com/intuitums/e/issues/100) | 64, 65, 66, 89, 97, 98, 99 |
+| 2 | [#101 Session persistence](https://github.com/intuitums/e/issues/101) | 57, 78, 79, 80, 91 |
+| 3 | [#102 Tool execution](https://github.com/intuitums/e/issues/102) | 53, 63, 95, 96 |
+| 4 | [#103 Provider streaming](https://github.com/intuitums/e/issues/103) | 51, 52, 56, 58, 73, 74, 75, 76, 90 |
+| 5 | [#104 TUI hardening](https://github.com/intuitums/e/issues/104) | 81–88, 93, 94 |
+| 6 | [#105 Extension lifecycle](https://github.com/intuitums/e/issues/105) | 54, 55, 60–62, 67–72, 77, 92 |
 
 ## Per-issue slotting
 

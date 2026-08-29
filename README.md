@@ -19,7 +19,7 @@ skills.
 Until the first binary release, install the pinned source with Rust:
 
 ```sh
-cargo install --locked --git https://github.com/intuitumxyz/e
+cargo install --locked --git https://github.com/intuitums/e
 ```
 
 Published releases support:
@@ -34,7 +34,7 @@ After the first release, `install.sh` selects the matching binary, verifies
 its checksum, and installs it under `~/.local/bin`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/intuitumxyz/e/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/intuitums/e/main/install.sh | sh
 ```
 
 Release assets also include a CycloneDX SBOM and signed GitHub build

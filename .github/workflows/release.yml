@@ -48,7 +48,7 @@ jobs:
             '$0 == "## " ver || $0 ~ "^## " ver " " {hit=1; next} /^## / {hit=0} hit' \
             CHANGELOG.md > notes.md
           if [ ! -s notes.md ]; then
-            echo "See [CHANGELOG.md](https://github.com/intuitumxyz/e/blob/main/CHANGELOG.md)." > notes.md
+            echo "See [CHANGELOG.md](https://github.com/intuitums/e/blob/main/CHANGELOG.md)." > notes.md
           fi
           {
             echo ""
@@ -57,7 +57,7 @@ jobs:
             echo "**Install or update**"
             echo ""
             echo '```sh'
-            echo "curl -fsSL https://raw.githubusercontent.com/intuitumxyz/e/main/install.sh | sh"
+            echo "curl -fsSL https://raw.githubusercontent.com/intuitums/e/main/install.sh | sh"
             echo '```'
             echo ""
             echo "After this one manual install, e updates itself (\`e update\`,

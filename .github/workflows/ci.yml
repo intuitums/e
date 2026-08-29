@@ -29,7 +29,7 @@ jobs:
   test:
     # Linux leg runs on the self-hosted runner in the intuitum fleet naming
     # scheme (Blacksmith-style): 24-core Ubuntu 26.04 box, systemd service
-    # actions.runner.intuitumxyz-e.intuitum-24vcpu-ubuntu-2604-01, user `anvil`.
+    # actions.runner.intuitums-e.intuitum-24vcpu-ubuntu-2604-01, user `anvil`.
     # Fork PRs are held for approval by GitHub's external-contributor gate and
     # must never be approved onto it; macOS stays GitHub-hosted.
     name: Build & Test (${{ matrix.os }})

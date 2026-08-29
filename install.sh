@@ -1,10 +1,10 @@
 #!/bin/sh
 # e installer: fetch the latest release binary for this platform, verify its
 # checksum, install to ~/.local/bin (override with E_INSTALL_DIR).
-#   curl -fsSL https://raw.githubusercontent.com/intuitumxyz/e/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/intuitums/e/main/install.sh | sh
 set -eu
 
-repo="intuitumxyz/e"
+repo="intuitums/e"
 dir="${E_INSTALL_DIR:-$HOME/.local/bin}"
 
 os=$(uname -s)
@@ -33,7 +33,7 @@ base="${E_RELEASE_BASE:-https://github.com/$repo/releases/latest/download}"
 
 curl -fsSL -o "$tmp/e.tar.gz" "$base/e-$target.tar.gz" || {
   echo "no release published yet — install.sh works once the first release exists" >&2
-  echo "build from source: cargo install --git https://github.com/intuitumxyz/e" >&2
+  echo "build from source: cargo install --git https://github.com/intuitums/e" >&2
   exit 1
 }
 curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt"
