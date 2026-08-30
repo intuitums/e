@@ -24,13 +24,12 @@ the pipeline publishes.
 - `e rpc` gains two generic per-request knobs so a delegated turn can be
   shaped without the core binary learning any new concept: `system` (extra
   system-prompt text, appended to the base) and `tools` (a positive built-in
-  allowlist, advertised and enforced). Agent personas are built entirely on
-  top of these by the `subagent.mjs` example — it reads persona files from
-  `~/.e/agents/` (markdown with `name`/`description`/`tools`/`model`
-  frontmatter, its body the appended system prompt), resolves the `agent`
-  argument itself, and composes the request. The concept lives in the
-  extension; core never learns what a "persona" is. Sample personas ship in
-  `docs/agents/` — copy the ones you want into `~/.e/agents/`.
+  allowlist, advertised and enforced). The `subagent.mjs` example builds its
+  agents entirely on top of these — `Explore` (a light-model, read-only
+  scout), `Plan` (a read-only strategist), and `Build` (a full-access
+  worker) — defined right in the extension and composed into the request. No
+  separate agents directory: an extension is where a user's additions live,
+  and core never learns what an "agent" is.
 - The `e rpc` response gains a `session` field: the saved turn's JSONL path
   (or `null` for a memory-only run). A delegated turn's whole transcript —
   every tool call and its output — lives there, so the dispatching agent can

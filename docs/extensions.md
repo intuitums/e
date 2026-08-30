@@ -188,10 +188,10 @@ It is embedded in the binary, so the copy `e add` writes always matches your e.
   `e -w [branch]` creates a Git worktree and relaunches e there.
 - **`subagent.mjs`** — a `delegate` tool that drives a single-shot `e rpc
   --no-extensions` child: one JSON request line in, one result out. The
-  delegated turn is extension-free (so it can never delegate again). It owns
-  the persona concept itself — reading agent files from `~/.e/agents/` and
-  composing the request's `system`/`tools`/`model` — while e's core stays
-  generic and never learns what a "persona" is.
+  delegated turn is extension-free (so it can never delegate again). It ships
+  its own agents (`Explore`, `Plan`, `Build`) defined right in the extension
+  and composes each into the request's `system`/`tools`/`model` — while e's
+  core stays generic and never learns what an "agent" is.
 - **`mcp.mjs`** — a dependency-free bridge from one configured MCP stdio
   server's `tools/list` / `tools/call` surface into e extension tools. It
   forwards MCP progress through the additive `tool.update` capability.
@@ -260,27 +260,25 @@ tool call and its output — persists; the response's `session` path is appended
 to the tool result, and the dispatching agent can `read` that JSONL to see the
 full turn when the returned summary isn't enough.
 
-**Agent personas — owned by the extension, not e.** A delegation can name an
-`agent`. A persona is a markdown file the *extension* reads from `~/.e/agents/`:
+**Agents — owned by the extension, not e.** A delegation can name an `agent`.
+The agents are defined right in `subagent.mjs`, named for what they do:
 
-```markdown
----
-name: scout
-description: Fast, read-only codebase recon
-tools: read, grep
-model: anthropic/claude-haiku-4-5
----
-You are a scout. Find the relevant code and report back concisely.
-```
+- **`Explore`** — a fast, read-only scout (`read`, `grep`) on a light model,
+  for searching and analyzing a codebase without editing it.
+- **`Plan`** — a read-only strategist (`read`, `grep`) that gathers context and
+  designs an implementation approach.
+- **`Build`** — a general-purpose worker with the full toolset, for multi-step
+  tasks and file modifications.
 
-The extension parses the file and composes the `e rpc` request from it: the
-body goes in `system` (appended to the base prompt), `tools` becomes the
-request's tool allowlist (enforced in the advertised schemas *and* at
-execution), and `model` is a fallback the caller can override. e's core knows
-nothing about personas — it just runs a turn with the `system` and `tools` it
-is handed, so the whole concept lives in (and dies with) the extension. Sample
-personas live in [`docs/agents/`](agents/); copy the ones you want into
-`~/.e/agents/`.
+Each is a small object with a `systemPrompt`, an optional `tools` allowlist,
+and an optional `model`. The extension composes them into the `e rpc` request:
+`systemPrompt` goes in `system` (appended to the base prompt), `tools` becomes
+the request's allowlist (enforced in the advertised schemas *and* at
+execution), and `model` is a fallback the caller can override. Add your own by
+adding an entry to the list — there is no separate agents directory, because an
+extension is the place a user's additions live. e's core knows nothing about
+any of this; it just runs a turn with the `system` and `tools` it is handed, so
+the whole concept lives in (and dies with) the extension.
 
 ## What startup hooks are for
 

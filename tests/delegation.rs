@@ -61,7 +61,7 @@ fn rpc_system_field_appends_to_the_base_prompt() {
 
     run_rpc(
         &home,
-        "{\"id\":1,\"prompt\":\"go\",\"system\":\"You are the scout persona for this test.\"}\n",
+        "{\"id\":1,\"prompt\":\"go\",\"system\":\"You are the Explore agent for this test.\"}\n",
     );
 
     let captured = server.join().unwrap().remove(0);
@@ -72,7 +72,7 @@ fn rpc_system_field_appends_to_the_base_prompt() {
         .unwrap_or_default()
         .to_string();
     assert!(
-        system.contains("You are the scout persona for this test."),
+        system.contains("You are the Explore agent for this test."),
         "appended text missing: {system}"
     );
     assert!(

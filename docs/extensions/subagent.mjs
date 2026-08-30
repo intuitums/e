@@ -2,75 +2,46 @@
 /** Delegate one isolated turn to another e process over `e rpc`. Copy with
  *  scaffold.mjs. */
 import { spawn } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { connect } from "./scaffold.mjs";
 
 const E_BIN = process.env.E_BIN || "e";
 
-// Personas belong to this extension, not to e. Each is a markdown file in
-// ~/.e/agents/ with frontmatter (name/description/tools/model) and a body that
-// becomes the delegated turn's appended system prompt. e core knows nothing
-// about them — the extension reads the files and composes the `e rpc` request.
-// Discovered once at startup; restart to pick up new files, the same as skills.
-const AGENTS_DIR = join(process.env.E_HOME || join(homedir(), ".e"), "agents");
+// The agents this extension offers, named for what they do. They belong to the
+// extension, not to e — e core knows nothing about them. Add one by adding an
+// entry: `systemPrompt` is appended to the delegated turn's system prompt,
+// `tools` scopes it to those built-ins (omit for the full set), `model` is an
+// optional lighter/heavier override.
+const PERSONAS = [
+  {
+    name: "Explore",
+    description:
+      "Fast, read-only scout that searches and analyzes the codebase without editing; runs on a light model.",
+    tools: ["read", "grep"],
+    // A light model keeps recon cheap. Adjust to one your providers expose.
+    model: "anthropic/claude-haiku-4-5",
+    systemPrompt:
+      "You are Explore: fast, read-only reconnaissance. Find the code that matters for the task — the files, the key symbols, and how they connect — and report back concisely, quoting only the lines that carry the answer. You never edit; another turn acts on what you find. End with a dense summary the dispatching agent can use without re-reading the files.",
+  },
+  {
+    name: "Plan",
+    description:
+      "Read-only strategist that gathers context and designs an implementation approach; does not edit.",
+    tools: ["read", "grep"],
+    systemPrompt:
+      "You are Plan: a read-only strategist. Gather the context you need, then design the change as an ordered list of concrete steps — which files change, what each change is, and the order that keeps the tree building between steps. Call out the risks and the one or two decisions a human should confirm. You do not edit; you produce the plan another turn will follow. Keep it tight — a map, not an essay.",
+  },
+  {
+    name: "Build",
+    description:
+      "General-purpose worker with full tool access; handles complex, multi-step tasks and file modifications.",
+    systemPrompt:
+      "You are Build: a general-purpose worker with the full toolset. Handle the task end to end — read what you need, make the edits, run the commands, and verify your work. When the task is done, stop.",
+  },
+];
 
-function parseFrontmatter(text) {
-  const match = text.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-  if (!match) return { fm: {}, body: text };
-  const fm = {};
-  for (const line of match[1].split("\n")) {
-    const i = line.indexOf(":");
-    if (i !== -1) fm[line.slice(0, i).trim()] = line.slice(i + 1).trim();
-  }
-  return { fm, body: match[2] };
-}
-
-// `tools: read, grep` or `tools: [read, grep]` → ["read","grep"]; empty → undefined.
-function parseToolList(value) {
-  if (!value) return undefined;
-  const tools = value
-    .replace(/^\[|\]$/g, "")
-    .split(",")
-    .map((t) => t.trim().replace(/^["']|["']$/g, ""))
-    .filter(Boolean);
-  return tools.length ? tools : undefined;
-}
-
-function discoverAgents() {
-  let files;
-  try {
-    files = readdirSync(AGENTS_DIR).filter((f) => f.endsWith(".md"));
-  } catch {
-    return [];
-  }
-  const agents = [];
-  for (const file of files) {
-    let text;
-    try {
-      text = readFileSync(join(AGENTS_DIR, file), "utf8");
-    } catch {
-      continue;
-    }
-    const { fm, body } = parseFrontmatter(text);
-    agents.push({
-      name: fm.name || file.replace(/\.md$/, ""),
-      description: fm.description || "",
-      tools: parseToolList(fm.tools),
-      model: fm.model || undefined,
-      systemPrompt: body.trim(),
-    });
-  }
-  return agents;
-}
-
-const agents = discoverAgents();
-const agentsByName = new Map(agents.map((a) => [a.name, a]));
-const agentNames = agents.map((a) => a.name);
-const agentList = agents.length
-  ? `Available agents: ${agents.map((a) => `${a.name} (${a.description})`).join("; ")}.`
-  : "No agents are defined; omit `agent` to run a plain delegated turn.";
+const agentsByName = new Map(PERSONAS.map((p) => [p.name, p]));
+const agentNames = PERSONAS.map((p) => p.name);
+const agentList = `Available agents: ${PERSONAS.map((p) => `${p.name} (${p.description})`).join("; ")}.`;
 
 const children = new Set();
 function stopChildren(signal = "SIGTERM") {
