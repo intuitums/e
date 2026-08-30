@@ -103,7 +103,13 @@ pub(crate) fn plan<'a>(
 pub(crate) fn scroll_rows(prev_len: usize, len: usize, height: usize) -> usize {
     let prev_overflow = prev_len.saturating_sub(height);
     let overflow = len.saturating_sub(height);
-    overflow.saturating_sub(prev_overflow)
+    // The screen can only give up `height` scroll rows per frame — shadow
+    // holds exactly one slot per row, and a reflow (resize, tab switch) can
+    // make a frame jump by hundreds of rows at once. Uncapped, drain(0..scroll)
+    // panicked past the shadow (#the blank-screen freeze).
+    overflow
+        .saturating_sub(prev_overflow)
+        .min(height)
 }
 
 impl Screen {
@@ -318,6 +324,11 @@ mod tests {
         // Shrinking never scrolls — the window repaints in place.
         assert_eq!(scroll_rows(13, 10, 10), 0);
         assert_eq!(scroll_rows(23, 20, 10), 0);
+        // A reflow can make one frame jump by more rows than the screen
+        // has; the scroll never exceeds the height (shadow holds exactly
+        // one slot per row).
+        assert_eq!(scroll_rows(0, 739, 53), 53);
+        assert_eq!(scroll_rows(0, 686, 10), 10);
     }
 }
 
