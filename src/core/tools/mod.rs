@@ -606,7 +606,8 @@ mod tests {
 
     #[test]
     fn safety_modes_filter_the_model_visible_contract() {
-        // Asking the user mutates nothing, so read-only sessions keep it.
+        // Read-only sessions keep the tools that only observe — read and
+        // grep — and nothing that can mutate the workspace.
         assert_eq!(names(ToolMode::ReadOnly), vec!["read", "grep"]);
         assert!(names(ToolMode::None).is_empty());
         assert_eq!(names(ToolMode::All).len(), schemas().len());
