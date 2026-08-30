@@ -286,11 +286,6 @@ impl App {
                 ));
             }
             SessionEvent::TurnEnd { aborted } => {
-                // The turn's asks are settled either way — their tool tasks
-                // resolved or were cancelled with the turn — so a panel
-                // still showing is stale.
-                self.question = None;
-                self.question_queue.clear();
                 // The queue the review was editing died with the turn.
                 self.close_queue_review();
                 let stranded = self.agent.on_turn_end();
@@ -415,40 +410,5 @@ impl App {
         s.thinking_block = None;
         s.thinking.clear();
         s.thinking_started = None;
-    }
-
-    /// An extension's `input.request`: the question panel shows it and the
-    /// reply goes back through the host. Extension text renders inert,
-    /// like every block. One panel at a time; the rest queue.
-    pub(super) fn question_requested(&mut self, request: crate::core::api::InputRequest) {
-        let sanitized = crate::tui::questionpanel::Question::new(
-            request.id,
-            crate::core::tools::sanitize_display(&request.question),
-            request
-                .options
-                .into_iter()
-                .map(|(label, description)| {
-                    (
-                        crate::core::tools::sanitize_display(&label),
-                        crate::core::tools::sanitize_display(&description),
-                    )
-                })
-                .collect(),
-            request.freeform,
-        );
-        if self.question.is_none() {
-            self.question = Some(sanitized);
-        } else {
-            self.question_queue.push_back(sanitized);
-        }
-    }
-
-    /// Deliver the answer (or dismissal) to the asking extension, off the
-    /// frame loop — the host write must never block a paint.
-    pub(super) fn question_answered(&mut self, id: String, reply: Option<String>) {
-        let host = self.host.clone();
-        tokio::spawn(async move {
-            host.answer_input(&id, reply).await;
-        });
     }
 }

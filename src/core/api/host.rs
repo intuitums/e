@@ -42,9 +42,6 @@ pub struct ToolProgress {
 
 struct Extension {
     manifest: Manifest,
-    /// The extension's file stem — unique per discovered file, and the
-    /// prefix that scopes `input.request` ids to this extension.
-    source: String,
     /// Outgoing lines to the process's stdin.
     writer: mpsc::Sender<String>,
     pending: PendingMap,
@@ -99,16 +96,11 @@ impl FlagValue {
 
 impl ExtensionHost {
     /// Discover and start every extension. `notices` receives extension
-    /// `notify` messages and startup diagnostics for the transcript;
-    /// `questions` receives `input.request` notifications — a question for
-    /// the person at the keyboard, answered through [`Self::answer_input`].
-    pub async fn start(
-        notices: mpsc::Sender<String>,
-        questions: mpsc::Sender<protocol::InputRequest>,
-    ) -> Arc<ExtensionHost> {
+    /// `notify` messages and startup diagnostics for the transcript.
+    pub async fn start(notices: mpsc::Sender<String>) -> Arc<ExtensionHost> {
         let mut extensions = Vec::new();
         for path in discover() {
-            match spawn(&path, notices.clone(), questions.clone()).await {
+            match spawn(&path, notices.clone()).await {
                 Ok(ext) => extensions.push(ext),
                 Err(reason) => {
                     let name = path
@@ -631,27 +623,6 @@ impl ExtensionHost {
 
     /// Fire-and-forget lifecycle event to every extension. try_send: a child
     /// that stopped reading stdin gets its queue dropped, never our loop.
-    /// Deliver the person's answer to an `input.request`. `None` means the
-    /// question was dismissed. The scoped id is the extension's source name
-    /// and its own id (`"ask/q1"`); a dead or gone extension swallows the
-    /// reply silently — its tool call times out on its own.
-    pub async fn answer_input(&self, scoped_id: &str, answer: Option<String>) {
-        let Some((source, rest)) = scoped_id.split_once('/') else {
-            return;
-        };
-        let Some(ext) = self.extensions.iter().find(|e| e.source == source) else {
-            return;
-        };
-        let _ = self
-            .request(
-                ext,
-                "input.reply",
-                json!({ "id": rest, "answer": answer }),
-                Duration::from_secs(5),
-            )
-            .await;
-    }
-
     pub async fn event(&self, name: &str, params: Value) {
         let line =
             json!({"method": "event", "params": {"name": name, "extra": params}}).to_string();
@@ -790,11 +761,7 @@ fn is_executable(_path: &std::path::Path) -> bool {
     true
 }
 
-async fn spawn(
-    path: &PathBuf,
-    notices: mpsc::Sender<String>,
-    questions: mpsc::Sender<protocol::InputRequest>,
-) -> Result<Extension, String> {
+async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extension, String> {
     let mut child = tokio::process::Command::new(path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -838,10 +805,6 @@ async fn spawn(
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
     let progress: ProgressMap = Arc::new(Mutex::new(HashMap::new()));
     let alive = Arc::new(AtomicBool::new(true));
-    let source = path
-        .file_stem()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
 
     // Writer task: serialized line output.
     let (writer, mut writer_rx) = mpsc::channel::<String>(64);
@@ -894,8 +857,6 @@ async fn spawn(
     let pending_reader = pending.clone();
     let progress_reader = progress.clone();
     let alive_reader = alive.clone();
-    let questions_reader = questions.clone();
-    let source_reader = source.clone();
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
         while let Ok(Some(line)) = read_bounded_line(&mut reader, MAX_EXTENSION_LINE_BYTES).await {
@@ -913,15 +874,6 @@ async fn spawn(
                     // Notices are best-effort UI output. A full transcript
                     // channel must never hold up response dispatch.
                     let _ = notices.try_send(message);
-                }
-                Some(Incoming::InputRequest(request)) => {
-                    // Scope the extension's own id so answers route back to
-                    // the asking process even when two extensions collide.
-                    let scoped = protocol::InputRequest {
-                        id: format!("{source_reader}/{}", request.id),
-                        ..request
-                    };
-                    let _ = questions_reader.send(scoped).await;
                 }
                 Some(Incoming::ToolUpdate { id, stream, chunk }) => {
                     let target = progress_reader
@@ -954,7 +906,6 @@ async fn spawn(
     // Handshake.
     let ext = Extension {
         manifest: Manifest::default(),
-        source,
         writer,
         pending,
         progress,

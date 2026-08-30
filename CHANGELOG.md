@@ -7,15 +7,14 @@ the pipeline publishes.
 
 ## Unreleased
 
-- The `ask` tool moved out of the core. Asking is not a harness feature —
-  it is the extensions API working as designed: the wire protocol gains an
-  `input.request` notification (a question, optional numbered options, a
-  freeform slot) that e answers through an `input.reply` request, and one
-  generic footer question panel renders whatever any extension asks.
-  `docs/extensions/ask.mjs` builds the model-facing `ask` tool on that
-  surface in ~80 lines; headless and RPC frontends decline every question
-  with a warning, as before. The core loses the ask schema, the answer
-  registry, and its read-only special case.
+- The `ask` tool is retired outright, not moved. A coding agent decides
+  and acts; it does not interview its user. The core loses the ask schema,
+  the answer registry, the read-only special case, and the question panel,
+  and the extensions protocol does not grow a replacement: an extension
+  that needs the person at the keyboard gets the answer from configuration
+  under `~/.e/` or fails loudly and is steered, like any other missing
+  input. If a question capability ever earns its way back in, it does so
+  by need, with a use in hand.
 - The queued-prompt review no longer pauses the queue or holds the turn
   open. Pending prompts are keyed; the review edits by key, so an entry
   the turn already steered commits as a fresh prompt instead of being

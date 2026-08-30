@@ -237,10 +237,6 @@ struct App {
     login_sequence: u64,
     /// Extension host; commands and prompts come back on `results`.
     host: std::sync::Arc<crate::core::api::ExtensionHost>,
-    /// Extension `input.request` questions land here (host side); the frame
-    /// loop's `questions_rx` receives them. Kept so /reload hands the same
-    /// channel to the restarted host.
-    questions: tokio::sync::mpsc::Sender<crate::core::api::InputRequest>,
     results: tokio::sync::mpsc::Sender<AppJob>,
     /// Completed input-hook calls waiting for earlier submissions to finish.
     input_verdicts: PendingInputVerdicts,
@@ -277,11 +273,9 @@ struct App {
     /// changed (the cache's fingerprint), or the width or depth moved —
     /// not on every 33ms paint.
     viewer_cache: Option<(u64, usize, bool, Vec<String>)>,
-    /// The ask tool's open question, and any batch-mates queued behind it.
-    question: Option<crate::tui::questionpanel::Question>,
-    question_queue: std::collections::VecDeque<crate::tui::questionpanel::Question>,
     /// The queued-prompt review: ↑ on an empty composer while prompts wait
-    /// pauses the queue and loads the newest into the composer for editing.
+    /// loads the newest into the composer for editing; the turn keeps
+    /// steering while the review edits the queue.
     queue_review: Option<QueueReview>,
     /// Bumped whenever session identity changes (/new, resume). Async work
     /// launched in one epoch may not mutate a later one: a late extension
@@ -563,8 +557,6 @@ impl App {
         if let Some(stage) = &self.trust {
             let dir = self.agent.cwd().to_string_lossy().into_owned();
             lines.extend(trustpanel::render(stage, &self.theme, width, &dir));
-        } else if let Some(question) = &self.question {
-            lines.extend(question.render(&self.theme, width));
         } else if let Some(stage) = &self.auth {
             lines.extend(authpanel::render(
                 stage,
@@ -585,18 +577,15 @@ impl App {
             context_used: self.context_tokens,
             context_total: Some(window),
         };
-        let question_hint = self.question.as_ref().map(|q| q.hint(width));
-        let hint = question_hint.as_deref().or_else(|| {
-            self.settings
-                .as_ref()
-                .map(|_| crate::tui::settingspanel::HINT)
-                .or_else(|| self.menu.as_ref().map(|m| m.hint))
-                .map(|h| crate::tui::menu::degrade_hint(h, width))
-        });
+        let hint = self
+            .settings
+            .as_ref()
+            .map(|_| crate::tui::settingspanel::HINT)
+            .or_else(|| self.menu.as_ref().map(|m| m.hint))
+            .map(|h| crate::tui::menu::degrade_hint(h, width));
         // A framed surface's bottom divider sits directly above the hint
         // row — the blank spacer belongs only to the bare-composer layout.
         let panel_open = self.trust.is_some()
-            || self.question.is_some()
             || self.auth.is_some()
             || self.settings.is_some()
             || self.menu.is_some();
@@ -656,7 +645,6 @@ impl App {
     /// deletes the entry. Returns true when the key was consumed.
     fn queue_review_key(&mut self, code: KeyCode) -> bool {
         if self.trust.is_some()
-            || self.question.is_some()
             || self.auth.is_some()
             || self.settings.is_some()
             || self.menu.is_some()
@@ -1600,11 +1588,10 @@ impl App {
         self.reload_block = Some(self.transcript.push(Block::new(Kind::Notice, "reloading…")));
         let old = self.host.clone();
         let jobs = self.jobs.clone();
-        let questions = self.questions.clone();
         let results = self.results.clone();
         tokio::spawn(async move {
             old.shutdown().await;
-            let host = crate::core::api::ExtensionHost::start(jobs, questions).await;
+            let host = crate::core::api::ExtensionHost::start(jobs).await;
             let _ = results.send(AppJob::Reloaded(host)).await;
         });
     }
@@ -1946,12 +1933,6 @@ fn rewind_target(
 /// swallows the chord, `None` means "not mentioned"); anything left
 /// unmentioned falls through to e's built-in bindings below, so an empty or
 /// missing file reproduces this function's behavior exactly.
-/// Question panels handle local input but leave global interrupt and exit keys alone.
-fn question_owns_key(event: &KeyEvent) -> bool {
-    let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
-    !(ctrl && matches!(event.code, KeyCode::Char('c') | KeyCode::Char('d')))
-}
-
 fn key_of(event: &KeyEvent, keymap: &crate::core::config::keybindings::Keymap) -> Option<Key> {
     let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
     let alt = event.modifiers.contains(KeyModifiers::ALT);
@@ -2013,8 +1994,6 @@ pub struct RunOptions {
 pub async fn run(
     options: RunOptions,
     host: std::sync::Arc<crate::core::api::ExtensionHost>,
-    questions_tx: tokio::sync::mpsc::Sender<crate::core::api::InputRequest>,
-    mut questions_rx: tokio::sync::mpsc::Receiver<crate::core::api::InputRequest>,
     jobs_tx: tokio::sync::mpsc::Sender<String>,
     mut jobs_rx: tokio::sync::mpsc::Receiver<String>,
 ) -> std::io::Result<()> {
@@ -2091,7 +2070,6 @@ pub async fn run(
         login_task: None,
         login_sequence: 0,
         host,
-        questions: questions_tx,
         results: results_tx,
         input_verdicts: PendingInputVerdicts::default(),
         compacting: false,
@@ -2108,8 +2086,6 @@ pub async fn run(
         output_seq: 0,
         viewer: None,
         viewer_cache: None,
-        question: None,
-        question_queue: std::collections::VecDeque::new(),
         queue_review: None,
         session_epoch: 0,
         update_installed: None,
@@ -2295,48 +2271,6 @@ pub async fn run(
                                     }
                                 }
                                 _ => {}
-                            }
-                        } else if app.question.is_some() && question_owns_key(&k) {
-                            // The ask tool's panel owns its local keys while open.
-                            // Esc dismisses the question (the tool records a
-                            // cancel) without aborting the turn; a digit
-                            // chooses and answers in one stroke.
-                            let mut submit: Option<Option<String>> = None;
-                            if let Some(q) = &mut app.question {
-                                match k.code {
-                                    KeyCode::Esc => submit = Some(None),
-                                    KeyCode::Up => q.step(-1),
-                                    KeyCode::Down => q.step(1),
-                                    KeyCode::Enter => {
-                                        if let Some(text) = q.answer() {
-                                            submit = Some(Some(text));
-                                        }
-                                    }
-                                    KeyCode::Backspace if q.freeform_selected() => {
-                                        q.freeform.pop();
-                                    }
-                                    KeyCode::Char(c) if !ctrl => {
-                                        if q.freeform_selected() {
-                                            q.freeform.push(c);
-                                        } else if let Some(n) = c.to_digit(10) {
-                                            if q.choose(n as usize) {
-                                                if let Some(text) = q.answer() {
-                                                    submit = Some(Some(text));
-                                                }
-                                            }
-                                        } else if q.allow_freeform {
-                                            q.selected = q.options.len();
-                                            q.freeform.push(c);
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            if let Some(reply) = submit {
-                                if let Some(q) = app.question.take() {
-                                    app.question_answered(q.id, reply);
-                                }
-                                app.question = app.question_queue.pop_front();
                             }
                         } else if let Some(panel) = &mut app.settings {
                             let mut setting_error = None;
@@ -2714,11 +2648,6 @@ pub async fn run(
                     app.notice(message);
                 }
             }
-            request = questions_rx.recv() => {
-                if let Some(request) = request {
-                    app.question_requested(request);
-                }
-            }
             outcome = logins_rx.recv() => {
                 // Control flow hangs off the typed outcome; the human-readable
                 // notice arrives separately on `jobs`.
@@ -2970,16 +2899,6 @@ mod tests {
     static KEY_OF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn question_panel_leaves_global_interrupt_and_exit_keys_unhandled() {
-        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
-        let plain_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
-        assert!(!question_owns_key(&ctrl_c));
-        assert!(!question_owns_key(&ctrl_d));
-        assert!(question_owns_key(&plain_c));
-    }
-
-    #[test]
     fn key_of_matches_the_built_in_bindings_when_the_keymap_is_empty() {
         let keymap = crate::core::config::keybindings::Keymap::empty();
         let ctrl_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
@@ -3211,10 +3130,6 @@ mod tests {
             login_task: None,
             login_sequence: 0,
             host: crate::core::api::ExtensionHost::empty(),
-            questions: {
-                let (tx, _) = tokio::sync::mpsc::channel(1);
-                tx
-            },
             results,
             input_verdicts: PendingInputVerdicts::default(),
             compacting: false,
@@ -3231,8 +3146,6 @@ mod tests {
             output_seq: 0,
             viewer: None,
             viewer_cache: None,
-            question: None,
-            question_queue: std::collections::VecDeque::new(),
             queue_review: None,
             session_epoch: 0,
             update_installed: None,

@@ -15,15 +15,6 @@
 //!   {"id":1,"result":{…}} | {"id":1,"error":"message"}
 //!   {"method":"notify","params":{"message":"…"}}          (any time)
 //!   {"method":"tool.update","params":{"id":7,"stream":"stdout","chunk":"…"}}
-//!   {"method":"input.request","params":{"id":"q1","question":"…",
-//!             "options":[{"label","description"}…],"freeform":true}}
-//!         the person answers; e sends it back as an `input.reply` request
-//!         with the same `id`. A request an extension may make any time —
-//!         typically from inside a running `tool_call` while it waits.
-//!   e → extension:
-//!   {"id":9,"method":"input.reply","params":{"id":"q1","answer":"…"}}
-//!         `answer` is the typed or chosen text, or `null` when the person
-//!         dismissed the question.
 //!
 //! The initialize result is the manifest:
 //!   {"name":"…","version":"…",
@@ -198,18 +189,6 @@ pub struct Relaunch {
     pub env: BTreeMap<String, Option<String>>,
 }
 
-/// An extension's request for the person at the keyboard: a question,
-/// optional numbered choices, and whether a typed answer is welcome.
-/// Answered through [`crate::core::api::ExtensionHost::answer_input`] with
-/// the same (e-scoped) id.
-#[derive(Debug, Clone)]
-pub struct InputRequest {
-    pub id: String,
-    pub question: String,
-    pub options: Vec<(String, String)>,
-    pub freeform: bool,
-}
-
 /// One parsed line arriving from an extension.
 #[derive(Debug)]
 pub enum Incoming {
@@ -225,7 +204,6 @@ pub enum Incoming {
         stream: crate::core::tools::OutputStream,
         chunk: String,
     },
-    InputRequest(InputRequest),
 }
 
 pub fn parse_incoming(line: &str) -> Option<Incoming> {
@@ -264,38 +242,6 @@ pub fn parse_incoming(line: &str) -> Option<Incoming> {
             return Some(Incoming::ToolUpdate { id, stream, chunk });
         }
     }
-    if value.get("method").and_then(Value::as_str) == Some("input.request") {
-        let id = value["params"]["id"].as_str()?.to_string();
-        let question = value["params"]["question"].as_str()?.trim().to_string();
-        if question.is_empty() {
-            return None;
-        }
-        let options: Vec<(String, String)> = value["params"]["options"]
-            .as_array()
-            .map(|list| {
-                list.iter()
-                    .filter_map(|o| {
-                        let label = o["label"].as_str()?.trim();
-                        if label.is_empty() {
-                            return None;
-                        }
-                        Some((
-                            label.to_string(),
-                            o["description"].as_str().unwrap_or("").trim().to_string(),
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        // With no choices at all the freeform slot is the only way to answer.
-        let freeform = value["params"]["freeform"].as_bool().unwrap_or(true) || options.is_empty();
-        return Some(Incoming::InputRequest(InputRequest {
-            id,
-            question,
-            options,
-            freeform,
-        }));
-    }
     None
 }
 
@@ -331,44 +277,6 @@ mod tests {
             }
             other => panic!("unexpected incoming message: {other:?}"),
         }
-    }
-
-    #[test]
-    fn input_requests_parse_and_freeform_defaults_to_the_choices() {
-        let parsed = parse_incoming(
-            r#"{"method":"input.request","params":{"id":"q1","question":"Ship it?","options":[{"label":"yes","description":"merge now"}]}}"#,
-        )
-        .unwrap();
-        match parsed {
-            Incoming::InputRequest(request) => {
-                assert_eq!(request.id, "q1");
-                assert_eq!(request.question, "Ship it?");
-                assert_eq!(request.options, vec![("yes".into(), "merge now".into())]);
-                // Freeform stays on unless explicitly refused — the ask
-                // tool's old default, so a question is always answerable.
-                assert!(request.freeform);
-            }
-            other => panic!("unexpected incoming message: {other:?}"),
-        }
-        let strict = parse_incoming(
-            r#"{"method":"input.request","params":{"id":"q0","question":"Pick","options":[{"label":"a"}],"freeform":false}}"#,
-        )
-        .unwrap();
-        assert!(matches!(strict, Incoming::InputRequest(r) if !r.freeform));
-        // No options: the typed slot is the only way to answer. An empty
-        // question or missing id is not a request at all.
-        let freeform = parse_incoming(
-            r#"{"method":"input.request","params":{"id":"q2","question":"Continue?"}}"#,
-        )
-        .unwrap();
-        assert!(matches!(freeform, Incoming::InputRequest(r) if r.freeform));
-        assert!(parse_incoming(
-            r#"{"method":"input.request","params":{"id":"q3","question":"   "}}"#
-        )
-        .is_none());
-        assert!(
-            parse_incoming(r#"{"method":"input.request","params":{"question":"x"}}"#).is_none()
-        );
     }
 
     #[test]
