@@ -65,7 +65,7 @@ jobs:
             downloaded update in place)."
           } >> notes.md
           gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --draft --title "e $TAG" --notes-file notes.md
+            gh release create "$TAG" --draft --title "$TAG" --notes-file notes.md
 
   build:
     name: Build (${{ matrix.runner }})
