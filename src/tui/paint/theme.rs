@@ -154,5 +154,9 @@ pub fn resolve(selection: &str, detected_light: bool) -> Theme {
         return theme;
     }
     let light = name == "light" || (name != "dark" && detected_light);
+    // The dark theme is embedded in this binary; if it failed to parse,
+    // that is a build bug CI catches, not a runtime state. Scoped allow,
+    // proof: compile-time data.
+    #[allow(clippy::expect_used)]
     load_bundled(light).unwrap_or_else(|_| load_bundled(false).expect("embedded dark"))
 }

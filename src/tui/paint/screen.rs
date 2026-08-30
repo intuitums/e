@@ -107,9 +107,7 @@ pub(crate) fn scroll_rows(prev_len: usize, len: usize, height: usize) -> usize {
     // holds exactly one slot per row, and a reflow (resize, tab switch) can
     // make a frame jump by hundreds of rows at once. Uncapped, drain(0..scroll)
     // panicked past the shadow (#the blank-screen freeze).
-    overflow
-        .saturating_sub(prev_overflow)
-        .min(height)
+    overflow.saturating_sub(prev_overflow).min(height)
 }
 
 impl Screen {

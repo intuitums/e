@@ -82,7 +82,12 @@ pub async fn run(
                         if last["role"] == "user"
                             && last["parts"][0]["functionResponse"].is_object() =>
                     {
-                        last["parts"].as_array_mut().unwrap().push(part);
+                        // The guard proves `parts` is a non-empty array; the
+                        // else arm is the safe fallback, not a panic.
+                        match last["parts"].as_array_mut() {
+                            Some(parts) => parts.push(part),
+                            None => contents.push(json!({"role": "user", "parts": [part]})),
+                        }
                     }
                     _ => contents.push(json!({"role": "user", "parts": [part]})),
                 }

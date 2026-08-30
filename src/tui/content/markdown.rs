@@ -352,14 +352,15 @@ pub fn wrap_styled(styled: &str, width: usize) -> Vec<String> {
             let lone =
                 lines[last].len() == 1 && !toks[lines[last][0]].glue && lines[last - 1].len() >= 2;
             if lone {
-                let moved = *lines[last - 1].last().unwrap();
-                let orphan = lines[last][0];
-                if !toks[moved].breaks_after
-                    && !toks[moved].glue
-                    && toks[moved].width + 1 + toks[orphan].width <= width
-                {
-                    lines[last - 1].pop();
-                    lines[last].insert(0, moved);
+                if let Some(&moved) = lines[last - 1].last() {
+                    let orphan = lines[last][0];
+                    if !toks[moved].breaks_after
+                        && !toks[moved].glue
+                        && toks[moved].width + 1 + toks[orphan].width <= width
+                    {
+                        lines[last - 1].pop();
+                        lines[last].insert(0, moved);
+                    }
                 }
             }
         }

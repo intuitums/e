@@ -7,6 +7,20 @@
 //! implementation. Its Rust items are not a stable third-party API; e's
 //! supported external surface is the CLI, file formats, and extension wire
 //! protocol documented in `docs/compatibility.md`.
+//
+// No panics in shipped code: explicit panic sites (unwrap, expect, panic!,
+// unreachable!) are denied outside test builds. Any that remain carry a
+// scoped allow with a proof comment — why the site is unreachable at
+// runtime. Panic-freedom is a maintenance rule, not an aspiration.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )
+)]
 
 pub mod core;
 pub mod tui;

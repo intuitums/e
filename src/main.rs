@@ -3,6 +3,16 @@
 //! Session UI lives in `tui::app` — this file owns flags, one-shot commands
 //! (`auth`, `ask`, `docs`, `update`), prompt text arriving on piped stdin,
 //! then opens the frame loop.
+// Same contract as the library: no panic sites outside test builds.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )
+)]
 
 use crossterm::terminal;
 use std::io::IsTerminal as _;
@@ -164,21 +174,25 @@ e -v, --version"
             // Parsing accepts `--no-network` (a no-op: diagnostics are
             // always local-only); any positional word after the command is
             // a usage error.
-            let sub_idx = diagnostic_args
+            // The block only runs when sub is one of those two words, so
+            // the position always resolves; None simply skips the usage
+            // check rather than panicking if that ever changes.
+            if let Some(sub_idx) = diagnostic_args
                 .iter()
                 .position(|a| a == "doctor" || a == "providers")
-                .unwrap();
-            if sub_idx != diagnostic_args.len() - 1 {
-                usage_error(
-                    &host,
-                    false,
-                    if doctor {
-                        "usage: e doctor [--no-network]".into()
-                    } else {
-                        "usage: e providers".into()
-                    },
-                )
-                .await;
+            {
+                if sub_idx != diagnostic_args.len() - 1 {
+                    usage_error(
+                        &host,
+                        false,
+                        if doctor {
+                            "usage: e doctor [--no-network]".into()
+                        } else {
+                            "usage: e providers".into()
+                        },
+                    )
+                    .await;
+                }
             }
 
             let report = e::core::providers::diagnostics::report(&host);

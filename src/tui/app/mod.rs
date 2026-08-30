@@ -316,7 +316,12 @@ impl App {
             let rows = self.project_rows(width, full);
             self.viewer_cache = Some((fingerprint, width, full, rows));
         }
-        &self.viewer_cache.as_ref().unwrap().3
+        match &self.viewer_cache {
+            Some((_, _, _, rows)) => rows,
+            // Unreachable: the cache was just filled above. An empty slice
+            // renders as nothing rather than panicking if that ever breaks.
+            None => &[],
+        }
     }
 
     /// Everything the review projection reads, as one number.
@@ -2372,17 +2377,19 @@ pub async fn run(
                                 (AuthStage::ApiKey { .. }, KeyCode::Backspace)
                                     if app.editor.is_empty() =>
                                 {
-                                    let provider = match &*stage {
-                                        AuthStage::ApiKey { provider } => provider.clone(),
-                                        _ => unreachable!(),
-                                    };
-                                    app.pending_key = None;
-                                    app.editor.mask = false;
-                                    let selected = crate::core::providers::registry::key_providers()
-                                        .iter()
-                                        .position(|p| p.name == provider)
-                                        .unwrap_or(0);
-                                    *stage = AuthStage::Key { selected };
+                                    // The outer guard matched ApiKey; if the
+                                    // stage somehow moved on, fall through to
+                                    // the default handling instead of panicking.
+                                    if let AuthStage::ApiKey { provider } = &*stage {
+                                        let provider = provider.clone();
+                                        app.pending_key = None;
+                                        app.editor.mask = false;
+                                        let selected = crate::core::providers::registry::key_providers()
+                                            .iter()
+                                            .position(|p| p.name == provider)
+                                            .unwrap_or(0);
+                                        *stage = AuthStage::Key { selected };
+                                    }
                                 }
                                 (AuthStage::Waiting { back }, KeyCode::Backspace) => {
                                     let back = *back;
@@ -2439,13 +2446,28 @@ pub async fn run(
                             && (matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc)
                                 || (k.code == KeyCode::Tab
                                     && !k.modifiers.contains(KeyModifiers::SHIFT)
-                                    && app.menu.as_ref().unwrap().has_tabs()))
+                                    && app
+                                        .menu
+                                        .as_ref()
+                                        .is_some_and(|menu| menu.has_tabs())))
                             && !ctrl
                         {
                             match k.code {
-                                KeyCode::Up => { app.menu.as_mut().unwrap().step(-1); }
-                                KeyCode::Down => { app.menu.as_mut().unwrap().step(1); }
-                                KeyCode::Tab => { app.menu.as_mut().unwrap().cycle_tab(); }
+                                KeyCode::Up => {
+                                    if let Some(menu) = app.menu.as_mut() {
+                                        menu.step(-1);
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    if let Some(menu) = app.menu.as_mut() {
+                                        menu.step(1);
+                                    }
+                                }
+                                KeyCode::Tab => {
+                                    if let Some(menu) = app.menu.as_mut() {
+                                        menu.cycle_tab();
+                                    }
+                                }
                                 KeyCode::Enter => { app.select_menu(); }
                                 KeyCode::Esc => {
                                     app.menu = None;

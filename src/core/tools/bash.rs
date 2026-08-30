@@ -478,7 +478,13 @@ where
         }
     }
 
-    let status = status.expect("loop stops only after child exit");
+    // The loop only exits once try_wait() reported an exit; if that
+    // invariant somehow broke, "killed" is the honest reading — the child's
+    // fate is unknown — and never a panic.
+    // The loop only exits once try_wait() reported an exit; if that
+    // invariant somehow broke, an unknown failure is the honest reading —
+    // never a panic.
+    let exit_code = status.as_ref().and_then(|s| s.code());
     // The model's copy: decoded, stripped of colour codes and progress-bar
     // rewrites — token noise it should never pay for.
     let mut combined =
@@ -497,12 +503,12 @@ where
         (ToolOutcome::Cancelled, "cancelled".to_string())
     } else if timed_out {
         (ToolOutcome::TimedOut, format!("timeout {timeout}s"))
-    } else if status.success() {
+    } else if exit_code == Some(0) {
         (ToolOutcome::Completed, "done".to_string())
     } else {
         (
             ToolOutcome::Failed,
-            format!("exit {}", status.code().unwrap_or(-1)),
+            format!("exit {}", exit_code.unwrap_or(-1)),
         )
     };
     if outcome == ToolOutcome::TimedOut {
@@ -654,7 +660,10 @@ fn drain_complete_utf8(carry: &mut Vec<u8>) -> String {
             }
             Err(e) => {
                 let valid = e.valid_up_to();
-                out.push_str(std::str::from_utf8(&carry[..valid]).expect("validated prefix"));
+                // valid_up_to() proves the prefix decodes; lossy is byte-
+                // identical there and degrades instead of panicking if a
+                // future refactor breaks that proof.
+                out.push_str(&String::from_utf8_lossy(&carry[..valid]));
                 match e.error_len() {
                     Some(bad) => {
                         out.push('\u{FFFD}');

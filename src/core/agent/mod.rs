@@ -539,9 +539,11 @@ impl Agent {
     /// first message is committed. `/tree` reads this file directly rather
     /// than tracking the graph in memory.
     pub fn session_path(&self) -> Option<PathBuf> {
+        // Poison-contained like every other lock here: a panicked holder
+        // must not cascade into panics on every later reader.
         self.session
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|s| s.path().to_path_buf())
     }

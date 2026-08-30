@@ -55,9 +55,11 @@ pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
             Err(e) => return err(format!("read {path}: {e}"), "read", path),
         };
         let after = super::file_stamp(&full);
-        if before.is_some() && before == after {
-            stable = Some((text, after.unwrap()));
-            break;
+        if let (Some(before), Some(after)) = (before, after) {
+            if before == after {
+                stable = Some((text, after));
+                break;
+            }
         }
     }
     let Some((text, stamp)) = stable else {
