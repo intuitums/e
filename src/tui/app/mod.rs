@@ -74,12 +74,13 @@ struct Viewer {
     scroll: usize,
 }
 
-/// The queued-prompt review's working state: a snapshot of the paused
+/// The queued-prompt review's working state: a keyed snapshot of the
 /// queue (oldest first), which entry the composer holds, and whether a
-/// draft is showing at all (↓ past the newest hides it while the queue
-/// stays paused).
+/// draft is showing at all (↓ past the newest hides it). The turn keeps
+/// steering meanwhile — an entry it already drained commits as a fresh
+/// prompt instead of resurrecting the sent text.
 struct QueueReview {
-    entries: Vec<String>,
+    entries: Vec<(u64, String)>,
     dirty: Vec<bool>,
     selected: usize,
     visible: bool,
@@ -236,6 +237,10 @@ struct App {
     login_sequence: u64,
     /// Extension host; commands and prompts come back on `results`.
     host: std::sync::Arc<crate::core::api::ExtensionHost>,
+    /// Extension `input.request` questions land here (host side); the frame
+    /// loop's `questions_rx` receives them. Kept so /reload hands the same
+    /// channel to the restarted host.
+    questions: tokio::sync::mpsc::Sender<crate::core::api::InputRequest>,
     results: tokio::sync::mpsc::Sender<AppJob>,
     /// Completed input-hook calls waiting for earlier submissions to finish.
     input_verdicts: PendingInputVerdicts,
@@ -512,7 +517,7 @@ impl App {
             let cap = (height / 2 + 1).max(3);
             let mut composer = self.editor.render(&self.theme, width, cap);
             // The queued banner band: the collapsed summary (ink-bright),
-            // a paused hint when the review holds the queue, a gap row —
+            // the review's hint line while it edits the queue, a gap row —
             // and with chrome above it the composer trades its leading
             // blank for its top divider, the reference's rule.
             let steering = self.agent.queued_count();
@@ -542,11 +547,11 @@ impl App {
                 lines.push(self.theme.fg("userMessageText", &label));
                 if let Some(review) = &self.queue_review {
                     let hint = if !review.visible {
-                        "steering paused · enter to apply"
+                        "reviewing the queue · enter to apply"
                     } else if self.editor.is_empty() {
-                        "paused · delete again to remove queued prompt · enter to send unchanged"
+                        "delete again to remove the queued prompt · enter to send unchanged"
                     } else {
-                        "paused · enter to send"
+                        "enter to apply the edit"
                     };
                     lines.push(self.theme.fg("dim", hint));
                 }
@@ -660,13 +665,12 @@ impl App {
         }
         let Some(mut review) = self.queue_review.take() else {
             if code == KeyCode::Up && self.editor.is_empty() && self.active.is_some() {
-                let entries = self.agent.pause_queue();
+                let entries = self.agent.queue_snapshot();
                 let Some(selected) = entries.len().checked_sub(1) else {
-                    self.agent.resume_queue();
                     return false;
                 };
                 let dirty = vec![false; entries.len()];
-                self.editor.set_text(&entries[selected]);
+                self.editor.set_text(&entries[selected].1);
                 self.queue_review = Some(QueueReview {
                     entries,
                     dirty,
@@ -678,8 +682,8 @@ impl App {
             return false;
         };
         let stash = |review: &mut QueueReview, text: String| {
-            if review.entries[review.selected] != text {
-                review.entries[review.selected] = text;
+            if review.entries[review.selected].1 != text {
+                review.entries[review.selected].1 = text;
                 review.dirty[review.selected] = true;
             }
         };
@@ -689,12 +693,12 @@ impl App {
                     stash(&mut review, self.editor.text());
                     if review.selected > 0 {
                         review.selected -= 1;
-                        self.editor.set_text(&review.entries[review.selected]);
+                        self.editor.set_text(&review.entries[review.selected].1);
                     }
                     true
                 } else if self.editor.is_empty() {
                     review.visible = true;
-                    self.editor.set_text(&review.entries[review.selected]);
+                    self.editor.set_text(&review.entries[review.selected].1);
                     true
                 } else {
                     false
@@ -704,7 +708,7 @@ impl App {
                 stash(&mut review, self.editor.text());
                 if review.selected + 1 < review.entries.len() {
                     review.selected += 1;
-                    self.editor.set_text(&review.entries[review.selected]);
+                    self.editor.set_text(&review.entries[review.selected].1);
                 } else {
                     self.editor.set_text("");
                     review.visible = false;
@@ -724,36 +728,33 @@ impl App {
                     // Only edited entries rewrite: a trim drops an entry that
                     // emptied, and leaves untouched entries verbatim — a
                     // multi-line prompt's trailing newline is not the user's
-                    // doing.
-                    let entries: Vec<String> = review
-                        .entries
-                        .iter()
-                        .zip(&review.dirty)
-                        .filter_map(|(entry, dirty)| {
-                            if !dirty {
-                                Some(entry.clone())
-                            } else {
-                                let trimmed = entry.trim().to_string();
-                                (!trimmed.is_empty()).then_some(trimmed)
-                            }
-                        })
-                        .collect();
-                    self.agent.set_queued(entries);
+                    // doing. An edit to an entry the turn already drained
+                    // lands as a fresh prompt, not a resurrection.
+                    let mut edits = Vec::new();
+                    let mut removed = Vec::new();
+                    for ((key, entry), dirty) in review.entries.iter().zip(&review.dirty) {
+                        if !dirty {
+                            continue;
+                        }
+                        match entry.trim() {
+                            "" => removed.push(*key),
+                            trimmed => edits.push((*key, trimmed.to_string())),
+                        }
+                    }
+                    self.agent.update_queued(edits, removed);
                 }
                 self.editor.set_text("");
-                self.agent.resume_queue();
                 return true;
             }
             KeyCode::Backspace if review.visible && self.editor.is_empty() => {
-                review.entries.remove(review.selected);
+                let (key, _) = review.entries.remove(review.selected);
                 review.dirty.remove(review.selected);
-                self.agent.set_queued(review.entries.clone());
+                self.agent.update_queued(Vec::new(), vec![key]);
                 if review.entries.is_empty() {
-                    self.agent.resume_queue();
                     return true;
                 }
                 review.selected = review.selected.min(review.entries.len() - 1);
-                self.editor.set_text(&review.entries[review.selected]);
+                self.editor.set_text(&review.entries[review.selected].1);
                 true
             }
             _ => false,
@@ -763,11 +764,11 @@ impl App {
     }
 
     /// Close the review without committing the visible draft. The draft is
-    /// discarded with the review, and the queue resumes as it stands.
+    /// discarded with the review; the queue was never paused, so there is
+    /// nothing to resume.
     fn close_queue_review(&mut self) {
         if self.queue_review.take().is_some() {
             self.editor.set_text("");
-            self.agent.resume_queue();
         }
     }
 
@@ -1599,10 +1600,11 @@ impl App {
         self.reload_block = Some(self.transcript.push(Block::new(Kind::Notice, "reloading…")));
         let old = self.host.clone();
         let jobs = self.jobs.clone();
+        let questions = self.questions.clone();
         let results = self.results.clone();
         tokio::spawn(async move {
             old.shutdown().await;
-            let host = crate::core::api::ExtensionHost::start(jobs).await;
+            let host = crate::core::api::ExtensionHost::start(jobs, questions).await;
             let _ = results.send(AppJob::Reloaded(host)).await;
         });
     }
@@ -2011,6 +2013,8 @@ pub struct RunOptions {
 pub async fn run(
     options: RunOptions,
     host: std::sync::Arc<crate::core::api::ExtensionHost>,
+    questions_tx: tokio::sync::mpsc::Sender<crate::core::api::InputRequest>,
+    mut questions_rx: tokio::sync::mpsc::Receiver<crate::core::api::InputRequest>,
     jobs_tx: tokio::sync::mpsc::Sender<String>,
     mut jobs_rx: tokio::sync::mpsc::Receiver<String>,
 ) -> std::io::Result<()> {
@@ -2087,6 +2091,7 @@ pub async fn run(
         login_task: None,
         login_sequence: 0,
         host,
+        questions: questions_tx,
         results: results_tx,
         input_verdicts: PendingInputVerdicts::default(),
         compacting: false,
@@ -2329,7 +2334,7 @@ pub async fn run(
                             }
                             if let Some(reply) = submit {
                                 if let Some(q) = app.question.take() {
-                                    app.agent.answer(q.id, reply);
+                                    app.question_answered(q.id, reply);
                                 }
                                 app.question = app.question_queue.pop_front();
                             }
@@ -2707,6 +2712,11 @@ pub async fn run(
             message = jobs_rx.recv() => {
                 if let Some(message) = message {
                     app.notice(message);
+                }
+            }
+            request = questions_rx.recv() => {
+                if let Some(request) = request {
+                    app.question_requested(request);
                 }
             }
             outcome = logins_rx.recv() => {
@@ -3201,6 +3211,10 @@ mod tests {
             login_task: None,
             login_sequence: 0,
             host: crate::core::api::ExtensionHost::empty(),
+            questions: {
+                let (tx, _) = tokio::sync::mpsc::channel(1);
+                tx
+            },
             results,
             input_verdicts: PendingInputVerdicts::default(),
             compacting: false,
@@ -3243,10 +3257,17 @@ mod tests {
     fn queue_review_commit_leaves_untouched_entries_verbatim() {
         let mut app = session_app();
         app.on_session_event(SessionEvent::TurnStart);
+        // The queue is paused-free: seed it directly, then open the review
+        // on the keyed snapshot the commit will edit against.
+        app.agent.update_queued(
+            vec![(1, "keep  me\n".into()), (2, "old draft".into())],
+            vec![],
+        );
+        let entries = app.agent.queue_snapshot();
         app.queue_review = Some(QueueReview {
             // The untouched entry carries a trailing newline a blanket trim
             // would silently strip; only the edited entry may rewrite.
-            entries: vec!["keep  me\n".into(), "old draft".into()],
+            entries,
             dirty: vec![false, true],
             selected: 1,
             visible: true,
@@ -3255,20 +3276,22 @@ mod tests {
 
         assert!(app.queue_review_key(KeyCode::Enter));
 
-        let entries = app.agent.pause_queue();
+        let entries = app.agent.queue_snapshot();
         assert_eq!(
             entries,
-            vec!["keep  me\n".to_string(), "new draft".to_string()]
+            vec![(1, "keep  me\n".to_string()), (2, "new draft".to_string())]
         );
-        app.agent.resume_queue();
     }
 
     #[test]
     fn queue_review_commit_drops_an_entry_edited_to_empty() {
         let mut app = session_app();
         app.on_session_event(SessionEvent::TurnStart);
+        app.agent
+            .update_queued(vec![(1, "first".into()), (2, "second".into())], vec![]);
+        let entries = app.agent.queue_snapshot();
         app.queue_review = Some(QueueReview {
-            entries: vec!["first".into(), "second".into()],
+            entries,
             dirty: vec![false, true],
             selected: 1,
             visible: true,
@@ -3277,9 +3300,8 @@ mod tests {
 
         assert!(app.queue_review_key(KeyCode::Enter));
 
-        let entries = app.agent.pause_queue();
-        assert_eq!(entries, vec!["first".to_string()]);
-        app.agent.resume_queue();
+        let entries = app.agent.queue_snapshot();
+        assert_eq!(entries, vec![(1, "first".to_string())]);
     }
 
     #[test]
@@ -3382,7 +3404,7 @@ mod tests {
         let mut app = session_app();
         app.on_session_event(SessionEvent::TurnStart);
         app.queue_review = Some(QueueReview {
-            entries: vec!["original".into()],
+            entries: vec![(9, "original".into())],
             dirty: vec![false],
             selected: 0,
             visible: true,

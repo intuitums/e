@@ -8,6 +8,9 @@ protocol over stdin/stdout: one JSON object per line.
 Extensions can:
 
 - **add tools** the model calls — and override a built-in by using its name
+- **ask the person a question** with an `input.request` notification — e
+  shows the answer panel and sends the reply back as an `input.reply`
+  request (see `docs/extensions/ask.mjs`, the question tool built on it)
 - **add slash commands** that show up in the `/` picker
 - **rewrite or swallow a submitted line** with the `input` hook
 - **name the session** from a command or tool result (shown in `/resume`)
@@ -34,6 +37,15 @@ e → extension, notifications (no `id`, no reply):
 {"method":"event","params":{"name":"turn_end","extra":{"aborted":false}}}
 {"method":"shutdown"}
 ```
+
+e → extension, extra request (the reply to an `input.request`):
+
+```
+{"id":9,"method":"input.reply","params":{"id":"q1","answer":"…"}}
+```
+
+`answer` is the chosen or typed text, or `null` when the person dismissed
+the question.
 
 extension → e:
 
@@ -121,6 +133,22 @@ order; the first extension to consume or replace wins:
 An empty result allows the line through untouched. A pasted API key is
 handled before the hook and never reaches it.
 
+**input.request** (extension → e, any time — typically from inside a
+running tool call): ask the person at the keyboard a question and e sends
+the answer back as an `input.reply` request with the same `id`:
+
+```json
+{"method":"input.request","params":
+  {"id":"q1","question":"Ship it?",
+   "options":[{"label":"yes","description":"merge now"}],
+   "freeform":true}}
+```
+
+`options` is optional; `freeform` (default true) allows a typed answer —
+and is forced on when there are no options. A dismissal arrives as
+`"answer":null`. `docs/extensions/ask.mjs` builds the model-facing `ask`
+tool on this surface, end to end, in ~80 lines.
+
 **hook.startup** → rewritten arguments and optional process changes, given
 `{cwd, argv, flags}` where `flags` are the parsed values of every typed
 flag declaration:
@@ -159,6 +187,7 @@ docs/extensions/
   protected.mjs  the tool_call hook denying credential-shaped paths
   worktree.mjs   a minimal startup-hook launcher (e -w)
   subagent.mjs   bounded delegated e turns as a tool
+  ask.mjs        the question tool — input.request → answer panel
   mcp.mjs        one MCP stdio server's tools as extension tools
 ```
 
@@ -188,6 +217,10 @@ own directory) it runs as a named no-op extension and stays silent.
 - **`subagent.mjs`** — a `delegate` tool that runs an isolated `e ask
   --json --no-save --no-extensions` child. It defaults to read-only and can
   select a model or effort without creating a recursive extension chain.
+- **`ask.mjs`** — the question tool the extensions API exists for: the
+  model calls `ask`, the extension sends `input.request`, e shows the
+  question panel (numbered options, typed answer, Esc to dismiss), and the
+  answer rides back as an `input.reply`.
 - **`mcp.mjs`** — a dependency-free bridge from one configured MCP stdio
   server's `tools/list` / `tools/call` surface into e extension tools. It
   forwards MCP progress through the additive `tool.update` capability.

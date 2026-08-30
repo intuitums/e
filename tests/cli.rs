@@ -76,15 +76,50 @@ fn ask_json_keeps_validation_errors_on_stdout_as_json() {
     assert!(value["error"].as_str().unwrap().contains("usage: e ask"));
 }
 
+/// An ask-shaped extension: declares the `ask` tool, requests input, and
+/// turns a dismissal into a failed tool result.
+const ASK_EXTENSION: &str = r#"#!/bin/sh
+TOOL_ID=""
+while IFS= read -r line; do
+  rid=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) printf '{"id":%s,"result":{"name":"ask-ext","tools":[{"name":"ask","description":"ask","parameters":{"type":"object"}}]}}\n' "$rid" ;;
+    *'"tool_call"'*)
+      TOOL_ID=$rid
+      printf '{"method":"input.request","params":{"id":"q%s","question":"Need input"}}\n' "$rid"
+      ;;
+    *'"input.reply"'*)
+      printf '{"id":%s,"result":{}}\n' "$rid"
+      printf '{"id":%s,"result":{"content":"The user dismissed the question without answering.","is_error":true}}\n' "$TOOL_ID"
+      ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+done
+"#;
+
+fn home_with_ask_extension(name: &str, port: u16) -> Home {
+    let home = mock_home(name, port);
+    let dir = home.dir.join("extensions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ask-ext.sh");
+    std::fs::write(&path, ASK_EXTENSION).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    home
+}
+
 #[test]
 fn noninteractive_modes_cancel_questions_and_terminate() {
     let _lock = env_lock();
 
     let turns = question_turns();
     let (port, server) = serve_sse(&turns);
-    let home = mock_home("headless-question", port);
+    let home = home_with_ask_extension("headless-question", port);
     let child = Command::new(env!("CARGO_BIN_EXE_e"))
-        .args(["--no-extensions", "--no-save", "ask", "run"])
+        .args(["--no-save", "ask", "run"])
         .env("E_HOME", &home.dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -94,15 +129,15 @@ fn noninteractive_modes_cancel_questions_and_terminate() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "continued");
     assert!(String::from_utf8_lossy(&output.stderr).contains(
-        "ask tool question cancelled: headless mode does not support interactive answers"
+        "extension question dismissed: headless mode does not support interactive answers"
     ));
     assert!(server.join().unwrap()[1].contains("dismissed the question"));
 
     let turns = question_turns();
     let (port, server) = serve_sse(&turns);
-    let home = mock_home("json-question", port);
+    let home = home_with_ask_extension("json-question", port);
     let child = Command::new(env!("CARGO_BIN_EXE_e"))
-        .args(["--no-extensions", "--no-save", "--json", "ask", "run"])
+        .args(["--no-save", "--json", "ask", "run"])
         .env("E_HOME", &home.dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -115,15 +150,15 @@ fn noninteractive_modes_cancel_questions_and_terminate() {
     assert_eq!(body["final_output"], "continued");
     assert_eq!(body["tools"]["failures"], 1);
     assert!(body["warnings"].as_array().unwrap().iter().any(|warning| {
-        warning == "ask tool question cancelled: headless mode does not support interactive answers"
+        warning == "extension question dismissed: headless mode does not support interactive answers"
     }));
     assert!(server.join().unwrap()[1].contains("dismissed the question"));
 
     let turns = question_turns();
     let (port, server) = serve_sse(&turns);
-    let home = mock_home("rpc-question", port);
+    let home = home_with_ask_extension("rpc-question", port);
     let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
-        .args(["--no-extensions", "rpc"])
+        .args(["rpc"])
         .env("E_HOME", &home.dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -145,7 +180,7 @@ fn noninteractive_modes_cancel_questions_and_terminate() {
     assert_eq!(body["final_output"], "continued");
     assert_eq!(body["tools"]["failures"], 1);
     assert!(body["warnings"].as_array().unwrap().iter().any(|warning| {
-        warning == "ask tool question cancelled: RPC does not support interactive answers"
+        warning == "extension question dismissed: RPC does not support interactive answers"
     }));
     assert!(server.join().unwrap()[1].contains("dismissed the question"));
 }

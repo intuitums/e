@@ -7,6 +7,26 @@ the pipeline publishes.
 
 ## Unreleased
 
+- The `ask` tool moved out of the core. Asking is not a harness feature —
+  it is the extensions API working as designed: the wire protocol gains an
+  `input.request` notification (a question, optional numbered options, a
+  freeform slot) that e answers through an `input.reply` request, and one
+  generic footer question panel renders whatever any extension asks.
+  `docs/extensions/ask.mjs` builds the model-facing `ask` tool on that
+  surface in ~80 lines; headless and RPC frontends decline every question
+  with a warning, as before. The core loses the ask schema, the answer
+  registry, and its read-only special case.
+- The queued-prompt review no longer pauses the queue or holds the turn
+  open. Pending prompts are keyed; the review edits by key, so an entry
+  the turn already steered commits as a fresh prompt instead of being
+  resurrected, and `pause_queue`/`resume_queue` and the turn loop's
+  hold-open wait are gone.
+- The composer's paste-collapse threshold is a setting:
+  `paste_placeholder` in `~/.e/settings.json` (codepoints, default 1000,
+  `0` inserts pastes literally). The safety bounds — the 2 MiB diff-read
+  cap, the 4M-cell diff budget, the ctrl+o output store limits, the OSC 8
+  URL cap — stay as named constants: performance guards, not preferences.
+
 ## 0.0.1 — 2026-08-29
 
 - Provider failures are classified by the error body's own wording, not

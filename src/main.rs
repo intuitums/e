@@ -102,12 +102,16 @@ async fn main() -> std::io::Result<()> {
     // consume custom flags and safely relaunch this same binary in a new cwd,
     // and so --help can list the flags and commands extensions declare.
     let (jobs_tx, jobs_rx) = tokio::sync::mpsc::channel::<String>(256);
+    // Extension questions (`input.request`) for the TUI's question panel;
+    // non-TUI modes leave the receiver to drop, so questions go unanswered
+    // and the asking extension's tool call simply times out.
+    let (questions_tx, questions_rx) = tokio::sync::mpsc::channel::<e::core::api::InputRequest>(16);
     let diagnostic_requested =
         matches!(cli::leading_subcommand(&args), Some("doctor" | "providers"));
     let host = if cli::extensions_disabled(&args) || diagnostic_requested {
         e::core::api::ExtensionHost::empty()
     } else {
-        e::core::api::ExtensionHost::start(jobs_tx.clone()).await
+        e::core::api::ExtensionHost::start(jobs_tx.clone(), questions_tx.clone()).await
     };
     if cli::has_flag(&args, &["--help", "-h"]) {
         println!(
@@ -260,7 +264,7 @@ e -v, --version"
         }
     }
     if args.first().map(String::as_str) == Some("rpc") {
-        return rpc(host, &options).await;
+        return rpc(host, questions_rx, &options).await;
     }
     if args.first().map(String::as_str) == Some("ask") {
         let selected = match resolve_model(&options) {
@@ -283,7 +287,7 @@ e -v, --version"
             }
         };
         let prompt = combine_prompt(args[1..].join(" "), &piped);
-        return ask(prompt, host, selected, &options).await;
+        return ask(prompt, host, questions_rx, selected, &options).await;
     }
     if options.json {
         eprintln!("--json is supported by `e ask`, `e doctor`, and `e providers`");
@@ -372,7 +376,7 @@ e -v, --version"
             Ok(model) => model,
             Err(message) => usage_error(&host, false, message).await,
         };
-        return ask(prompt, host, selected, &options).await;
+        return ask(prompt, host, questions_rx, selected, &options).await;
     }
 
     let selected = match resolve_model(&options) {
@@ -407,6 +411,8 @@ e -v, --version"
             images,
         },
         host,
+        questions_tx,
+        questions_rx,
         jobs_tx,
         jobs_rx,
     )
@@ -527,9 +533,25 @@ fn rpc_options(defaults: &Options, request: &RpcRequest) -> Result<Options, Stri
 }
 
 const HEADLESS_QUESTION_WARNING: &str =
-    "ask tool question cancelled: headless mode does not support interactive answers";
+    "extension question dismissed: headless mode does not support interactive answers";
 const RPC_QUESTION_WARNING: &str =
-    "ask tool question cancelled: RPC does not support interactive answers";
+    "extension question dismissed: RPC does not support interactive answers";
+
+/// Headless frontends can't show a question panel: every extension
+/// `input.request` is declined immediately; `on_decline` records the
+/// warning however the frontend reports one.
+fn spawn_question_decliner(
+    host: std::sync::Arc<e::core::api::ExtensionHost>,
+    mut questions_rx: tokio::sync::mpsc::Receiver<e::core::api::InputRequest>,
+    mut on_decline: impl FnMut() + Send + 'static,
+) {
+    tokio::spawn(async move {
+        while let Some(request) = questions_rx.recv().await {
+            host.answer_input(&request.id, None).await;
+            on_decline();
+        }
+    });
+}
 
 #[derive(Default)]
 struct TurnAccumulator {
@@ -646,8 +668,22 @@ const MAX_RPC_LINE_BYTES: usize = 10 * 1024 * 1024;
 /// while each request gets an isolated Agent and is memory-only by default.
 async fn rpc(
     host: std::sync::Arc<e::core::api::ExtensionHost>,
+    mut questions_rx: tokio::sync::mpsc::Receiver<e::core::api::InputRequest>,
     defaults: &Options,
 ) -> std::io::Result<()> {
+    // Every extension question is declined at once — the flag marks the
+    // turn it landed in so the request's JSON carries the warning.
+    let declined = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let decliner = host.clone();
+        let declined = declined.clone();
+        tokio::spawn(async move {
+            while let Some(request) = questions_rx.recv().await {
+                decliner.answer_input(&request.id, None).await;
+                declined.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+    }
     let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
     loop {
         let line = match e::core::api::read_bounded_line(&mut reader, MAX_RPC_LINE_BYTES).await {
@@ -721,6 +757,7 @@ async fn rpc(
         };
         let slug = model::slug(&selected);
         let pricing = selected.pricing.clone();
+        declined.store(false, std::sync::atomic::Ordering::SeqCst);
         let (mut agent, mut events) = Agent::with_options(selected, agent_options(&options));
         let effort = agent.effort();
         agent.set_host(host.clone());
@@ -731,14 +768,13 @@ async fn rpc(
 
         let mut result = TurnAccumulator::with_warnings(model::config_warnings());
         while let Some(event) = events.recv().await {
-            if let SessionEvent::Question { id, .. } = &event {
-                agent.answer(*id, None);
-                result.warnings.push(RPC_QUESTION_WARNING.into());
-            }
             result.observe(&event);
             if result.terminal {
                 break;
             }
+        }
+        if declined.load(std::sync::atomic::Ordering::SeqCst) {
+            result.warnings.push(RPC_QUESTION_WARNING.into());
         }
         result.finish();
         let mut body = result.json(&slug, effort.as_deref(), pricing.as_ref());
@@ -756,9 +792,21 @@ async fn rpc(
 async fn ask(
     prompt: String,
     host: std::sync::Arc<e::core::api::ExtensionHost>,
+    questions_rx: tokio::sync::mpsc::Receiver<e::core::api::InputRequest>,
     selected: Model,
     options: &Options,
 ) -> std::io::Result<()> {
+    let declined = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let declined = declined.clone();
+        let json = options.json;
+        spawn_question_decliner(host.clone(), questions_rx, move || {
+            declined.store(true, std::sync::atomic::Ordering::SeqCst);
+            if !json {
+                eprintln!("warning: {HEADLESS_QUESTION_WARNING}");
+            }
+        });
+    }
     if prompt.trim().is_empty() {
         if options.json {
             println!("{}", serde_json::json!({"error": "prompt is empty"}));
@@ -873,13 +921,6 @@ async fn ask(
                     eprintln!("warning: {message}");
                 }
             }
-            SessionEvent::Question { id, .. } => {
-                agent.answer(*id, None);
-                result.warnings.push(HEADLESS_QUESTION_WARNING.into());
-                if !options.json {
-                    eprintln!("warning: {HEADLESS_QUESTION_WARNING}");
-                }
-            }
             SessionEvent::TurnEnd { .. } | SessionEvent::Usage { .. } => {}
             _ => {}
         }
@@ -887,6 +928,9 @@ async fn ask(
         if result.terminal {
             break;
         }
+    }
+    if declined.load(std::sync::atomic::Ordering::SeqCst) {
+        result.warnings.push(HEADLESS_QUESTION_WARNING.into());
     }
     result.finish();
     if tty && !result.output.is_empty() {

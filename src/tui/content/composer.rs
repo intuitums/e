@@ -15,6 +15,10 @@ pub struct Editor {
     /// Live paste placeholders: (token, full text), expanded on submit.
     pastes: Vec<(String, String)>,
     paste_seq: usize,
+    /// Pastes longer than this many codepoints collapse to a placeholder
+    /// token; `0` disables collapsing. A user preference (see
+    /// `settings::paste_placeholder`), not a constant.
+    paste_limit: usize,
     text: Vec<char>,
     cursor: usize,
     /// Shift-arrow selection anchor: the fixed end while the cursor
@@ -126,6 +130,7 @@ impl Editor {
             draft: String::new(),
             pastes: Vec::new(),
             paste_seq: 0,
+            paste_limit: crate::core::config::settings::paste_placeholder() as usize,
             inner_width: None,
             scroll: 0,
         }
@@ -232,13 +237,13 @@ impl Editor {
         self.cursor += 1;
     }
 
-    /// A paste becomes a placeholder token — the reference behavior — when
-    /// it runs past a thousand codepoints, line count regardless; the token
-    /// expands back on submit. Anything smaller inserts literally.
+    /// A paste becomes a placeholder token when it runs past the
+    /// configured threshold (codepoints, line count regardless; the token
+    /// expands back on submit). Anything smaller inserts literally.
     pub fn insert_paste(&mut self, text: &str) {
         self.delete_selection();
         let lines = text.lines().count().max(1);
-        if text.chars().count() <= 1000 {
+        if text.chars().count() <= self.paste_limit {
             self.insert_str(text);
             return;
         }

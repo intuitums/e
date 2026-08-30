@@ -906,7 +906,7 @@ fn question_panel_frames_options_with_brightness_selection() {
     use e::tui::questionpanel::Question;
     let theme = e::tui::theme::resolve("dark", false);
     let mut q = Question::new(
-        7,
+        "q7".into(),
         "Pick a color".into(),
         vec![
             ("blue".into(), "the calm one".into()),
@@ -950,7 +950,7 @@ fn question_panel_frames_options_with_brightness_selection() {
     // The description column clears the widest label in display cells, so
     // the wide-glyph row keeps the same three-cell gap as the narrow one.
     let wide = Question::new(
-        8,
+        "q8".into(),
         "pick".into(),
         vec![
             ("日本語".into(), "desc-a".into()),

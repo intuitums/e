@@ -1,4 +1,4 @@
-//! The question panel — the ask tool's footer surface.
+//! The question panel — an extension's `input.request` footer surface.
 //!
 //! Framed like every picker: divider, question, blank, options, divider,
 //! with the nav hint on the status row. Selection is brightness alone —
@@ -10,7 +10,7 @@ use crate::tui::render::bold;
 use crate::tui::theme::Theme;
 
 pub struct Question {
-    pub id: u64,
+    pub id: String,
     pub question: String,
     /// (label, description) pairs, in the model's order.
     pub options: Vec<(String, String)>,
@@ -21,7 +21,7 @@ pub struct Question {
 
 impl Question {
     pub fn new(
-        id: u64,
+        id: String,
         question: String,
         options: Vec<(String, String)>,
         allow_freeform: bool,

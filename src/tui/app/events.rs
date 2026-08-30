@@ -132,34 +132,6 @@ impl App {
                     }
                 }
             }
-            SessionEvent::Question {
-                id,
-                question,
-                options,
-                allow_freeform,
-            } => {
-                // Model-authored text renders inert, like every block.
-                let sanitized = crate::tui::questionpanel::Question::new(
-                    id,
-                    crate::core::tools::sanitize_display(&question),
-                    options
-                        .into_iter()
-                        .map(|(label, description)| {
-                            (
-                                crate::core::tools::sanitize_display(&label),
-                                crate::core::tools::sanitize_display(&description),
-                            )
-                        })
-                        .collect(),
-                    allow_freeform,
-                );
-                if self.question.is_none() {
-                    self.question = Some(sanitized);
-                } else {
-                    // One panel at a time; batch-mates wait their turn.
-                    self.question_queue.push_back(sanitized);
-                }
-            }
             SessionEvent::Named(name) => {
                 self.agent.set_session_name(name.clone());
                 self.notice(format!("session: {name}"));
@@ -443,5 +415,40 @@ impl App {
         s.thinking_block = None;
         s.thinking.clear();
         s.thinking_started = None;
+    }
+
+    /// An extension's `input.request`: the question panel shows it and the
+    /// reply goes back through the host. Extension text renders inert,
+    /// like every block. One panel at a time; the rest queue.
+    pub(super) fn question_requested(&mut self, request: crate::core::api::InputRequest) {
+        let sanitized = crate::tui::questionpanel::Question::new(
+            request.id,
+            crate::core::tools::sanitize_display(&request.question),
+            request
+                .options
+                .into_iter()
+                .map(|(label, description)| {
+                    (
+                        crate::core::tools::sanitize_display(&label),
+                        crate::core::tools::sanitize_display(&description),
+                    )
+                })
+                .collect(),
+            request.freeform,
+        );
+        if self.question.is_none() {
+            self.question = Some(sanitized);
+        } else {
+            self.question_queue.push_back(sanitized);
+        }
+    }
+
+    /// Deliver the answer (or dismissal) to the asking extension, off the
+    /// frame loop — the host write must never block a paint.
+    pub(super) fn question_answered(&mut self, id: String, reply: Option<String>) {
+        let host = self.host.clone();
+        tokio::spawn(async move {
+            host.answer_input(&id, reply).await;
+        });
     }
 }
