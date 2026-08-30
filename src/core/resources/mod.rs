@@ -1,7 +1,5 @@
-//! User-authored content loaded from `~/.e`: skills, prompt templates, and
-//! delegated-turn agent personas.
+//! User-authored content loaded from `~/.e`: skills and prompt templates.
 
-pub mod agents;
 pub mod docs;
 pub mod prompts;
 pub mod skills;

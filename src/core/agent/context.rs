@@ -88,20 +88,8 @@ pub fn system_prompt_here() -> String {
 }
 
 pub fn system_prompt(cwd: &Path) -> String {
-    compose(cwd, custom_prompt().unwrap_or_else(default_base))
-}
+    let mut prompt = custom_prompt().unwrap_or_else(default_base);
 
-/// A delegated agent persona replaces the base instructions but keeps the same
-/// environment grounding — skills catalog, project context, and the
-/// cwd/platform/date facts — so a scout or reviewer still knows where it is.
-pub fn agent_system_prompt(cwd: &Path, persona: &str) -> String {
-    compose(cwd, persona.to_string())
-}
-
-/// Append e's environment grounding to a base instruction block, whichever
-/// base the caller chose (the default persona, a settings override, or a
-/// delegated agent's own system prompt).
-fn compose(cwd: &Path, mut prompt: String) -> String {
     // Skills catalog (auto-invocable), like the reference's skills section.
     if let Some(catalog) = crate::core::resources::skills::catalog(cwd) {
         prompt.push_str(&format!("\n\n{catalog}"));

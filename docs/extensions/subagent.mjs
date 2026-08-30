@@ -1,25 +1,72 @@
 #!/usr/bin/env node
 /** Delegate one isolated turn to another e process over `e rpc`. Copy with
  *  scaffold.mjs. */
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { connect } from "./scaffold.mjs";
 
 const E_BIN = process.env.E_BIN || "e";
 
-// Discover the personas e offers here (trust-scoped in core, so a project's
-// own `.e/agents/` only appears in a trusted directory). Done once at startup;
-// restart e to pick up new agent files, the same as skills.
+// Personas belong to this extension, not to e. Each is a markdown file in
+// ~/.e/agents/ with frontmatter (name/description/tools/model) and a body that
+// becomes the delegated turn's appended system prompt. e core knows nothing
+// about them — the extension reads the files and composes the `e rpc` request.
+// Discovered once at startup; restart to pick up new files, the same as skills.
+const AGENTS_DIR = join(process.env.E_HOME || join(homedir(), ".e"), "agents");
+
+function parseFrontmatter(text) {
+  const match = text.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!match) return { fm: {}, body: text };
+  const fm = {};
+  for (const line of match[1].split("\n")) {
+    const i = line.indexOf(":");
+    if (i !== -1) fm[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return { fm, body: match[2] };
+}
+
+// `tools: read, grep` or `tools: [read, grep]` → ["read","grep"]; empty → undefined.
+function parseToolList(value) {
+  if (!value) return undefined;
+  const tools = value
+    .replace(/^\[|\]$/g, "")
+    .split(",")
+    .map((t) => t.trim().replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
+  return tools.length ? tools : undefined;
+}
+
 function discoverAgents() {
+  let files;
   try {
-    const raw = execFileSync(E_BIN, ["agents", "--json"], { encoding: "utf8" });
-    const agents = JSON.parse(raw);
-    return Array.isArray(agents) ? agents : [];
+    files = readdirSync(AGENTS_DIR).filter((f) => f.endsWith(".md"));
   } catch {
     return [];
   }
+  const agents = [];
+  for (const file of files) {
+    let text;
+    try {
+      text = readFileSync(join(AGENTS_DIR, file), "utf8");
+    } catch {
+      continue;
+    }
+    const { fm, body } = parseFrontmatter(text);
+    agents.push({
+      name: fm.name || file.replace(/\.md$/, ""),
+      description: fm.description || "",
+      tools: parseToolList(fm.tools),
+      model: fm.model || undefined,
+      systemPrompt: body.trim(),
+    });
+  }
+  return agents;
 }
 
 const agents = discoverAgents();
+const agentsByName = new Map(agents.map((a) => [a.name, a]));
 const agentNames = agents.map((a) => a.name);
 const agentList = agents.length
   ? `Available agents: ${agents.map((a) => `${a.name} (${a.description})`).join("; ")}.`
@@ -85,7 +132,12 @@ connect({
     if (mode !== "all" && mode !== "none") {
       return { content: `invalid tool_mode: ${mode}`, is_error: true };
     }
-    update(`delegating${input.agent ? ` to ${input.agent}` : ` (${mode})`}\n`);
+    let persona;
+    if (input.agent) {
+      persona = agentsByName.get(input.agent);
+      if (!persona) return { content: `unknown agent: ${input.agent}`, is_error: true };
+    }
+    update(`delegating${persona ? ` to ${persona.name}` : ` (${mode})`}\n`);
 
     // A single-shot `e rpc` child: one request line in, one response object
     // out, then EOF shuts it down. --no-extensions keeps the turn hermetic
@@ -116,14 +168,20 @@ connect({
     // The child may exit before we finish writing; swallow the EPIPE rather
     // than crash the extension.
     child.stdin.on("error", () => {});
-    // `agent` names a persona; e resolves its system prompt, tool allowlist,
-    // and model. tool_mode only applies to a persona-less delegation. save:true
-    // persists the child's session so its full transcript — every tool call and
-    // output — stays inspectable; the response returns that JSONL path.
+    // The extension composes the request from the persona it resolved: its
+    // body appends to the system prompt (`system`), its allowlist scopes the
+    // tools (`tools`), its model is a fallback the caller can override. Without
+    // a persona, tool_mode picks all-tools or none. save:true persists the
+    // child's session so its full transcript stays inspectable via `session`.
     const request = { id: 1, prompt: input.prompt, save: true };
-    if (input.agent) request.agent = input.agent;
-    else request.tool_mode = mode;
-    if (input.model) request.model = input.model;
+    if (persona) {
+      if (persona.systemPrompt) request.system = persona.systemPrompt;
+      if (persona.tools) request.tools = persona.tools;
+    } else {
+      request.tool_mode = mode;
+    }
+    const chosenModel = input.model || persona?.model;
+    if (chosenModel) request.model = chosenModel;
     if (input.effort) request.effort = input.effort;
     child.stdin.write(`${JSON.stringify(request)}\n`);
     child.stdin.end();

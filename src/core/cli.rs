@@ -68,7 +68,6 @@ const ALL_FLAGS: &[&str] = &[
 /// Every subcommand word, in help order.
 pub const SUBCOMMANDS: &[&str] = &[
     "rpc",
-    "agents",
     "add",
     "docs",
     "update",
@@ -82,7 +81,6 @@ pub const SUBCOMMANDS: &[&str] = &[
 pub fn subcommand_usage(sub: &str) -> Option<&'static str> {
     match sub {
         "rpc" => Some("usage: e rpc"),
-        "agents" => Some("usage: e agents [--json]"),
         "add" => Some("usage: e add <path>"),
         "docs" => Some("usage: e docs [topic]"),
         "update" => Some("usage: e update"),

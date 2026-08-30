@@ -1,7 +1,7 @@
 //! The `e` binary: CLI subcommands and handoff to the interactive frame.
 //!
 //! Session UI lives in `tui::app` — this file owns flags, one-shot commands
-//! (`auth`, `rpc`, `agents`, `docs`, `update`), then opens the frame loop.
+//! (`auth`, `rpc`, `add`, `docs`, `update`), then opens the frame loop.
 // Same contract as the library: no panic sites outside test builds.
 #![cfg_attr(
     not(test),
@@ -124,7 +124,6 @@ usage:\n  e [message]           start a session (optionally with a first prompt;
 e -c, --continue      continue this directory's most recent session\n  \
 e -r, --resume        pick a session to resume\n  \
 e rpc                 JSONL request/response protocol on stdin/stdout\n  \
-e agents [--json]     list delegated-turn agent personas\n  \
 e add <path>          install a local extension file (seeds scaffold.mjs)\n  \
 e docs [topic]        print a built-in format guide\n  \
 e update              update e to the latest release\n  \
@@ -258,7 +257,7 @@ e -v, --version"
     match auth_status_requested(args) {
         Ok(true) => {
             if options.json {
-                eprintln!("--json is supported by `e agents`, `e doctor`, and `e providers`");
+                eprintln!("--json is supported by `e doctor` and `e providers`");
                 host.shutdown().await;
                 std::process::exit(2);
             }
@@ -274,11 +273,6 @@ e -v, --version"
     if args.first().map(String::as_str) == Some("rpc") {
         return rpc(host, &options).await;
     }
-    if args.first().map(String::as_str) == Some("agents") {
-        agents_list(&options);
-        host.shutdown().await;
-        return Ok(());
-    }
     if args.first().map(String::as_str) == Some("add") {
         match args.get(1) {
             Some(source) => match install_extension(source) {
@@ -291,7 +285,7 @@ e -v, --version"
         return Ok(());
     }
     if options.json {
-        eprintln!("--json is supported by `e agents`, `e doctor`, and `e providers`");
+        eprintln!("--json is supported by `e doctor` and `e providers`");
         host.shutdown().await;
         std::process::exit(2);
     }
@@ -486,42 +480,6 @@ fn make_executable(_path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `e agents` — the delegated-turn personas available here, trust-scoped:
-/// global ones always, a trusted repo's `.e/agents/` too. `--json` emits an
-/// array for tools (the subagent extension reads it to offer an `agent`
-/// choice); otherwise one aligned line each.
-fn agents_list(options: &Options) {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let agents = e::core::resources::agents::list(&cwd);
-    if options.json {
-        let rows: Vec<serde_json::Value> = agents
-            .iter()
-            .map(|a| {
-                serde_json::json!({
-                    "name": a.name,
-                    "description": a.description,
-                    "model": a.model,
-                    "tools": a.tools,
-                    "source": match a.source {
-                        e::core::resources::agents::Source::User => "user",
-                        e::core::resources::agents::Source::Project => "project",
-                    },
-                })
-            })
-            .collect();
-        println!("{}", serde_json::Value::from(rows));
-        return;
-    }
-    if agents.is_empty() {
-        println!("no agents — add personas as ~/.e/agents/<name>.md");
-        return;
-    }
-    let width = agents.iter().map(|a| a.name.len()).max().unwrap_or(0);
-    for agent in agents {
-        println!("  {:<width$}  {}", agent.name, agent.description);
-    }
-}
-
 fn load_images(
     options: &Options,
     model: &Model,
@@ -544,11 +502,16 @@ struct RpcRequest {
     effort: Option<String>,
     #[serde(default)]
     tool_mode: Option<String>,
-    /// A delegated-turn persona from `~/.e/agents/` (or a trusted repo's
-    /// `.e/agents/`): its body is the system prompt, its `tools` an allowlist,
-    /// and its `model` a fallback when the request names none.
+    /// Extra system-prompt text appended to the base for this turn — the seam
+    /// a caller uses to give a delegated turn a persona, without the core
+    /// binary knowing what a "persona" is (cf. the reference's
+    /// `--append-system-prompt`).
     #[serde(default)]
-    agent: Option<String>,
+    system: Option<String>,
+    /// A positive tool allowlist for this turn: the turn sees only these
+    /// built-ins. `None` is the full toolset; composes under `tool_mode`.
+    #[serde(default)]
+    tools: Option<Vec<String>>,
     #[serde(default)]
     save: bool,
     #[serde(default)]
@@ -726,7 +689,7 @@ async fn rpc(
                 continue;
             }
         };
-        let mut options = match rpc_options(defaults, &request) {
+        let options = match rpc_options(defaults, &request) {
             Ok(options) => options,
             Err(error) => {
                 println!("{}", serde_json::json!({"id": request_id, "error": error}));
@@ -740,28 +703,7 @@ async fn rpc(
             );
             continue;
         }
-        // A delegated persona is resolved in-process so its trust scope holds:
-        // a project `.e/agents/` persona loads only for a trusted directory.
         let cwd = std::env::current_dir().unwrap_or_default();
-        let persona = match request.agent.as_deref() {
-            Some(name) => match e::core::resources::agents::get(name, &cwd) {
-                Some(agent) => Some(agent),
-                None => {
-                    println!(
-                        "{}",
-                        serde_json::json!({"id": request_id, "error": format!("unknown agent `{name}`")})
-                    );
-                    continue;
-                }
-            },
-            None => None,
-        };
-        // A persona's model is a fallback: an explicit request model still wins.
-        if options.model.is_none() {
-            if let Some(persona) = &persona {
-                options.model = persona.model.clone();
-            }
-        }
         let selected = match resolve_model(&options) {
             Ok(selected) => selected,
             Err(error) => {
@@ -779,13 +721,18 @@ async fn rpc(
         let slug = model::slug(&selected);
         let pricing = selected.pricing.clone();
         let mut agent_opts = agent_options(&options);
-        let system = match &persona {
-            Some(persona) => {
-                agent_opts.allowed_tools = persona.tools.clone();
-                e::core::agent::context::agent_system_prompt(&cwd, &persona.system_prompt)
+        agent_opts.allowed_tools = request.tools.clone();
+        // A caller may append instructions to the base system prompt — the seam
+        // a subagent extension uses to give a delegated turn a persona. Core
+        // stays generic: it appends text, it never learns what a "persona" is.
+        let mut system = e::core::agent::context::system_prompt(&cwd);
+        if let Some(extra) = request.system.as_deref() {
+            let extra = extra.trim();
+            if !extra.is_empty() {
+                system.push_str("\n\n");
+                system.push_str(extra);
             }
-            None => e::core::agent::context::system_prompt(&cwd),
-        };
+        }
         let (mut agent, mut events) = Agent::with_options(selected, agent_opts);
         let effort = agent.effort();
         agent.set_host(host.clone());
@@ -853,7 +800,8 @@ mod tests {
             model: None,
             effort: None,
             tool_mode: Some("all".into()),
-            agent: None,
+            system: None,
+            tools: None,
             save: true,
             images: Vec::new(),
         };

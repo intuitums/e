@@ -14,16 +14,16 @@ the pipeline publishes.
   e) and seeded non-executable, so the host skips it while extensions import
   it. Local files only for now; remote sources (git/https) are a later,
   trust-gated addition.
-- Agents are a first-class, file-backed resource: `~/.e/agents/<name>.md`
-  (and a trusted repo's `.e/agents/`) is a delegated-turn persona — markdown
-  with `name`/`description`/`tools`/`model` frontmatter, its body the system
-  prompt. Discovery is trust-scoped and shadows global-with-project exactly
-  like skills and prompts. `e agents` lists them (`--json` for tools). Over
-  `e rpc`, a request's `agent` field resolves the persona in core: its body
-  becomes the system prompt, its `tools` a positive allowlist (advertised and
-  enforced), its `model` a fallback. The `subagent.mjs` example reads
-  `e agents --json` and offers each persona as a `delegate` choice; sample
-  personas ship in `docs/agents/`.
+- `e rpc` gains two generic per-request knobs so a delegated turn can be
+  shaped without the core binary learning any new concept: `system` (extra
+  system-prompt text, appended to the base) and `tools` (a positive built-in
+  allowlist, advertised and enforced). Agent personas are built entirely on
+  top of these by the `subagent.mjs` example — it reads persona files from
+  `~/.e/agents/` (markdown with `name`/`description`/`tools`/`model`
+  frontmatter, its body the appended system prompt), resolves the `agent`
+  argument itself, and composes the request. The concept lives in the
+  extension; core never learns what a "persona" is. Sample personas ship in
+  `docs/agents/` — copy the ones you want into `~/.e/agents/`.
 - The `e rpc` response gains a `session` field: the saved turn's JSONL path
   (or `null` for a memory-only run). A delegated turn's whole transcript —
   every tool call and its output — lives there, so the dispatching agent can

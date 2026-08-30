@@ -188,9 +188,10 @@ It is embedded in the binary, so the copy `e add` writes always matches your e.
   `e -w [branch]` creates a Git worktree and relaunches e there.
 - **`subagent.mjs`** — a `delegate` tool that drives a single-shot `e rpc
   --no-extensions` child: one JSON request line in, one result out. The
-  delegated turn is ephemeral and extension-free (so it can never delegate
-  again). At startup it reads `e agents --json` and offers each persona as an
-  `agent` choice; the caller can also set a model, effort, or `tool_mode`.
+  delegated turn is extension-free (so it can never delegate again). It owns
+  the persona concept itself — reading agent files from `~/.e/agents/` and
+  composing the request's `system`/`tools`/`model` — while e's core stays
+  generic and never learns what a "persona" is.
 - **`mcp.mjs`** — a dependency-free bridge from one configured MCP stdio
   server's `tools/list` / `tools/call` surface into e extension tools. It
   forwards MCP progress through the additive `tool.update` capability.
@@ -259,9 +260,8 @@ tool call and its output — persists; the response's `session` path is appended
 to the tool result, and the dispatching agent can `read` that JSONL to see the
 full turn when the returned summary isn't enough.
 
-**Agent personas.** A delegation can name an `agent` — a persona defined in
-`~/.e/agents/<name>.md` (or a trusted repo's `.e/agents/<name>.md`). The file
-is markdown with frontmatter:
+**Agent personas — owned by the extension, not e.** A delegation can name an
+`agent`. A persona is a markdown file the *extension* reads from `~/.e/agents/`:
 
 ```markdown
 ---
@@ -273,16 +273,14 @@ model: anthropic/claude-haiku-4-5
 You are a scout. Find the relevant code and report back concisely.
 ```
 
-The body becomes the delegated turn's system prompt, `tools` is a positive
-allowlist (the turn sees only those built-ins — enforced in the advertised
-schemas *and* at execution), and `model` is a fallback when the caller names
-none. Discovery is trust-scoped like skills and prompts: global personas
-always load, a project's own only in a trusted directory, and a project
-persona shadows a global one of the same name. `e agents` lists them; the
-subagent extension reads `e agents --json` to offer each as a choice. Sample
-personas live in [`docs/agents/`](agents/). Because e resolves the persona in
-its core, any `e rpc` client gets the same trust-scoped behavior, not just
-this extension.
+The extension parses the file and composes the `e rpc` request from it: the
+body goes in `system` (appended to the base prompt), `tools` becomes the
+request's tool allowlist (enforced in the advertised schemas *and* at
+execution), and `model` is a fallback the caller can override. e's core knows
+nothing about personas — it just runs a turn with the `system` and `tools` it
+is handed, so the whole concept lives in (and dies with) the extension. Sample
+personas live in [`docs/agents/`](agents/); copy the ones you want into
+`~/.e/agents/`.
 
 ## What startup hooks are for
 

@@ -43,9 +43,6 @@ pub fn extensions_dir() -> PathBuf {
 pub fn skills_dir() -> PathBuf {
     home().join("skills")
 }
-pub fn agents_dir() -> PathBuf {
-    home().join("agents")
-}
 pub fn prompts_dir() -> PathBuf {
     home().join("prompts")
 }

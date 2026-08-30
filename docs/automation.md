@@ -17,10 +17,11 @@ Fields:
 - `prompt` is required and non-empty.
 - `model` and `effort` override process defaults from `-m` / `--ef`.
 - `tool_mode` is `all` or `none`.
-- `agent` names a persona from `~/.e/agents/` (or a trusted repo's
-  `.e/agents/`): its body becomes the system prompt, its `tools` a positive
-  allowlist, and its `model` a fallback when the request names none. An
-  unknown name is an error. List them with `e agents` (`--json` for tools).
+- `system` is extra system-prompt text, appended to the base for this turn —
+  the seam a caller (e.g. a subagent extension) uses to give a delegated turn
+  a persona, without e's core knowing what a "persona" is.
+- `tools` is a positive allowlist: the turn sees only these built-in tools.
+  `null` (the default) is the full set; it composes under `tool_mode`.
 - `save` defaults to false.
 - `images` is a list of PNG, JPEG, GIF, or WebP paths, up to ten files,
   20 MiB each, and 40 MiB total. The selected model must declare image input
