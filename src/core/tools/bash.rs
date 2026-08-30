@@ -479,9 +479,6 @@ where
     }
 
     // The loop only exits once try_wait() reported an exit; if that
-    // invariant somehow broke, "killed" is the honest reading — the child's
-    // fate is unknown — and never a panic.
-    // The loop only exits once try_wait() reported an exit; if that
     // invariant somehow broke, an unknown failure is the honest reading —
     // never a panic.
     let exit_code = status.as_ref().and_then(|s| s.code());

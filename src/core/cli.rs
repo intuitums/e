@@ -21,8 +21,10 @@ impl ToolMode {
     pub fn allows(self, name: &str) -> bool {
         match self {
             ToolMode::All => true,
-            // Asking the user mutates nothing; read-only sessions keep it.
-            ToolMode::ReadOnly => matches!(name, "read" | "grep" | "ask"),
+            // Gate by the known-safe built-ins, never by name alone: an
+            // extension could ship a mutating tool under any name, so only
+            // the tools whose behaviour we control earn read-only trust.
+            ToolMode::ReadOnly => matches!(name, "read" | "grep"),
             ToolMode::None => false,
         }
     }
