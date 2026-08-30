@@ -138,7 +138,8 @@ jobs:
         run: |
           cargo install cargo-cyclonedx --version 0.5.9 --locked
           cargo cyclonedx --format json --spec-version 1.5
-          mv bom.json assets/e-sbom.cdx.json
+          # cargo-cyclonedx names the BOM after the crate (e.cdx.json), not bom.json.
+          mv e.cdx.json assets/e-sbom.cdx.json
 
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
