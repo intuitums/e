@@ -7,6 +7,13 @@ the pipeline publishes.
 
 ## Unreleased
 
+- `e add <path>` installs a local extension file into `~/.e/extensions/`,
+  makes it executable, and seeds `scaffold.mjs` beside it — so an extension's
+  `import "./scaffold.mjs"` resolves with nothing for the author to place by
+  hand. The scaffold is embedded in the binary (the copy always matches your
+  e) and seeded non-executable, so the host skips it while extensions import
+  it. Local files only for now; remote sources (git/https) are a later,
+  trust-gated addition.
 - Agents are a first-class, file-backed resource: `~/.e/agents/<name>.md`
   (and a trusted repo's `.e/agents/`) is a delegated-turn persona — markdown
   with `name`/`description`/`tools`/`model` frontmatter, its body the system

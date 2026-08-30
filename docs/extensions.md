@@ -166,10 +166,10 @@ docs/extensions/
 **`scaffold.mjs`** is the shared plumbing every extension needs: the
 stdin/stdout framing, id routing, and a `connect({ manifest, handlers })`
 that turns handlers into a running extension — the protocol's ergonomics
-without importing anything but Node. Copy it next to your own extension
-and `import { connect } from "./scaffold.mjs"`. If it ends up in
-`~/.e/extensions/` (easy to do, since the examples import it from their
-own directory) it runs as a named no-op extension and stays silent.
+without importing anything but Node. You don't place it yourself: `e add`
+seeds it into `~/.e/extensions/` (non-executable, so the host skips it while
+your extension's `import { connect } from "./scaffold.mjs"` still resolves).
+It is embedded in the binary, so the copy `e add` writes always matches your e.
 
 - **`hello.mjs`** — every surface at once, on the scaffold: command,
   tool, config, input hook, session naming — ~50 lines of handlers.
@@ -195,8 +195,10 @@ own directory) it runs as a named no-op extension and stays silent.
   server's `tools/list` / `tools/call` surface into e extension tools. It
   forwards MCP progress through the additive `tool.update` capability.
 
-Copy any of them to `~/.e/extensions/` (with `scaffold.mjs` beside
-them), `chmod +x`, and restart e.
+Install any of them with `e add <path>` — it copies the file into
+`~/.e/extensions/`, makes it executable, and seeds `scaffold.mjs` beside it —
+then restart e. (`e add` takes a local file for now; remote sources are a
+later, trust-gated addition.)
 
 ## A complete extension, in shell
 
@@ -220,7 +222,7 @@ Restart e, type `/ping`, get `pong`.
 
 ## MCP tools
 
-Copy `mcp.mjs` into `~/.e/extensions/`, make it executable, then configure
+Install `mcp.mjs` with `e add`, then configure
 the stdio server e should own in `~/.e/settings.json`:
 
 ```json
@@ -245,8 +247,8 @@ specifications.
 
 ## Delegated turns
 
-Copy both `subagent.mjs` and `scaffold.mjs`, make the former executable, and
-restart. The model gains a `delegate` tool. Each delegation is a single-shot
+Install `subagent.mjs` with `e add` (it seeds `scaffold.mjs`) and restart. The
+model gains a `delegate` tool. Each delegation is a single-shot
 `e rpc` child in the same working directory: the extension writes one JSON
 request line, reads the one result object, and closes stdin. It is
 extension-free (so a delegated turn can never delegate again). Set `E_BIN`
