@@ -254,6 +254,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "e-sdk"
+version = "0.0.0"
+dependencies = [
+ "e",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"

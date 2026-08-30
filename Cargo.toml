@@ -46,3 +46,10 @@ proptest = "1"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# The SDK package is an in-repo consumer of the library target with its own
+# release boundary — see docs/decisions/0002-rust-sdk-package.md. fuzz/ stays
+# its own workspace because cargo-fuzz requires it.
+[workspace]
+members = ["sdk"]
+resolver = "2"

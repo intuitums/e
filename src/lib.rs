@@ -4,9 +4,12 @@
 //! the terminal frontend, grouped as paint / content / surfaces / app.
 //!
 //! The library target exists so the binary and integration tests share one
-//! implementation. Its Rust items are not a stable third-party API; e's
-//! supported external surface is the CLI, file formats, and extension wire
-//! protocol documented in `docs/compatibility.md`.
+//! implementation, with the `sdk/` package (e-sdk) as a third in-repo
+//! consumer. Its Rust items are not a stable third-party API by themselves;
+//! the supported Rust surface is the `e-sdk` package behind the boundary
+//! described in `docs/compatibility.md`, and e's other supported external
+//! surfaces are the CLI, file formats, and extension wire protocol documented
+//! there.
 
 pub mod core;
 pub mod tui;

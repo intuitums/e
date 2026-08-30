@@ -1,6 +1,6 @@
 # Architecture
 
-e is one Rust crate with two directional layers:
+e is one primary Rust crate with two directional layers:
 
 ```text
 CLI / TUI
@@ -15,7 +15,11 @@ terminal-free core
 
 The single-crate shape is intentional. A new crate needs an independent
 consumer, release/API boundary, platform boundary, or measured build-time
-benefit. File length alone is a reason to extract a module, not a crate.
+benefit. The `sdk/` package is that case made explicit: an independent
+consumer of the library target whose release boundary is the point (see
+[decisions/0002-rust-sdk-package.md](decisions/0002-rust-sdk-package.md)).
+It is a consumer, not a fourth layer. File length alone is a reason to
+extract a module, not a crate.
 
 ## Invariants
 
