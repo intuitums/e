@@ -26,6 +26,12 @@ the pipeline publishes.
   `0` inserts pastes literally). The safety bounds — the 2 MiB diff-read
   cap, the 4M-cell diff budget, the ctrl+o output store limits, the OSC 8
   URL cap — stay as named constants: performance guards, not preferences.
+- Two reference ports retired as drift, deliberately: unlabeled code
+  fences no longer infer a language from their content (they render bare —
+  the highlighter colors nothing it cannot name), and the markdown
+  footnote grammar is gone (`[^label]` renders as the literal text the
+  author wrote; a definition is an ordinary paragraph). The parity suite
+  pins both retirements so they cannot creep back unnoticed.
 
 ## 0.0.1 — 2026-08-29
 

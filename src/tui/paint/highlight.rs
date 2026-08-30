@@ -19,7 +19,6 @@ struct BlockComment {
 }
 
 struct Profile {
-    label: &'static str,
     aliases: &'static [&'static str],
     line_comments: &'static [&'static str],
     block_comment: Option<BlockComment>,
@@ -35,9 +34,8 @@ const DOUBLE_SINGLE: &[char] = &['"', '\''];
 const SHELL_QUOTES: &[char] = &['"', '\'', '`'];
 
 macro_rules! profile {
-    ($label:literal, $aliases:expr, $lc:expr, $bc:expr, $quotes:expr, $kw:expr, $lit:expr, $ci:expr) => {
+    ($aliases:expr, $lc:expr, $bc:expr, $quotes:expr, $kw:expr, $lit:expr, $ci:expr) => {
         Profile {
-            label: $label,
             aliases: $aliases,
             line_comments: $lc,
             block_comment: $bc,
@@ -54,11 +52,11 @@ const SLASH_STAR: Option<BlockComment> = Some(BlockComment {
     end: "*/",
 });
 
-/// The reference's language table, value-for-value: labels, aliases,
-/// comment markers, quote sets, keywords, and literals.
+/// The reference's language table, value-for-value: aliases (the first
+/// doubles as the canonical name), comment markers, quote sets, keywords,
+/// and literals.
 static PROFILES: &[Profile] = &[
     profile!(
-        "zig",
         &["zig"],
         &["//"],
         None,
@@ -72,7 +70,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "ts",
         &["js", "jsx", "javascript", "ts", "tsx", "typescript"],
         &["//"],
         SLASH_STAR,
@@ -106,7 +103,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "json",
         &["json"],
         &[],
         None,
@@ -116,7 +112,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "sh",
         &["sh", "bash", "zsh", "shell"],
         &["#"],
         None,
@@ -129,7 +124,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "python",
         &["python", "py"],
         &["#"],
         None,
@@ -143,7 +137,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "yaml",
         &["yaml", "yml"],
         &["#"],
         None,
@@ -153,7 +146,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "toml",
         &["toml"],
         &["#"],
         None,
@@ -163,7 +155,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "sql",
         &["sql"],
         &["--"],
         SLASH_STAR,
@@ -178,7 +169,6 @@ static PROFILES: &[Profile] = &[
         true
     ),
     profile!(
-        "dockerfile",
         &["dockerfile", "docker"],
         &["#"],
         None,
@@ -207,7 +197,6 @@ static PROFILES: &[Profile] = &[
         true
     ),
     profile!(
-        "rust",
         &["rust", "rs"],
         &["//"],
         SLASH_STAR,
@@ -221,7 +210,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "go",
         &["go"],
         &["//"],
         SLASH_STAR,
@@ -252,7 +240,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "c",
         &["c", "h"],
         &["//"],
         SLASH_STAR,
@@ -267,7 +254,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "cpp",
         &["cpp", "c++", "cc", "cxx", "hpp"],
         &["//"],
         SLASH_STAR,
@@ -301,7 +287,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "csharp",
         &["csharp", "cs"],
         &["//"],
         SLASH_STAR,
@@ -337,7 +322,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "java",
         &["java"],
         &["//"],
         SLASH_STAR,
@@ -371,7 +355,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "kotlin",
         &["kotlin", "kt", "kts"],
         &["//"],
         SLASH_STAR,
@@ -403,7 +386,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "php",
         &["php"],
         &["//", "#"],
         SLASH_STAR,
@@ -434,7 +416,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "ruby",
         &["ruby", "rb"],
         &["#"],
         None,
@@ -464,7 +445,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "swift",
         &["swift"],
         &["//"],
         SLASH_STAR,
@@ -498,7 +478,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "powershell",
         &["powershell", "ps1", "pwsh", "ps"],
         &["#"],
         Some(BlockComment {
@@ -515,7 +494,6 @@ static PROFILES: &[Profile] = &[
         true
     ),
     profile!(
-        "lua",
         &["lua"],
         &["--"],
         Some(BlockComment {
@@ -532,7 +510,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "html",
         &["html", "htm"],
         &[],
         Some(BlockComment {
@@ -549,7 +526,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "xml",
         &["xml"],
         &[],
         Some(BlockComment {
@@ -562,7 +538,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "css",
         &["css"],
         &[],
         SLASH_STAR,
@@ -591,7 +566,6 @@ static PROFILES: &[Profile] = &[
         false
     ),
     profile!(
-        "hcl",
         &["hcl", "terraform", "tf"],
         &["#", "//"],
         SLASH_STAR,
@@ -620,90 +594,13 @@ fn resolve(label: &str) -> Option<&'static Profile> {
         .find(|p| p.aliases.iter().any(|a| a.eq_ignore_ascii_case(label)))
 }
 
-/// A detector's verdict, resolved back through the profile table so the
-/// returned label is always a real profile's canonical name.
-fn canonical(label: &str) -> Option<&'static str> {
-    resolve(label).map(|p| p.label)
-}
+const RESET: &str = "\x1b[39m";
 
-/// Infer a language for an unlabeled fence from its content, the reference's
-/// detector ladder. The caller prints the returned label in the panel rule.
-pub fn infer_language(source: &str) -> Option<&'static str> {
-    let first = first_nonblank_line(source);
-    // TypeScript: a `} as Upper` type assertion anywhere.
-    if source.match_indices("} as ").any(|(i, _)| {
-        source[i + 5..]
-            .chars()
-            .next()
-            .map(|c| c.is_ascii_uppercase())
-            .unwrap_or(false)
-    }) {
-        return canonical("ts");
-    }
-    // JSON: a parseable object or array.
-    let trimmed = source.trim();
-    if (trimmed.starts_with('{') || trimmed.starts_with('['))
-        && serde_json::from_str::<serde_json::Value>(trimmed)
-            .map(|v| v.is_object() || v.is_array())
-            .unwrap_or(false)
-    {
-        return canonical("json");
-    }
-    // Shell: a shebang naming a shell.
-    if first.starts_with("#!")
-        && (first.contains("bash") || first.contains("zsh") || first.contains("/sh"))
-    {
-        return canonical("sh");
-    }
-    // Python: a def/class header line.
-    if (first.starts_with("def ") || first.starts_with("class ")) && first.ends_with(':') {
-        return canonical("python");
-    }
-    // SQL: SELECT … FROM.
-    if starts_with_ignore_case(first, "select ") && contains_word_ignore_case(source, "from") {
-        return canonical("sql");
-    }
-    // Dockerfile: FROM ….
-    if starts_with_ignore_case(first, "from ") {
-        return canonical("dockerfile");
-    }
-    // Go: package header plus a func.
-    if first.starts_with("package ") && source.lines().any(|l| l.trim_start().starts_with("func "))
-    {
-        return canonical("go");
-    }
-    // Rust: an fn header with a let/println!/-> in evidence.
-    if (first.starts_with("fn ") || first.starts_with("pub fn "))
-        && (source.contains("let ") || source.contains("println!") || first.contains("->"))
-    {
-        return canonical("rust");
-    }
-    None
-}
-
-fn first_nonblank_line(source: &str) -> &str {
-    source
-        .lines()
-        .map(|l| l.trim_matches([' ', '\t', '\r']))
-        .find(|l| !l.is_empty())
-        .unwrap_or("")
-}
-
-fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
-    text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix)
-}
-
-fn contains_word_ignore_case(source: &str, word: &str) -> bool {
-    source
-        .split(|c: char| !is_word_char(c))
-        .any(|w| w.eq_ignore_ascii_case(word))
-}
-
+/// A character that can belong to an identifier-like token — used to keep
+/// a number class from latching onto the digits inside a bare word.
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '$'
 }
-
-const RESET: &str = "\x1b[39m";
 
 /// Highlight a whole block at once, so block comments span lines. A language
 /// the profile table doesn't know renders raw, byte-identical — the
@@ -962,21 +859,6 @@ mod tests {
     }
 
     #[test]
-    fn inference_names_the_obvious_languages() {
-        assert_eq!(infer_language("{\"a\": 1}"), Some("json"));
-        assert_eq!(infer_language("#!/bin/bash\necho hi"), Some("sh"));
-        assert_eq!(infer_language("def main():\n    pass"), Some("python"));
-        assert_eq!(infer_language("SELECT * FROM t"), Some("sql"));
-        assert_eq!(infer_language("FROM alpine:3.20"), Some("dockerfile"));
-        assert_eq!(infer_language("package main\n\nfunc main() {}"), Some("go"));
-        assert_eq!(
-            infer_language("fn main() {\n    let x = 1;\n}"),
-            Some("rust")
-        );
-        assert_eq!(infer_language("just words"), None);
-    }
-
-    #[test]
     fn long_single_line_stays_linear() {
         // Regression: byte_at re-summed the UTF-8 prefix of the whole line
         // for every char, making cost quadratic in line length. Compare a
@@ -1014,16 +896,15 @@ mod tests {
     }
 
     #[test]
-    fn profile_labels_are_unique_and_aliases_unambiguous() {
+    fn profile_aliases_are_unique_within_and_across_profiles() {
         for (i, a) in PROFILES.iter().enumerate() {
             for b in &PROFILES[i + 1..] {
-                assert_ne!(a.label, b.label);
                 for alias in a.aliases {
                     assert!(
                         !b.aliases.iter().any(|x| x.eq_ignore_ascii_case(alias)),
-                        "alias {alias} is claimed by {} and {}",
-                        a.label,
-                        b.label
+                        "alias {alias} is claimed by {:?} and {:?}",
+                        a.aliases,
+                        b.aliases
                     );
                 }
             }
