@@ -2139,9 +2139,6 @@ pub async fn run(
         app.notice("session saving disabled for this run".into());
     }
     match agent_options.tool_mode {
-        crate::core::cli::ToolMode::ReadOnly => {
-            app.notice("read-only mode — only read and grep are available".into())
-        }
         crate::core::cli::ToolMode::None => {
             app.notice("no-tools mode — provider requests contain no tool schemas".into())
         }

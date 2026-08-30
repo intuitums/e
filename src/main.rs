@@ -1,8 +1,7 @@
 //! The `e` binary: CLI subcommands and handoff to the interactive frame.
 //!
 //! Session UI lives in `tui::app` — this file owns flags, one-shot commands
-//! (`auth`, `ask`, `docs`, `update`), prompt text arriving on piped stdin,
-//! then opens the frame loop.
+//! (`auth`, `rpc`, `docs`, `update`), then opens the frame loop.
 // Same contract as the library: no panic sites outside test builds.
 #![cfg_attr(
     not(test),
@@ -14,7 +13,6 @@
     )
 )]
 
-use crossterm::terminal;
 use std::io::IsTerminal as _;
 
 use e::core::agent::{Agent, AgentOptions, SessionEvent};
@@ -125,7 +123,6 @@ async fn main() -> std::io::Result<()> {
 usage:\n  e [message]           start a session (optionally with a first prompt;\n                        piped stdin counts as prompt text)\n  \
 e -c, --continue      continue this directory's most recent session\n  \
 e -r, --resume        pick a session to resume\n  \
-e ask \"prompt\"        one agent turn, no TUI; plain text when piped\n  \
 e rpc                 JSONL request/response protocol on stdin/stdout\n  \
 e docs [topic]        print a built-in format guide\n  \
 e update              update e to the latest release\n  \
@@ -138,12 +135,11 @@ e -v, --version"
             "\nrun options:\n  \
 --no-extensions, --ne  run without extensions\n  \
 --no-save, --ns        keep the conversation in memory only\n  \
---read-only, --ro      allow only read and grep tools\n  \
 --no-tools, --nt       expose and run no tools\n  \
 --model, -m <model>    select a model for this process\n  \
 --effort, --ef <level> select reasoning effort for this process\n  \
 --image, -i <path>     attach an image to the first prompt (repeatable)\n  \
---json, -j             machine output (ask, doctor, providers)"
+--json, -j             machine output (doctor, providers)"
         );
         let flags = host.flags();
         let commands = host.commands();
@@ -260,7 +256,7 @@ e -v, --version"
     match auth_status_requested(args) {
         Ok(true) => {
             if options.json {
-                eprintln!("--json is supported by `e ask`, `e doctor`, and `e providers`");
+                eprintln!("--json is supported by `e doctor` and `e providers`");
                 host.shutdown().await;
                 std::process::exit(2);
             }
@@ -276,31 +272,8 @@ e -v, --version"
     if args.first().map(String::as_str) == Some("rpc") {
         return rpc(host, &options).await;
     }
-    if args.first().map(String::as_str) == Some("ask") {
-        let selected = match resolve_model(&options) {
-            Ok(model) => model,
-            Err(message) => {
-                if options.json {
-                    println!("{}", serde_json::json!({"error": message}));
-                } else {
-                    eprintln!("{message}");
-                }
-                host.shutdown().await;
-                std::process::exit(2);
-            }
-        };
-        let piped = match read_piped_prompt().await {
-            Ok(piped) => piped,
-            Err(message) => {
-                eprintln!("{message}");
-                std::process::exit(2);
-            }
-        };
-        let prompt = combine_prompt(args[1..].join(" "), &piped);
-        return ask(prompt, host, selected, &options).await;
-    }
     if options.json {
-        eprintln!("--json is supported by `e ask`, `e doctor`, and `e providers`");
+        eprintln!("--json is supported by `e doctor` and `e providers`");
         host.shutdown().await;
         std::process::exit(2);
     }
@@ -353,40 +326,16 @@ e -v, --version"
         return Ok(());
     }
 
-    // Piped stdin is prompt text, not a terminal for the frame loop to own:
-    // run the headless ask path instead of opening the TUI.
-    let stdin_tty = std::io::stdin().is_terminal();
-    if !stdin_tty {
-        if options.continue_session || options.resume_session {
-            usage_error(
-                &host,
-                false,
-                "--continue and --resume need an interactive terminal".into(),
-            )
-            .await;
-        }
-        let piped = match read_piped_prompt().await {
-            Ok(piped) => piped,
-            Err(message) => {
-                eprintln!("{message}");
-                host.shutdown().await;
-                std::process::exit(2);
-            }
-        };
-        let prompt = combine_prompt(args.join(" "), &piped);
-        if prompt.trim().is_empty() {
-            usage_error(
-                &host,
-                false,
-                "no prompt — pass one as an argument or pipe text into e".into(),
-            )
-            .await;
-        }
-        let selected = match resolve_model(&options) {
-            Ok(model) => model,
-            Err(message) => usage_error(&host, false, message).await,
-        };
-        return ask(prompt, host, selected, &options).await;
+    // The interactive frame loop needs a terminal it owns. Piped stdin has
+    // none, and headless one-shots go through `e rpc`, so refuse rather than
+    // half-run a session with no way to read the keyboard.
+    if !std::io::stdin().is_terminal() {
+        usage_error(
+            &host,
+            false,
+            "e needs an interactive terminal; for headless use `e rpc`".into(),
+        )
+        .await;
     }
 
     let selected = match resolve_model(&options) {
@@ -399,7 +348,7 @@ e -v, --version"
     };
     let initial = args.join(" ");
     if !options.images.is_empty() && initial.trim().is_empty() {
-        eprintln!("--image requires an initial prompt (or use `e ask`)");
+        eprintln!("--image requires an initial prompt");
         host.shutdown().await;
         std::process::exit(2);
     }
@@ -425,42 +374,6 @@ e -v, --version"
         jobs_rx,
     )
     .await
-}
-
-/// Upper bound on a piped prompt — generous for pasted diffs and logs (the
-/// same bound the RPC line protocol uses) but never unbounded: a writer
-/// that never closes stdin must not grow this process without limit.
-const MAX_PIPED_PROMPT_BYTES: usize = 10 * 1024 * 1024;
-
-/// Prompt text arriving on piped stdin; empty when stdin is a terminal.
-/// Err when the pipe exceeds the bound or the read fails.
-async fn read_piped_prompt() -> Result<String, String> {
-    use tokio::io::AsyncReadExt as _;
-    if std::io::stdin().is_terminal() {
-        return Ok(String::new());
-    }
-    let mut buf = Vec::new();
-    tokio::io::stdin()
-        .take(MAX_PIPED_PROMPT_BYTES as u64 + 1)
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|error| format!("reading piped prompt: {error}"))?;
-    if buf.len() > MAX_PIPED_PROMPT_BYTES {
-        return Err(format!(
-            "piped prompt exceeds the {} MiB limit",
-            MAX_PIPED_PROMPT_BYTES / (1024 * 1024)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
-
-/// Typed words and piped text become one prompt, piped text last.
-fn combine_prompt(typed: String, piped: &str) -> String {
-    match (typed.trim().is_empty(), piped.trim().is_empty()) {
-        (true, _) => piped.to_string(),
-        (false, true) => typed,
-        (false, false) => format!("{typed}\n\n{piped}"),
-    }
 }
 
 fn resolve_model(options: &Options) -> Result<Model, String> {
@@ -527,7 +440,6 @@ struct RpcRequest {
 fn rpc_options(defaults: &Options, request: &RpcRequest) -> Result<Options, String> {
     let requested_tools = match request.tool_mode.as_deref() {
         None | Some("all") => e::core::cli::ToolMode::All,
-        Some("read_only") | Some("read-only") => e::core::cli::ToolMode::ReadOnly,
         Some("none") => e::core::cli::ToolMode::None,
         Some(other) => return Err(format!("unknown tool_mode `{other}`")),
     };
@@ -602,10 +514,6 @@ impl TurnAccumulator {
         if !self.terminal && self.error.is_none() {
             self.error = Some("agent event stream closed before turn completion".into());
         }
-    }
-
-    fn failed(&self) -> bool {
-        self.error.is_some()
     }
 
     fn json(
@@ -754,160 +662,6 @@ async fn rpc(
     Ok(())
 }
 
-/// `e ask "prompt"` — one turn, no TUI. On a terminal the reply renders in
-/// the full styled look once complete (tool activity streams as dim rows);
-/// piped, raw text streams to stdout as it arrives. `--json` instead emits
-/// one final object, and `--no-save` keeps the turn out of the session log.
-async fn ask(
-    prompt: String,
-    host: std::sync::Arc<e::core::api::ExtensionHost>,
-    selected: Model,
-    options: &Options,
-) -> std::io::Result<()> {
-    if prompt.trim().is_empty() {
-        if options.json {
-            println!("{}", serde_json::json!({"error": "prompt is empty"}));
-        } else {
-            eprintln!("usage: e ask \"prompt\"");
-        }
-        host.shutdown().await;
-        std::process::exit(2);
-    }
-    let tty = e::tui::background::stdout_is_tty() && !options.json;
-    let theme = e::tui::theme::resolve(&e::core::config::settings::theme(), false);
-    let width = terminal::size()
-        .map(|(c, _)| c as usize)
-        .unwrap_or(80)
-        .min(100);
-
-    let warnings = model::config_warnings();
-    if !options.json {
-        for warning in &warnings {
-            eprintln!("warning: {warning}");
-        }
-    }
-    let selected_slug = model::slug(&selected);
-    let pricing = selected.pricing.clone();
-    let images = match load_images(options, &selected) {
-        Ok(images) => images,
-        Err(message) => {
-            if options.json {
-                println!("{}", serde_json::json!({"error": message}));
-            } else {
-                eprintln!("{message}");
-            }
-            host.shutdown().await;
-            std::process::exit(2);
-        }
-    };
-    let (mut agent, mut events) = Agent::with_options(selected, agent_options(options));
-    let selected_effort = agent.effort();
-    agent.set_host(host.clone());
-    agent.submit_message(
-        e::core::providers::ChatMessage::user_with_images(prompt, images),
-        e::core::agent::context::system_prompt_here(),
-    );
-
-    use std::io::Write as _;
-    let mut result = TurnAccumulator::with_warnings(warnings);
-    while let Some(event) = events.recv().await {
-        match &event {
-            SessionEvent::TextDelta(d) => {
-                if !tty && !options.json {
-                    print!("{d}");
-                    let _ = std::io::stdout().flush();
-                }
-            }
-            SessionEvent::ToolBatchStart { calls } => {
-                if tty {
-                    println!(
-                        "{}",
-                        theme.fg(
-                            "dim",
-                            &format!(
-                                "● {} tool call{}",
-                                calls.len(),
-                                if calls.len() == 1 { "" } else { "s" }
-                            )
-                        )
-                    );
-                }
-            }
-            SessionEvent::ToolStart { .. } => {}
-            SessionEvent::ToolOutput { chunk, .. } => {
-                if tty {
-                    for line in chunk.lines() {
-                        println!("{}", theme.fg("dim", &format!("│ {line}")));
-                    }
-                }
-            }
-            SessionEvent::ToolEnd {
-                summary, outcome, ..
-            } => {
-                if tty && outcome.is_error() {
-                    println!("{}", theme.fg("dim", &format!("└ {summary}")));
-                }
-            }
-            SessionEvent::Retry {
-                attempt,
-                limit,
-                delay_secs,
-                cause,
-                reason,
-            } => {
-                let message = format!(
-                    "{} — retrying ({attempt}/{limit}) in {delay_secs}s: {reason}",
-                    cause.label()
-                );
-                if !options.json {
-                    eprintln!("{message}");
-                }
-            }
-            SessionEvent::Recovered { attempt, limit } => {
-                if !options.json {
-                    eprintln!("recovered on attempt {attempt}/{limit}");
-                }
-            }
-            SessionEvent::Error(message) => {
-                if !options.json {
-                    eprintln!("error: {message}");
-                }
-            }
-            SessionEvent::Warning(message) => {
-                if !options.json {
-                    eprintln!("warning: {message}");
-                }
-            }
-            SessionEvent::TurnEnd { .. } | SessionEvent::Usage { .. } => {}
-            _ => {}
-        }
-        result.observe(&event);
-        if result.terminal {
-            break;
-        }
-    }
-    result.finish();
-    if tty && !result.output.is_empty() {
-        println!();
-        for line in e::tui::markdown::render_markdown(&theme, &result.output, width) {
-            println!("{line}");
-        }
-    }
-    if options.json {
-        println!(
-            "{}",
-            result.json(&selected_slug, selected_effort.as_deref(), pricing.as_ref())
-        );
-    } else if !tty {
-        println!();
-    }
-    host.shutdown().await;
-    if result.failed() {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use e::core::cli::{Options, ToolMode};
@@ -919,7 +673,7 @@ mod tests {
     fn bare_auth_is_status_only() {
         assert_eq!(super::auth_status_requested(&args(&["auth"])), Ok(true));
         assert_eq!(
-            super::auth_status_requested(&args(&["ask", "hello"])),
+            super::auth_status_requested(&args(&["doctor", "hello"])),
             Ok(false)
         );
     }
@@ -956,7 +710,7 @@ mod tests {
         let mut result = super::TurnAccumulator::default();
         result.observe(&e::core::agent::SessionEvent::TextDelta("partial".into()));
         result.finish();
-        assert!(result.failed());
+        assert!(result.error.is_some());
         assert_eq!(result.output, "partial");
     }
 
@@ -979,7 +733,7 @@ mod tests {
         // Real subcommands, ordinary words, multi-word prompts, and
         // `--`-escaped text all stay prompts.
         for positional in [
-            vec!["ask".to_string()],
+            vec!["rpc".to_string()],
             vec!["hello".to_string()],
             vec!["docss".to_string(), "world".to_string()],
         ] {
@@ -999,23 +753,6 @@ mod tests {
             }),
             None
         );
-    }
-
-    #[test]
-    fn piped_text_joins_typed_words_with_pipe_text_last() {
-        assert_eq!(
-            super::combine_prompt(String::new(), "from pipe"),
-            "from pipe"
-        );
-        assert_eq!(
-            super::combine_prompt("typed words".into(), ""),
-            "typed words"
-        );
-        assert_eq!(
-            super::combine_prompt("review:".into(), "the diff"),
-            "review:\n\nthe diff"
-        );
-        assert_eq!(super::combine_prompt(String::new(), ""), "");
     }
 
     #[test]

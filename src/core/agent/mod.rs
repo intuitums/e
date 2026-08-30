@@ -700,7 +700,6 @@ impl Agent {
         };
         let system = match tool_mode {
             ToolMode::All => system,
-            ToolMode::ReadOnly => format!("{system}\n\n{}", context::read_only_notice()),
             ToolMode::None => format!("{system}\n\n{}", context::no_tools_notice()),
         };
 
@@ -777,9 +776,8 @@ impl Agent {
                     effort: effort.clone(),
                     tools: tools::filter_schemas(
                         match (&host, tool_mode) {
-                            // Restricted modes trust only the built-in read
-                            // surface. An extension overriding a tool named
-                            // `read` must not smuggle writes into --read-only.
+                            // Extensions augment the toolset only when tools
+                            // run at all; --no-tools advertises nothing.
                             (Some(h), ToolMode::All) => h.merged_tool_schemas(),
                             _ => tools::schemas(),
                         },
@@ -1440,21 +1438,16 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
         id,
         events,
     } = context;
-    if !tool_mode.allows(name) {
-        let mode = match tool_mode {
-            ToolMode::ReadOnly => "read-only",
-            ToolMode::None => "no-tools",
-            ToolMode::All => "unavailable",
-        };
+    if !tool_mode.allows() {
         return tools::ToolOutput {
-            content: format!("tool blocked by {mode} mode: {name}"),
+            content: format!("tool blocked by no-tools mode: {name}"),
             outcome: tools::ToolOutcome::Blocked,
             summary: "blocked".into(),
             display: None,
         };
     }
-    // Restricted modes are a built-in-only surface: extension schemas,
-    // overrides, tools, and hooks all stay out of the execution path.
+    // --no-tools is a no-op here (nothing reaches this point), so tools run
+    // with the full extension surface: schemas, overrides, tools, and hooks.
     if let (ToolMode::All, Some(h)) = (tool_mode, &host) {
         // The hook chain is bounded per extension, but Esc must not wait out
         // even one silent hook's timeout: race it against the cancel flag.
@@ -1597,7 +1590,7 @@ mod option_tests {
         let output = run_tool(
             ToolRunContext {
                 host: None,
-                tool_mode: ToolMode::ReadOnly,
+                tool_mode: ToolMode::None,
                 cwd: std::path::PathBuf::from("."),
                 cancel: Arc::new(AtomicBool::new(false)),
                 id: 1,
@@ -1609,6 +1602,6 @@ mod option_tests {
         .await;
 
         assert_eq!(output.outcome, tools::ToolOutcome::Blocked);
-        assert!(output.content.contains("read-only"));
+        assert!(output.content.contains("no-tools"));
     }
 }

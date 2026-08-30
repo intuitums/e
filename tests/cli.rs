@@ -1,35 +1,6 @@
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-mod common;
-
-use common::{env_lock, request_json, serve_sse, Home};
-
-#[test]
-fn ask_json_keeps_validation_errors_on_stdout_as_json() {
-    let output = Command::new(env!("CARGO_BIN_EXE_e"))
-        .args(["--no-extensions", "--json", "ask"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["error"], "prompt is empty");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_e"))
-        .args(["--no-extensions", "--json", "ask", "--model"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(value["error"]
-        .as_str()
-        .unwrap()
-        .starts_with("--model requires a value"));
-    assert!(value["error"].as_str().unwrap().contains("usage: e ask"));
-}
-
 #[test]
 fn json_auth_is_rejected_like_other_unsupported_subcommands() {
     let home = std::env::temp_dir().join(format!(
@@ -196,46 +167,18 @@ fn standalone_near_miss_words_suggest_commands_not_sessions() {
 }
 
 #[test]
-fn piped_stdin_is_prompt_text_not_a_terminal() {
+fn piped_stdin_is_refused_with_a_pointer_to_rpc() {
     let home = std::env::temp_dir().join(format!(
         "e-cli-piped-{}-{}",
         std::process::id(),
         uuid::Uuid::now_v7()
     ));
-    // An empty pipe and no typed words: a usage error, never an open TUI.
+    // The interactive frame loop needs a terminal it owns; piped stdin has
+    // none, and headless one-shots go through `e rpc`. Piping text in is a
+    // usage error that names the headless path, never a half-open TUI.
     let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
         .args(["--no-extensions"])
         .env("E_HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    drop(child.stdin.take());
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("no prompt"), "stderr: {stderr}");
-
-    // Piped text joins typed words into one prompt for the headless path,
-    // proven end to end against a mock provider: the request the binary
-    // sends must carry both the typed words and the piped text.
-    let _lock = env_lock();
-    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"pipe works\"}}]}\n\n\
-                data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n\
-                data: [DONE]\n\n";
-    let (port, server) = serve_sse(&[body]);
-    let home = Home::new("piped-ask");
-    home.write(
-        "models.json",
-        format!(
-            r#"{{"providers":{{"mock":{{"base_url":"http://127.0.0.1:{port}","api":"completions","models":["test"]}}}}}}"#
-        ),
-    );
-    home.write("auth.json", r#"{"format_version":1,"mock":{"key":"k"}}"#);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
-        .args(["--no-extensions", "--no-save", "ask", "summarize:"])
-        .env("E_HOME", &home.dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -245,32 +188,12 @@ fn piped_stdin_is_prompt_text_not_a_terminal() {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"piped body")
+        .write_all(b"summarize this repository")
         .unwrap();
     drop(child.stdin.take());
     let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let captured = server.join().unwrap().remove(0);
-    let sent = String::from_utf8_lossy(captured.as_bytes()).into_owned();
-    let request = request_json(&sent);
-    // The user message is the last one in the completions payload.
-    let prompt = request["messages"]
-        .as_array()
-        .and_then(|messages| messages.iter().rev().find(|m| m["role"] == "user"))
-        .map(|m| {
-            m["content"]
-                .as_str()
-                .map(str::to_string)
-                .or_else(|| m["content"][0]["text"].as_str().map(str::to_string))
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
-    assert!(prompt.contains("summarize:"), "prompt: {prompt}");
-    assert!(prompt.contains("piped body"), "prompt: {prompt}");
-    assert!(prompt.rfind("summarize:").unwrap() < prompt.rfind("piped body").unwrap());
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "pipe works");
-} // Home::drop removes the isolated E_HOME
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("interactive terminal"), "stderr: {stderr}");
+    assert!(stderr.contains("e rpc"), "stderr: {stderr}");
+}

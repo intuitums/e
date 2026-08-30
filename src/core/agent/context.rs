@@ -57,8 +57,6 @@ struct Settings {
     #[serde(default)]
     system_prompt: Option<String>,
     #[serde(default)]
-    read_only_notice: Option<String>,
-    #[serde(default)]
     no_tools_notice: Option<String>,
 }
 
@@ -72,18 +70,6 @@ fn settings() -> Settings {
 /// A user override from `~/.e/settings.json`, if a non-empty one is set.
 fn custom_prompt() -> Option<String> {
     settings().system_prompt.filter(|p| !p.trim().is_empty())
-}
-
-/// The suffix appended to the system prompt in read-only tool mode — a
-/// `~/.e/settings.json` `read_only_notice` overrides it, same as
-/// `system_prompt` overrides the base.
-pub fn read_only_notice() -> String {
-    settings()
-        .read_only_notice
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| {
-            "This run is read-only. Only the read and grep tools are available.".into()
-        })
 }
 
 /// The suffix appended to the system prompt when no tools are available —

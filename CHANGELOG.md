@@ -7,6 +7,15 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Read-only tool mode is removed. `--read-only`/`--ro`, the `read_only`
+  RPC `tool_mode`, and the `read_only_notice` override are gone; `ToolMode`
+  is now `all` or `none`, with `--no-tools` the one deliberate opt-out. A
+  coding agent acts — a half-disabled toolset was ceremony, not a use.
+- The `e ask` headless subcommand is removed. Headless automation goes
+  through `e rpc` (JSONL in, one object out per line); piped stdin with no
+  terminal is now a usage error that points at `e rpc` rather than running
+  a one-shot. The `subagent.mjs` example extension, which shelled out to
+  `e ask`, is removed with it.
 - The `ask` tool is retired outright, not moved. A coding agent decides
   and acts; it does not interview its user. The core loses the ask schema,
   the answer registry, the read-only special case, and the question panel,

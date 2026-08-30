@@ -13,20 +13,14 @@
 pub enum ToolMode {
     #[default]
     All,
-    ReadOnly,
     None,
 }
 
 impl ToolMode {
-    pub fn allows(self, name: &str) -> bool {
-        match self {
-            ToolMode::All => true,
-            // Gate by the known-safe built-ins, never by name alone: an
-            // extension could ship a mutating tool under any name, so only
-            // the tools whose behaviour we control earn read-only trust.
-            ToolMode::ReadOnly => matches!(name, "read" | "grep"),
-            ToolMode::None => false,
-        }
+    /// Whether tools run at all this turn. A coding agent acts, so the default
+    /// is the full toolset; `--no-tools` is the one deliberate opt-out.
+    pub fn allows(self) -> bool {
+        matches!(self, ToolMode::All)
     }
 
     /// Combine a process-wide ceiling with a per-request preference. A
@@ -35,7 +29,6 @@ impl ToolMode {
     pub fn restrict(self, requested: Self) -> Self {
         match (self, requested) {
             (Self::None, _) | (_, Self::None) => Self::None,
-            (Self::ReadOnly, _) | (_, Self::ReadOnly) => Self::ReadOnly,
             (Self::All, Self::All) => Self::All,
         }
     }
@@ -51,8 +44,6 @@ const ALL_FLAGS: &[&str] = &[
     "--ne",
     "--no-save",
     "--ns",
-    "--read-only",
-    "--ro",
     "--no-tools",
     "--nt",
     "--no-network",
@@ -75,21 +66,12 @@ const ALL_FLAGS: &[&str] = &[
 ];
 
 /// Every subcommand word, in help order.
-pub const SUBCOMMANDS: &[&str] = &[
-    "ask",
-    "rpc",
-    "docs",
-    "update",
-    "auth",
-    "doctor",
-    "providers",
-];
+pub const SUBCOMMANDS: &[&str] = &["rpc", "docs", "update", "auth", "doctor", "providers"];
 
 /// One-line usage for a subcommand, so error messages can point somewhere
 /// actionable instead of at generic help.
 pub fn subcommand_usage(sub: &str) -> Option<&'static str> {
     match sub {
-        "ask" => Some("usage: e ask \"prompt\""),
         "rpc" => Some("usage: e rpc"),
         "docs" => Some("usage: e docs [topic]"),
         "update" => Some("usage: e update"),
@@ -254,11 +236,6 @@ pub fn parse(args: Vec<String>, extension_flags: &[String]) -> Result<Options, S
         match name {
             "--no-extensions" | "--ne" => out.no_extensions = true,
             "--no-save" | "--ns" => out.no_save = true,
-            "--read-only" | "--ro" => {
-                if out.tool_mode != ToolMode::None {
-                    out.tool_mode = ToolMode::ReadOnly;
-                }
-            }
             "--no-tools" | "--nt" => out.tool_mode = ToolMode::None,
             "--json" | "-j" => out.json = true,
             "--model" | "-m" => out.model = Some(take_value(&args, &mut index, inline, "--model")?),
@@ -314,48 +291,36 @@ mod tests {
         let long = parsed(&[
             "--no-extensions",
             "--no-save",
-            "--read-only",
+            "--no-tools",
             "--json",
             "--model",
             "openai/gpt",
             "--effort=high",
             "--image=one.png",
-            "ask",
             "hello",
+            "world",
         ]);
         let short = parsed(&[
             "--ne",
             "--ns",
-            "--ro",
+            "--nt",
             "-j",
             "-m=openai/gpt",
             "--ef",
             "high",
             "-i",
             "one.png",
-            "ask",
             "hello",
+            "world",
         ]);
         assert_eq!(long, short);
     }
 
     #[test]
-    fn no_tools_wins_over_read_only_regardless_of_order() {
-        assert_eq!(parsed(&["--nt", "--ro"]).tool_mode, ToolMode::None);
-        assert_eq!(parsed(&["--ro", "--nt"]).tool_mode, ToolMode::None);
-    }
-
-    #[test]
     fn nested_tool_modes_can_only_become_more_restrictive() {
         assert_eq!(ToolMode::None.restrict(ToolMode::All), ToolMode::None);
-        assert_eq!(
-            ToolMode::ReadOnly.restrict(ToolMode::All),
-            ToolMode::ReadOnly
-        );
-        assert_eq!(
-            ToolMode::All.restrict(ToolMode::ReadOnly),
-            ToolMode::ReadOnly
-        );
+        assert_eq!(ToolMode::All.restrict(ToolMode::None), ToolMode::None);
+        assert_eq!(ToolMode::All.restrict(ToolMode::All), ToolMode::All);
     }
 
     #[test]
@@ -438,7 +403,7 @@ mod tests {
             Some("--model")
         );
         assert_eq!(
-            did_you_mean("docss", &["docs".to_string(), "ask".to_string()]).as_deref(),
+            did_you_mean("docss", &["docs".to_string(), "rpc".to_string()]).as_deref(),
             Some("docs")
         );
         assert_eq!(did_you_mean("docs", &["docs".to_string()]), None);

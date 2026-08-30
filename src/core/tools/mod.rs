@@ -110,14 +110,11 @@ pub fn schemas() -> Vec<Value> {
 /// Apply a run's safety mode after built-in and extension schemas have been
 /// merged. Execution independently enforces the same policy.
 pub fn filter_schemas(schemas: Vec<Value>, mode: ToolMode) -> Vec<Value> {
-    schemas
-        .into_iter()
-        .filter(|schema| {
-            schema["function"]["name"]
-                .as_str()
-                .is_some_and(|name| mode.allows(name))
-        })
-        .collect()
+    if mode.allows() {
+        schemas
+    } else {
+        Vec::new()
+    }
 }
 
 /// Labels and category used to project one tool through its lifecycle.
@@ -606,9 +603,8 @@ mod tests {
 
     #[test]
     fn safety_modes_filter_the_model_visible_contract() {
-        // Read-only sessions keep the tools that only observe — read and
-        // grep — and nothing that can mutate the workspace.
-        assert_eq!(names(ToolMode::ReadOnly), vec!["read", "grep"]);
+        // No-tools sessions advertise nothing; the default run carries the
+        // whole built-in toolset.
         assert!(names(ToolMode::None).is_empty());
         assert_eq!(names(ToolMode::All).len(), schemas().len());
     }

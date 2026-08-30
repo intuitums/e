@@ -400,7 +400,7 @@ done
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
-async fn read_only_mode_blocks_extension_owned_writes() {
+async fn no_tools_mode_blocks_extension_owned_writes() {
     const WRITE_EXTENSION: &str = r#"#!/bin/sh
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
@@ -427,7 +427,7 @@ done
     let host = start_host(notices).await;
     let options = e::core::agent::AgentOptions {
         save_session: false,
-        tool_mode: e::core::cli::ToolMode::ReadOnly,
+        tool_mode: e::core::cli::ToolMode::None,
         ..e::core::agent::AgentOptions::default()
     };
     let (mut agent, mut events) = e::core::agent::Agent::with_options(
@@ -453,13 +453,13 @@ done
     .await
     .expect("agent turn completes");
 
-    // The extension's write tool is not advertised in read-only mode, and a
+    // The extension's write tool is not advertised in no-tools mode, and a
     // call that arrives anyway is blocked before the extension could serve
-    // it — owning a mutating name grants no read-only escape.
+    // it — owning a tool name grants no escape from the safety mode.
     assert!(!server.join().unwrap()[1].contains("extension write description"));
     let (outcome, content) = result.expect("the write call resolves");
     assert_eq!(outcome, e::core::tools::ToolOutcome::Blocked);
-    assert!(content.contains("read-only"));
+    assert!(content.contains("no-tools"));
     host.shutdown().await;
 }
 
@@ -816,7 +816,7 @@ rl.on("line", (line) => {
     // the built-in subcommand or constructing an initial prompt.
     match host
         .startup(vec![
-            "ask".into(),
+            "summarize".into(),
             "fix this".into(),
             "--tag".into(),
             "release".into(),
@@ -825,7 +825,7 @@ rl.on("line", (line) => {
         .await
         .unwrap()
     {
-        StartupAction::Continue(argv) => assert_eq!(argv, vec!["ask", "fix this"]),
+        StartupAction::Continue(argv) => assert_eq!(argv, vec!["summarize", "fix this"]),
         StartupAction::Relaunch { .. } => panic!("unexpected relaunch"),
     }
     host.shutdown().await;

@@ -159,7 +159,6 @@ docs/extensions/
   gate.mjs       the tool_call hook as a fail-open guard
   protected.mjs  the tool_call hook denying credential-shaped paths
   worktree.mjs   a minimal startup-hook launcher (e -w)
-  subagent.mjs   bounded delegated e turns as a tool
   mcp.mjs        one MCP stdio server's tools as extension tools
 ```
 
@@ -186,9 +185,6 @@ own directory) it runs as a named no-op extension and stays silent.
   hook like this fits.
 - **`worktree.mjs`** — the startup-hook launcher on the scaffold:
   `e -w [branch]` creates a Git worktree and relaunches e there.
-- **`subagent.mjs`** — a `delegate` tool that runs an isolated `e ask
-  --json --no-save --no-extensions` child. It defaults to read-only and can
-  select a model or effort without creating a recursive extension chain.
 - **`mcp.mjs`** — a dependency-free bridge from one configured MCP stdio
   server's `tools/list` / `tools/call` surface into e extension tools. It
   forwards MCP progress through the additive `tool.update` capability.
@@ -240,14 +236,6 @@ current SDK legacy/default mode, newline-delimited JSON-RPC, paginated
 [transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports),
 and [tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
 specifications.
-
-## Delegated turns
-
-Copy both `subagent.mjs` and `scaffold.mjs`, make the former executable, and
-restart. The model gains a `delegate` tool. Each delegation is a fresh child
-turn in the same working directory; it is ephemeral, extension-free, and
-read-only unless the caller explicitly selects another `tool_mode`. Set
-`E_BIN` when the child should use an e binary other than the one on `PATH`.
 
 ## What startup hooks are for
 
