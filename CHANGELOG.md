@@ -14,8 +14,8 @@ the pipeline publishes.
 - The `e ask` headless subcommand is removed. Headless automation goes
   through `e rpc` (JSONL in, one object out per line); piped stdin with no
   terminal is now a usage error that points at `e rpc` rather than running
-  a one-shot. The `subagent.mjs` example extension, which shelled out to
-  `e ask`, is removed with it.
+  a one-shot. The `subagent.mjs` example extension is rewritten to drive a
+  single-shot `e rpc` child instead of shelling out to `e ask`.
 - The `ask` tool is retired outright, not moved. A coding agent decides
   and acts; it does not interview its user. The core loses the ask schema,
   the answer registry, the read-only special case, and the question panel,
