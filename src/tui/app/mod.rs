@@ -1834,6 +1834,19 @@ fn builtin_category(value: &str) -> &'static str {
     }
 }
 
+/// Display order of the `/` picker's category tags: Account, Model,
+/// Session, Workspace, then the General catch-all — so same-tag rows sit
+/// together instead of scattering through the list.
+fn category_rank(meta: &str) -> u8 {
+    match meta {
+        "Account" => 0,
+        "Model" => 1,
+        "Session" => 2,
+        "Workspace" => 3,
+        _ => 4,
+    }
+}
+
 fn stage_initial_prompt(
     initial: String,
     awaiting_trust: bool,

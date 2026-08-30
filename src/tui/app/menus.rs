@@ -47,6 +47,11 @@ impl App {
         for item in &mut items {
             item.meta = builtin_category(&item.value).into();
         }
+        // Group by tag: a stable sort on the category keeps each group
+        // contiguous (Account, Model, Session, Workspace, General) without
+        // disturbing the order inside a group, and leaves the Prompt and
+        // Extension rows — pushed below — trailing the built-ins.
+        items.sort_by_key(|item| category_rank(&item.meta));
         // Built-in dispatch wins name clashes, so a template or extension
         // command shadowed by a built-in is unreachable — listing it would
         // show a duplicate row that runs the built-in anyway.
