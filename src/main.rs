@@ -1,7 +1,7 @@
 //! The `e` binary: CLI subcommands and handoff to the interactive frame.
 //!
 //! Session UI lives in `tui::app` — this file owns flags, one-shot commands
-//! (`auth`, `rpc`, `docs`, `update`), then opens the frame loop.
+//! (`auth`, `rpc`, `agents`, `docs`, `update`), then opens the frame loop.
 // Same contract as the library: no panic sites outside test builds.
 #![cfg_attr(
     not(test),
@@ -124,6 +124,7 @@ usage:\n  e [message]           start a session (optionally with a first prompt;
 e -c, --continue      continue this directory's most recent session\n  \
 e -r, --resume        pick a session to resume\n  \
 e rpc                 JSONL request/response protocol on stdin/stdout\n  \
+e agents [--json]     list delegated-turn agent personas\n  \
 e docs [topic]        print a built-in format guide\n  \
 e update              update e to the latest release\n  \
 e auth                show sign-in status\n  \
@@ -256,7 +257,7 @@ e -v, --version"
     match auth_status_requested(args) {
         Ok(true) => {
             if options.json {
-                eprintln!("--json is supported by `e doctor` and `e providers`");
+                eprintln!("--json is supported by `e agents`, `e doctor`, and `e providers`");
                 host.shutdown().await;
                 std::process::exit(2);
             }
@@ -272,8 +273,13 @@ e -v, --version"
     if args.first().map(String::as_str) == Some("rpc") {
         return rpc(host, &options).await;
     }
+    if args.first().map(String::as_str) == Some("agents") {
+        agents_list(&options);
+        host.shutdown().await;
+        return Ok(());
+    }
     if options.json {
-        eprintln!("--json is supported by `e doctor` and `e providers`");
+        eprintln!("--json is supported by `e agents`, `e doctor`, and `e providers`");
         host.shutdown().await;
         std::process::exit(2);
     }
@@ -406,6 +412,43 @@ fn agent_options(options: &Options) -> AgentOptions {
         save_session: !options.no_save,
         tool_mode: options.tool_mode,
         effort_override: options.effort.clone(),
+        allowed_tools: None,
+    }
+}
+
+/// `e agents` — the delegated-turn personas available here, trust-scoped:
+/// global ones always, a trusted repo's `.e/agents/` too. `--json` emits an
+/// array for tools (the subagent extension reads it to offer an `agent`
+/// choice); otherwise one aligned line each.
+fn agents_list(options: &Options) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let agents = e::core::resources::agents::list(&cwd);
+    if options.json {
+        let rows: Vec<serde_json::Value> = agents
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "name": a.name,
+                    "description": a.description,
+                    "model": a.model,
+                    "tools": a.tools,
+                    "source": match a.source {
+                        e::core::resources::agents::Source::User => "user",
+                        e::core::resources::agents::Source::Project => "project",
+                    },
+                })
+            })
+            .collect();
+        println!("{}", serde_json::Value::from(rows));
+        return;
+    }
+    if agents.is_empty() {
+        println!("no agents — add personas as ~/.e/agents/<name>.md");
+        return;
+    }
+    let width = agents.iter().map(|a| a.name.len()).max().unwrap_or(0);
+    for agent in agents {
+        println!("  {:<width$}  {}", agent.name, agent.description);
     }
 }
 
@@ -431,6 +474,11 @@ struct RpcRequest {
     effort: Option<String>,
     #[serde(default)]
     tool_mode: Option<String>,
+    /// A delegated-turn persona from `~/.e/agents/` (or a trusted repo's
+    /// `.e/agents/`): its body is the system prompt, its `tools` an allowlist,
+    /// and its `model` a fallback when the request names none.
+    #[serde(default)]
+    agent: Option<String>,
     #[serde(default)]
     save: bool,
     #[serde(default)]
@@ -608,7 +656,7 @@ async fn rpc(
                 continue;
             }
         };
-        let options = match rpc_options(defaults, &request) {
+        let mut options = match rpc_options(defaults, &request) {
             Ok(options) => options,
             Err(error) => {
                 println!("{}", serde_json::json!({"id": request_id, "error": error}));
@@ -621,6 +669,28 @@ async fn rpc(
                 serde_json::json!({"id": request_id, "error": "prompt is empty"})
             );
             continue;
+        }
+        // A delegated persona is resolved in-process so its trust scope holds:
+        // a project `.e/agents/` persona loads only for a trusted directory.
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let persona = match request.agent.as_deref() {
+            Some(name) => match e::core::resources::agents::get(name, &cwd) {
+                Some(agent) => Some(agent),
+                None => {
+                    println!(
+                        "{}",
+                        serde_json::json!({"id": request_id, "error": format!("unknown agent `{name}`")})
+                    );
+                    continue;
+                }
+            },
+            None => None,
+        };
+        // A persona's model is a fallback: an explicit request model still wins.
+        if options.model.is_none() {
+            if let Some(persona) = &persona {
+                options.model = persona.model.clone();
+            }
         }
         let selected = match resolve_model(&options) {
             Ok(selected) => selected,
@@ -638,12 +708,20 @@ async fn rpc(
         };
         let slug = model::slug(&selected);
         let pricing = selected.pricing.clone();
-        let (mut agent, mut events) = Agent::with_options(selected, agent_options(&options));
+        let mut agent_opts = agent_options(&options);
+        let system = match &persona {
+            Some(persona) => {
+                agent_opts.allowed_tools = persona.tools.clone();
+                e::core::agent::context::agent_system_prompt(&cwd, &persona.system_prompt)
+            }
+            None => e::core::agent::context::system_prompt(&cwd),
+        };
+        let (mut agent, mut events) = Agent::with_options(selected, agent_opts);
         let effort = agent.effort();
         agent.set_host(host.clone());
         agent.submit_message(
             e::core::providers::ChatMessage::user_with_images(request.prompt, images),
-            e::core::agent::context::system_prompt_here(),
+            system,
         );
 
         let mut result = TurnAccumulator::with_warnings(model::config_warnings());
@@ -697,6 +775,7 @@ mod tests {
             model: None,
             effort: None,
             tool_mode: Some("all".into()),
+            agent: None,
             save: true,
             images: Vec::new(),
         };

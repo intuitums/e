@@ -189,7 +189,8 @@ own directory) it runs as a named no-op extension and stays silent.
 - **`subagent.mjs`** — a `delegate` tool that drives a single-shot `e rpc
   --no-extensions` child: one JSON request line in, one result out. The
   delegated turn is ephemeral and extension-free (so it can never delegate
-  again), and the caller picks a model, effort, or `tool_mode` per call.
+  again). At startup it reads `e agents --json` and offers each persona as an
+  `agent` choice; the caller can also set a model, effort, or `tool_mode`.
 - **`mcp.mjs`** — a dependency-free bridge from one configured MCP stdio
   server's `tools/list` / `tools/call` surface into e extension tools. It
   forwards MCP progress through the additive `tool.update` capability.
@@ -248,9 +249,33 @@ Copy both `subagent.mjs` and `scaffold.mjs`, make the former executable, and
 restart. The model gains a `delegate` tool. Each delegation is a single-shot
 `e rpc` child in the same working directory: the extension writes one JSON
 request line, reads the one result object, and closes stdin. It is ephemeral
-and extension-free (so a delegated turn can never delegate again); it runs
-the full toolset unless the caller passes `tool_mode: "none"`. Set `E_BIN`
+and extension-free (so a delegated turn can never delegate again). Set `E_BIN`
 when the child should use an e binary other than the one on `PATH`.
+
+**Agent personas.** A delegation can name an `agent` — a persona defined in
+`~/.e/agents/<name>.md` (or a trusted repo's `.e/agents/<name>.md`). The file
+is markdown with frontmatter:
+
+```markdown
+---
+name: scout
+description: Fast, read-only codebase recon
+tools: read, grep
+model: anthropic/claude-haiku-4-5
+---
+You are a scout. Find the relevant code and report back concisely.
+```
+
+The body becomes the delegated turn's system prompt, `tools` is a positive
+allowlist (the turn sees only those built-ins — enforced in the advertised
+schemas *and* at execution), and `model` is a fallback when the caller names
+none. Discovery is trust-scoped like skills and prompts: global personas
+always load, a project's own only in a trusted directory, and a project
+persona shadows a global one of the same name. `e agents` lists them; the
+subagent extension reads `e agents --json` to offer each as a choice. Sample
+personas live in [`docs/agents/`](agents/). Because e resolves the persona in
+its core, any `e rpc` client gets the same trust-scoped behavior, not just
+this extension.
 
 ## What startup hooks are for
 

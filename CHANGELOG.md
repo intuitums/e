@@ -7,6 +7,16 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Agents are a first-class, file-backed resource: `~/.e/agents/<name>.md`
+  (and a trusted repo's `.e/agents/`) is a delegated-turn persona — markdown
+  with `name`/`description`/`tools`/`model` frontmatter, its body the system
+  prompt. Discovery is trust-scoped and shadows global-with-project exactly
+  like skills and prompts. `e agents` lists them (`--json` for tools). Over
+  `e rpc`, a request's `agent` field resolves the persona in core: its body
+  becomes the system prompt, its `tools` a positive allowlist (advertised and
+  enforced), its `model` a fallback. The `subagent.mjs` example reads
+  `e agents --json` and offers each persona as a `delegate` choice; sample
+  personas ship in `docs/agents/`.
 - Read-only tool mode is removed. `--read-only`/`--ro`, the `read_only`
   RPC `tool_mode`, and the `read_only_notice` override are gone; `ToolMode`
   is now `all` or `none`, with `--no-tools` the one deliberate opt-out. A

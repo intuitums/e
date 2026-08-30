@@ -334,6 +334,10 @@ pub struct AgentOptions {
     pub save_session: bool,
     pub tool_mode: ToolMode,
     pub effort_override: Option<String>,
+    /// A positive allowlist for this run's tools — a delegated agent persona
+    /// that names `read, grep` sees only those built-ins. `None` is the whole
+    /// toolset; it composes under `tool_mode` (a `None` tool_mode still wins).
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 impl Default for AgentOptions {
@@ -342,6 +346,7 @@ impl Default for AgentOptions {
             save_session: true,
             tool_mode: ToolMode::All,
             effort_override: None,
+            allowed_tools: None,
         }
     }
 }
@@ -698,6 +703,9 @@ impl Agent {
         } else {
             ToolMode::None
         };
+        // A persona's tool allowlist, shared read-only across this turn's tool
+        // tasks. Cheap to clone into each spawned call.
+        let allowed_tools = self.options.allowed_tools.clone().map(Arc::new);
         let system = match tool_mode {
             ToolMode::All => system,
             ToolMode::None => format!("{system}\n\n{}", context::no_tools_notice()),
@@ -774,14 +782,17 @@ impl Agent {
                     system: system.clone(),
                     messages,
                     effort: effort.clone(),
-                    tools: tools::filter_schemas(
-                        match (&host, tool_mode) {
-                            // Extensions augment the toolset only when tools
-                            // run at all; --no-tools advertises nothing.
-                            (Some(h), ToolMode::All) => h.merged_tool_schemas(),
-                            _ => tools::schemas(),
-                        },
-                        tool_mode,
+                    tools: tools::restrict_to(
+                        tools::filter_schemas(
+                            match (&host, tool_mode) {
+                                // Extensions augment the toolset only when tools
+                                // run at all; --no-tools advertises nothing.
+                                (Some(h), ToolMode::All) => h.merged_tool_schemas(),
+                                _ => tools::schemas(),
+                            },
+                            tool_mode,
+                        ),
+                        allowed_tools.as_deref().map(Vec::as_slice),
                     ),
                 };
 
@@ -1285,6 +1296,7 @@ impl Agent {
                     let cancel = cancel.clone();
                     let events = events.clone();
                     let cwd = cwd.clone();
+                    let allowed_tools = allowed_tools.clone();
                     handles.push((
                         call.clone(),
                         tokio::spawn(async move {
@@ -1293,6 +1305,7 @@ impl Agent {
                                 ToolRunContext {
                                     host,
                                     tool_mode,
+                                    allowed_tools,
                                     cwd,
                                     cancel,
                                     id,
@@ -1423,6 +1436,7 @@ impl Agent {
 struct ToolRunContext {
     host: Option<std::sync::Arc<crate::core::api::ExtensionHost>>,
     tool_mode: ToolMode,
+    allowed_tools: Option<Arc<Vec<String>>>,
     cwd: PathBuf,
     cancel: Arc<AtomicBool>,
     id: u64,
@@ -1433,6 +1447,7 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
     let ToolRunContext {
         host,
         tool_mode,
+        allowed_tools,
         cwd,
         cancel,
         id,
@@ -1445,6 +1460,18 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
             summary: "blocked".into(),
             display: None,
         };
+    }
+    // A persona's allowlist is enforced at execution too, not just in the
+    // advertised schemas: a call for a tool outside the list is refused.
+    if let Some(allowed) = &allowed_tools {
+        if !allowed.iter().any(|a| a == name) {
+            return tools::ToolOutput {
+                content: format!("tool blocked by the agent's tool allowlist: {name}"),
+                outcome: tools::ToolOutcome::Blocked,
+                summary: "blocked".into(),
+                display: None,
+            };
+        }
     }
     // --no-tools is a no-op here (nothing reaches this point), so tools run
     // with the full extension surface: schemas, overrides, tools, and hooks.
@@ -1591,6 +1618,7 @@ mod option_tests {
             ToolRunContext {
                 host: None,
                 tool_mode: ToolMode::None,
+                allowed_tools: None,
                 cwd: std::path::PathBuf::from("."),
                 cancel: Arc::new(AtomicBool::new(false)),
                 id: 1,

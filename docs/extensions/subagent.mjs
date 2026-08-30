@@ -1,8 +1,29 @@
 #!/usr/bin/env node
 /** Delegate one isolated turn to another e process over `e rpc`. Copy with
  *  scaffold.mjs. */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { connect } from "./scaffold.mjs";
+
+const E_BIN = process.env.E_BIN || "e";
+
+// Discover the personas e offers here (trust-scoped in core, so a project's
+// own `.e/agents/` only appears in a trusted directory). Done once at startup;
+// restart e to pick up new agent files, the same as skills.
+function discoverAgents() {
+  try {
+    const raw = execFileSync(E_BIN, ["agents", "--json"], { encoding: "utf8" });
+    const agents = JSON.parse(raw);
+    return Array.isArray(agents) ? agents : [];
+  } catch {
+    return [];
+  }
+}
+
+const agents = discoverAgents();
+const agentNames = agents.map((a) => a.name);
+const agentList = agents.length
+  ? `Available agents: ${agents.map((a) => `${a.name} (${a.description})`).join("; ")}.`
+  : "No agents are defined; omit `agent` to run a plain delegated turn.";
 
 const children = new Set();
 function stopChildren(signal = "SIGTERM") {
@@ -25,19 +46,25 @@ connect({
     tools: [
       {
         name: "delegate",
-        description:
-          "Delegate a bounded task to an isolated e turn and return its final answer.",
+        description: `Delegate a bounded task to an isolated e turn and return its final answer. ${agentList}`,
         parameters: {
           type: "object",
           properties: {
             prompt: { type: "string", description: "Complete task and expected result" },
+            agent: {
+              type: "string",
+              ...(agentNames.length ? { enum: agentNames } : {}),
+              description:
+                "Optional persona: its system prompt, tool allowlist, and model shape the turn",
+            },
             model: { type: "string", description: "Optional provider/model override" },
             effort: { type: "string", description: "Optional reasoning effort" },
             tool_mode: {
               type: "string",
               enum: ["all", "none"],
               default: "all",
-              description: "'all' runs the built-in tools, 'none' answers from the prompt alone",
+              description:
+                "Ignored when `agent` sets a tool allowlist; otherwise 'all' runs the built-in tools, 'none' answers from the prompt alone",
             },
             timeout_seconds: {
               type: "integer",
@@ -58,13 +85,13 @@ connect({
     if (mode !== "all" && mode !== "none") {
       return { content: `invalid tool_mode: ${mode}`, is_error: true };
     }
-    update(`delegating (${mode})\n`);
+    update(`delegating${input.agent ? ` to ${input.agent}` : ` (${mode})`}\n`);
 
     // A single-shot `e rpc` child: one request line in, one response object
     // out, then EOF shuts it down. --no-extensions keeps the turn hermetic
     // and, crucially, bounds recursion — the child has no delegate tool of
     // its own, so a delegation is never a chain.
-    const child = spawn(process.env.E_BIN || "e", ["rpc", "--no-extensions"], {
+    const child = spawn(E_BIN, ["rpc", "--no-extensions"], {
       cwd: process.cwd(),
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -89,7 +116,11 @@ connect({
     // The child may exit before we finish writing; swallow the EPIPE rather
     // than crash the extension.
     child.stdin.on("error", () => {});
-    const request = { id: 1, prompt: input.prompt, save: false, tool_mode: mode };
+    // `agent` names a persona; e resolves its system prompt, tool allowlist,
+    // and model. tool_mode only applies to a persona-less delegation.
+    const request = { id: 1, prompt: input.prompt, save: false };
+    if (input.agent) request.agent = input.agent;
+    else request.tool_mode = mode;
     if (input.model) request.model = input.model;
     if (input.effort) request.effort = input.effort;
     child.stdin.write(`${JSON.stringify(request)}\n`);

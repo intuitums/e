@@ -17,6 +17,10 @@ Fields:
 - `prompt` is required and non-empty.
 - `model` and `effort` override process defaults from `-m` / `--ef`.
 - `tool_mode` is `all` or `none`.
+- `agent` names a persona from `~/.e/agents/` (or a trusted repo's
+  `.e/agents/`): its body becomes the system prompt, its `tools` a positive
+  allowlist, and its `model` a fallback when the request names none. An
+  unknown name is an error. List them with `e agents` (`--json` for tools).
 - `save` defaults to false.
 - `images` is a list of PNG, JPEG, GIF, or WebP paths, up to ten files,
   20 MiB each, and 40 MiB total. The selected model must declare image input

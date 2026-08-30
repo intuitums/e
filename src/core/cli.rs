@@ -66,13 +66,22 @@ const ALL_FLAGS: &[&str] = &[
 ];
 
 /// Every subcommand word, in help order.
-pub const SUBCOMMANDS: &[&str] = &["rpc", "docs", "update", "auth", "doctor", "providers"];
+pub const SUBCOMMANDS: &[&str] = &[
+    "rpc",
+    "agents",
+    "docs",
+    "update",
+    "auth",
+    "doctor",
+    "providers",
+];
 
 /// One-line usage for a subcommand, so error messages can point somewhere
 /// actionable instead of at generic help.
 pub fn subcommand_usage(sub: &str) -> Option<&'static str> {
     match sub {
         "rpc" => Some("usage: e rpc"),
+        "agents" => Some("usage: e agents [--json]"),
         "docs" => Some("usage: e docs [topic]"),
         "update" => Some("usage: e update"),
         "auth" => Some("usage: e auth"),
