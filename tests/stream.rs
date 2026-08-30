@@ -391,13 +391,13 @@ async fn zero_attempt_budget_disables_every_retry_path() {
     assert_eq!(blank_server.join().unwrap().len(), 1);
 }
 
-/// The queued-prompt review pauses the queue: a paused turn neither steers
-/// pending prompts nor ends while any remain — it holds open until the
-/// review commits its edits and releases, then delivers what the review
-/// left in the queue (not what was originally typed).
+/// The queued-prompt review is a keyed edit surface over a queue the turn
+/// keeps steering: in-place replacement and removal are exact on idle
+/// keys, an edit to a key the turn already drained lands as a fresh
+/// steering message, and the turn ends on its own — nothing holds.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
-async fn paused_queue_holds_the_turn_open_for_review_edits() {
+async fn queue_review_edits_survive_concurrent_drain() {
     let _lock = env_lock();
     let reply = concat!(
         "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
@@ -407,49 +407,48 @@ async fn paused_queue_holds_the_turn_open_for_review_edits() {
     let _home = mock_home();
 
     let (mut agent, mut rx) = Agent::new(test_model("mock", port, Api::Completions));
-    assert!(agent.pause_queue().is_empty());
+
+    // The keyed semantics, deterministic on an idle agent: a stale key
+    // submits fresh under a new key; a live key edits in place; removal
+    // drops the entry.
+    agent.update_queued(vec![(7, "a".into())], vec![]);
+    let entries = agent.queue_snapshot();
+    assert_eq!(entries.len(), 1);
+    let (key, ref text) = entries[0];
+    assert_eq!(text, "a");
+    assert_ne!(key, 7, "a stale key submits fresh, under its own key");
+    agent.update_queued(vec![(key, "b".into())], vec![]);
+    assert_eq!(agent.queue_snapshot(), vec![(key, "b".to_string())]);
+    agent.update_queued(vec![], vec![key]);
+    assert!(agent.queue_snapshot().is_empty());
+
+    // A queue seeded before the turn starts steers in order, once.
+    agent.update_queued(vec![(101, "edited".into()), (102, "late".into())], vec![]);
     agent.submit("hi".into(), "sys".into());
-    agent.submit("second".into(), "sys".into());
-    assert_eq!(agent.pause_queue(), vec!["second".to_string()]);
-
-    // While the review holds the queue the turn must not end and the
-    // queued prompt must not steer.
-    let deadline = tokio::time::sleep(Duration::from_millis(600));
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            _ = &mut deadline => break,
-            Some(event) = rx.recv() => {
-                assert!(
-                    !matches!(event, SessionEvent::TurnEnd { .. }),
-                    "turn ended while the queue was paused"
-                );
-                assert!(
-                    !matches!(event, SessionEvent::Steered(_)),
-                    "a paused queue must not steer"
-                );
-            }
-        }
-    }
-
-    // The review commits an edit and releases: the edited prompt steers,
-    // the original never does, and the turn ends.
-    agent.set_queued(vec!["edited".into()]);
-    agent.resume_queue();
     let mut steered = Vec::new();
-    let mut ended = false;
     while let Some(event) = rx.recv().await {
         match event {
             SessionEvent::Steered(text) => steered.push(text),
-            SessionEvent::TurnEnd { .. } => {
-                ended = true;
-                break;
-            }
+            SessionEvent::TurnEnd { .. } => break,
             _ => {}
         }
     }
-    assert!(ended, "the released queue lets the turn finish");
-    assert_eq!(steered, vec!["edited".to_string()]);
+    assert_eq!(steered, vec!["edited".to_string(), "late".to_string()]);
+    assert_eq!(agent.on_turn_end(), Vec::<String>::new());
+
+    // An edit keyed to an entry the turn already drained submits fresh —
+    // the user's edited intent, not a resurrection of the original.
+    agent.submit("second".into(), "sys".into());
+    agent.update_queued(vec![(u64::MAX, "fresh".into())], vec![]);
+    let mut steered = Vec::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            SessionEvent::Steered(text) => steered.push(text),
+            SessionEvent::TurnEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(steered.contains(&"fresh".to_string()));
 }
 
 /// Gemini sends thought text only as ReasoningDelta — never a committed

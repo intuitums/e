@@ -23,7 +23,7 @@
 use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthChar;
 
-use crate::tui::highlight::{highlight_block, infer_language};
+use crate::tui::highlight::highlight_block;
 use crate::tui::render::*;
 use crate::tui::theme::Theme;
 
@@ -482,14 +482,9 @@ fn wrap_code_line(line: &str, width: usize, indent: &str) -> Vec<String> {
 /// the parity tests against the reference's own literals.
 pub fn code_panel(theme: &Theme, code: &str, language: &str, cols: usize) -> Vec<String> {
     let source = code.trim_end_matches('\n');
-    // An unlabeled fence tries content inference — the reference names what
-    // it can, and prints the inferred label in the rule.
-    let label = if language.is_empty() {
-        infer_language(source).unwrap_or("")
-    } else {
-        language
-    };
-    let lines = highlight_block(theme, label, source);
+    // An unlabeled fence renders raw — the highlighter colors nothing it
+    // cannot name, and nothing guesses a language the author didn't give.
+    let lines = highlight_block(theme, language, source);
 
     // The reference renders bare wrapped code when the frame can't hold a
     // six-column rule.
@@ -503,7 +498,10 @@ pub fn code_panel(theme: &Theme, code: &str, language: &str, cols: usize) -> Vec
     }
 
     let max_code_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
-    let label_width = label.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>();
+    let label_width = language
+        .chars()
+        .map(|c| c.width().unwrap_or(0))
+        .sum::<usize>();
     let panel_width = max_code_width
         .max(if label_width > 0 { label_width + 4 } else { 0 })
         .max(6)
@@ -515,7 +513,7 @@ pub fn code_panel(theme: &Theme, code: &str, language: &str, cols: usize) -> Vec
         // frame can't carry at all becomes `?`.
         let mut shown = String::new();
         let mut used = 0usize;
-        for c in label.chars() {
+        for c in language.chars() {
             let w = c.width().unwrap_or(0);
             if used + w > panel_width - 4 {
                 break;
@@ -659,33 +657,16 @@ fn push_block(out: &mut Vec<String>, lines: Vec<String>) {
     out.extend(lines);
 }
 
-/// A finished block inside a footnote definition joins the definition's
-/// body — the footer renders it under the `[N]` marker instead of leaking
-/// it into the message flow. Every block-emitting arm routes through here.
-fn emit_block(
-    out: &mut Vec<String>,
-    footnotes: &mut [(String, Option<usize>, String)],
-    open: Option<usize>,
-    rows: Vec<String>,
-) {
-    if let Some(index) = open {
-        let body = &mut footnotes[index].2;
-        if !body.is_empty() && !rows.is_empty() {
-            body.push('\n');
-        }
-        body.push_str(&rows.join("\n"));
-    } else {
-        push_block(out, rows);
-    }
-}
-
 /// Render a markdown document to lines at `width`, one blank row between blocks.
 pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<String> {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_TASKLISTS);
-    opts.insert(Options::ENABLE_FOOTNOTES);
+    // Footnote syntax stays inert: `[^label]` renders as the literal text
+    // the author wrote and `[^a]: note` as an ordinary paragraph. The
+    // reference's footnote grammar was ported once and retired — a coding
+    // session's prose doesn't carry academic apparatus.
     let parser = Parser::new_ext(markdown, opts);
 
     let mut out: Vec<String> = Vec::new();
@@ -707,45 +688,9 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
     let mut code: Option<(String, String)> = None; // (lang, buffer)
     #[allow(clippy::type_complexity)]
     let mut table: Option<(Vec<String>, Vec<Vec<String>>, Vec<Alignment>, bool)> = None;
-    // Footnotes, the reference grammar: `[^label]` renders as a dim `[N]`
-    // numbered by first use; definitions collect out of the flow and flush
-    // at the end, `[N] `-marked with a hanging indent. A definition nobody
-    // references never prints; a reference nobody defines keeps its mark.
-    let mut footnotes: Vec<(String, Option<usize>, String)> = Vec::new();
-    let mut next_footnote = 0usize;
-    let mut open_footnote: Option<usize> = None;
 
     for (event, range) in parser.into_offset_iter() {
         match event {
-            Event::FootnoteReference(label) => {
-                let index = footnotes
-                    .iter()
-                    .position(|(l, ..)| *l == *label)
-                    .unwrap_or_else(|| {
-                        footnotes.push((label.to_string(), None, String::new()));
-                        footnotes.len() - 1
-                    });
-                let number = *footnotes[index].1.get_or_insert_with(|| {
-                    next_footnote += 1;
-                    next_footnote
-                });
-                inline.push_str(&theme.fg("dim", &format!("[{number}]")));
-            }
-            Event::Start(Tag::FootnoteDefinition(label)) => {
-                let index = footnotes
-                    .iter()
-                    .position(|(l, ..)| *l == *label)
-                    .unwrap_or_else(|| {
-                        footnotes.push((label.to_string(), None, String::new()));
-                        footnotes.len() - 1
-                    });
-                open_footnote = Some(index);
-                inline.clear();
-            }
-            Event::End(TagEnd::FootnoteDefinition) => {
-                open_footnote = None;
-                inline.clear();
-            }
             Event::Start(Tag::Heading { level, .. }) => {
                 heading = Some(match level {
                     HeadingLevel::H1 => 1,
@@ -764,7 +709,7 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
                     .into_iter()
                     .map(|row| heading_style(level, &row))
                     .collect();
-                emit_block(&mut out, &mut footnotes, open_footnote, rows);
+                push_block(&mut out, rows);
                 inline.clear();
             }
             Event::Start(Tag::Paragraph) => inline.clear(),
@@ -779,14 +724,7 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
                         .into_iter()
                         .map(|r| format!("{rail}{r}"))
                         .collect();
-                    emit_block(&mut out, &mut footnotes, open_footnote, rows);
-                    inline.clear();
-                } else if let Some(index) = open_footnote {
-                    let note = &mut footnotes[index];
-                    if !note.2.is_empty() {
-                        note.2.push('\n');
-                    }
-                    note.2.push_str(&inline);
+                    push_block(&mut out, rows);
                     inline.clear();
                 } else if table.is_none() {
                     push_block(&mut out, wrap_styled(&inline, width));
@@ -827,7 +765,7 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
                 lists.pop();
                 if lists.is_empty() {
                     let lines = std::mem::take(&mut item_first_lines);
-                    emit_block(&mut out, &mut footnotes, open_footnote, lines);
+                    push_block(&mut out, lines);
                 }
             }
             Event::Start(Tag::Item) => {
@@ -875,7 +813,7 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
             Event::End(TagEnd::CodeBlock) => {
                 if let Some((lang, buffer)) = code.take() {
                     let lines = code_panel(theme, &buffer, &lang, width);
-                    emit_block(&mut out, &mut footnotes, open_footnote, lines);
+                    push_block(&mut out, lines);
                 }
             }
             Event::Start(Tag::Table(aligns)) => {
@@ -910,15 +848,10 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
             }
             Event::End(TagEnd::Table) => {
                 if let Some((header, rows, aligns, _)) = table.take() {
-                    emit_block(
-                        &mut out,
-                        &mut footnotes,
-                        open_footnote,
-                        render_table(&header, &rows, &aligns, width),
-                    );
+                    push_block(&mut out, render_table(&header, &rows, &aligns, width));
                 }
             }
-            Event::Rule => emit_block(&mut out, &mut footnotes, open_footnote, vec![rule()]),
+            Event::Rule => push_block(&mut out, vec![rule()]),
             // The reference strips bold/italic markers inside a heading
             // rather than nesting SGR into the level style.
             Event::Start(Tag::Strong) if heading.is_some() => {}
@@ -1017,31 +950,6 @@ pub fn render_markdown(theme: &Theme, markdown: &str, width: usize) -> Vec<Strin
             _ => {}
         }
     }
-    // Referenced, defined footnotes close the message in number order.
-    let mut used: Vec<(usize, &String)> = footnotes
-        .iter()
-        .filter_map(|(_, number, body)| number.filter(|_| !body.is_empty()).map(|n| (n, body)))
-        .collect();
-    used.sort_by_key(|(n, _)| *n);
-    let mut note_rows: Vec<String> = Vec::new();
-    for (number, body) in used {
-        let marker = format!("[{number}] ");
-        let hang = " ".repeat(marker.chars().count());
-        let body_width = width.saturating_sub(marker.chars().count()).max(8);
-        let mut first = true;
-        for line in body.split('\n') {
-            for row in wrap_styled(line, body_width) {
-                let lead = if first {
-                    theme.fg("dim", &marker)
-                } else {
-                    hang.clone()
-                };
-                first = false;
-                note_rows.push(format!("{lead}{row}"));
-            }
-        }
-    }
-    push_block(&mut out, note_rows);
     out
 }
 

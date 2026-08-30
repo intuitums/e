@@ -11,6 +11,10 @@ mod common;
 // E_HOME is process-global; serialize the tests that set it.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+async fn start_host(notices: tokio::sync::mpsc::Sender<String>) -> std::sync::Arc<ExtensionHost> {
+    ExtensionHost::start(notices).await
+}
+
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     // A prior panic while holding the lock must not cascade into every
     // later E_HOME test as PoisonError — clear and continue.
@@ -106,7 +110,7 @@ async fn extension_round_trip() {
     let _lock = env_lock();
     let _home = fake_home();
     let (notices, _rx) = tokio::sync::mpsc::channel(16);
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
 
     // Discovery + manifest.
     assert!(
@@ -235,7 +239,7 @@ done
     let _lock = env_lock();
     let _home = tempdir::TempHome::with_extension("streaming.sh", STREAMING);
     let (notices, _rx) = tokio::sync::mpsc::channel(4);
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
     let (progress, mut updates) = tokio::sync::mpsc::channel(4);
 
     let result = host.call_tool_streaming("long_task", "{}", progress).await;
@@ -288,7 +292,7 @@ done
     std::fs::write(home.dir.join("auth.json"), r#"{"mock":{"key":"test"}}"#).unwrap();
     let (port, server) = common::serve_sse(&[first, second]);
     let (notices, _rx) = tokio::sync::mpsc::channel(4);
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
     let options = e::core::agent::AgentOptions {
         save_session: false,
         ..e::core::agent::AgentOptions::default()
@@ -324,15 +328,15 @@ done
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
-async fn extension_policy_and_ownership_apply_to_ask() {
-    const ASK_EXTENSION: &str = r#"#!/bin/sh
+async fn extension_policy_and_ownership_apply_to_read() {
+    const READ_EXTENSION: &str = r#"#!/bin/sh
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
-    *'"initialize"'*) printf '{"id":%s,"result":{"name":"ask-owner","tools":[{"name":"ask","parameters":{"type":"object"}}],"hooks":["tool_call"]}}\n' "$id" ;;
+    *'"initialize"'*) printf '{"id":%s,"result":{"name":"read-owner","tools":[{"name":"read","description":"extension read description","parameters":{"type":"object"}}],"hooks":["tool_call"]}}\n' "$id" ;;
     *'"hook.tool_call"'*)
       case "$line" in
-        *blocked-question*) printf '{"id":%s,"result":{"block":true,"reason":"ask denied"}}\n' "$id" ;;
+        *blocked-target*) printf '{"id":%s,"result":{"block":true,"reason":"read denied"}}\n' "$id" ;;
         *) printf '{"id":%s,"result":{"block":false}}\n' "$id" ;;
       esac ;;
     *'"tool_call"'*) printf '{"id":%s,"result":{"content":"extension answered"}}\n' "$id" ;;
@@ -342,19 +346,19 @@ done
 "#;
     let first = concat!(
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[",
-        "{\"index\":0,\"id\":\"blocked\",\"function\":{\"name\":\"ask\",\"arguments\":\"{\\\"question\\\":\\\"blocked-question\\\"}\"}},",
-        "{\"index\":1,\"id\":\"owned\",\"function\":{\"name\":\"ask\",\"arguments\":\"{\\\"question\\\":\\\"owned-question\\\"}\"}}",
+        "{\"index\":0,\"id\":\"blocked\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"blocked-target\\\"}\"}},",
+        "{\"index\":1,\"id\":\"owned\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"src/main.rs\\\"}\"}}",
         "]},\"finish_reason\":\"tool_calls\"}]}\n\n",
         "data: [DONE]\n\n",
     );
     let second = "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n";
 
     let _lock = env_lock();
-    let home = tempdir::TempHome::with_extension("ask-owner.sh", ASK_EXTENSION);
+    let home = tempdir::TempHome::with_extension("read-owner.sh", READ_EXTENSION);
     std::fs::write(home.dir.join("auth.json"), r#"{"mock":{"key":"test"}}"#).unwrap();
     let (port, server) = common::serve_sse(&[first, second]);
     let (notices, _rx) = tokio::sync::mpsc::channel(4);
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
     let options = e::core::agent::AgentOptions {
         save_session: false,
         ..e::core::agent::AgentOptions::default()
@@ -364,19 +368,15 @@ done
         options,
     );
     agent.set_host(host.clone());
-    agent.submit("ask twice".into(), "system".into());
+    agent.submit("read twice".into(), "system".into());
 
-    let mut questions = 0;
     let mut results = Vec::new();
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         while let Some(event) = events.recv().await {
             match event {
-                e::core::agent::SessionEvent::Question { .. } => questions += 1,
                 e::core::agent::SessionEvent::ToolEnd {
                     outcome, content, ..
-                } => {
-                    results.push((outcome, content));
-                }
+                } => results.push((outcome, content)),
                 e::core::agent::SessionEvent::TurnEnd { .. } => break,
                 e::core::agent::SessionEvent::Error(error) => panic!("agent failed: {error}"),
                 _ => {}
@@ -386,12 +386,10 @@ done
     .await
     .expect("agent turn completes");
 
-    assert_eq!(
-        questions, 0,
-        "the built-in ask must not steal an extension override"
-    );
+    // An extension that owns a built-in's name serves it (no builtin steal),
+    // and the tool_call hook still gates the call.
     assert!(results.iter().any(|(outcome, content)| {
-        *outcome == e::core::tools::ToolOutcome::Blocked && content.contains("ask denied")
+        *outcome == e::core::tools::ToolOutcome::Blocked && content.contains("read denied")
     }));
     assert!(results.iter().any(|(outcome, content)| {
         *outcome == e::core::tools::ToolOutcome::Completed && content == "extension answered"
@@ -402,31 +400,31 @@ done
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
-async fn read_only_mode_keeps_ask_builtin_only() {
-    const ASK_EXTENSION: &str = r#"#!/bin/sh
+async fn read_only_mode_blocks_extension_owned_writes() {
+    const WRITE_EXTENSION: &str = r#"#!/bin/sh
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
-    *'"initialize"'*) printf '{"id":%s,"result":{"name":"ask-owner","tools":[{"name":"ask","parameters":{"type":"object"}}]}}\n' "$id" ;;
-    *'"tool_call"'*) printf '{"id":%s,"result":{"content":"extension answered"}}\n' "$id" ;;
+    *'"initialize"'*) printf '{"id":%s,"result":{"name":"write-owner","tools":[{"name":"write","description":"extension write description","parameters":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tool_call"'*) printf '{"id":%s,"result":{"content":"extension wrote"}}\n' "$id" ;;
     *'"shutdown"'*) exit 0 ;;
   esac
 done
 "#;
     let first = concat!(
-        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"ask-1\",",
-        "\"function\":{\"name\":\"ask\",\"arguments\":\"{\\\"question\\\":\\\"Continue?\\\"}\"}}]},",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"w-1\",",
+        "\"function\":{\"name\":\"write\",\"arguments\":\"{\\\"path\\\":\\\"x.txt\\\",\\\"content\\\":\\\"hi\\\"}\"}}]},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
         "data: [DONE]\n\n",
     );
     let second = "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n";
 
     let _lock = env_lock();
-    let home = tempdir::TempHome::with_extension("ask-owner.sh", ASK_EXTENSION);
+    let home = tempdir::TempHome::with_extension("write-owner.sh", WRITE_EXTENSION);
     std::fs::write(home.dir.join("auth.json"), r#"{"mock":{"key":"test"}}"#).unwrap();
     let (port, server) = common::serve_sse(&[first, second]);
     let (notices, _rx) = tokio::sync::mpsc::channel(4);
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
     let options = e::core::agent::AgentOptions {
         save_session: false,
         tool_mode: e::core::cli::ToolMode::ReadOnly,
@@ -437,16 +435,15 @@ done
         options,
     );
     agent.set_host(host.clone());
-    agent.submit("ask once".into(), "system".into());
+    agent.submit("write once".into(), "system".into());
 
     let mut result = None;
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         while let Some(event) = events.recv().await {
             match event {
-                e::core::agent::SessionEvent::Question { id, .. } => {
-                    agent.answer(id, Some("builtin answered".into()));
-                }
-                e::core::agent::SessionEvent::ToolEnd { content, .. } => result = Some(content),
+                e::core::agent::SessionEvent::ToolEnd {
+                    outcome, content, ..
+                } => result = Some((outcome, content)),
                 e::core::agent::SessionEvent::TurnEnd { .. } => break,
                 e::core::agent::SessionEvent::Error(error) => panic!("agent failed: {error}"),
                 _ => {}
@@ -456,8 +453,13 @@ done
     .await
     .expect("agent turn completes");
 
-    assert_eq!(result.as_deref(), Some("builtin answered"));
-    assert!(server.join().unwrap()[1].contains("builtin answered"));
+    // The extension's write tool is not advertised in read-only mode, and a
+    // call that arrives anyway is blocked before the extension could serve
+    // it — owning a mutating name grants no read-only escape.
+    assert!(!server.join().unwrap()[1].contains("extension write description"));
+    let (outcome, content) = result.expect("the write call resolves");
+    assert_eq!(outcome, e::core::tools::ToolOutcome::Blocked);
+    assert!(content.contains("read-only"));
     host.shutdown().await;
 }
 
@@ -473,7 +475,7 @@ exit 0
     let _lock = env_lock();
     let _home = tempdir::TempHome::with_extension("exiting.sh", EXITING);
     let (notices, _rx) = tokio::sync::mpsc::channel(4);
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
     assert!(host.owns_tool("boom"));
 
     let result = tokio::time::timeout(
@@ -511,7 +513,7 @@ done
     let _home = tempdir::TempHome::with_extension("noisy.sh", NOISY);
     // Leave the single slot undrained. Only the first notification fits.
     let (notices, _rx) = tokio::sync::mpsc::channel(1);
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
@@ -543,7 +545,7 @@ done
     let _lock = env_lock();
     let _home = tempdir::TempHome::with_extension("oversized.sh", OVERSIZED);
     let (notices, _rx) = tokio::sync::mpsc::channel(4);
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -585,7 +587,7 @@ done
     )
     .unwrap();
     let (notices, _rx) = tokio::sync::mpsc::channel(16);
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
     assert!(
         !host.is_empty(),
         "config-carrying extension must initialize"
@@ -627,7 +629,7 @@ rl.on("line", (line) => {
     let _lock = env_lock();
     let _home = tempdir::TempHome::with_extension("flagsprobe.sh", FLAGS_FAKE);
     let (notices, mut rx) = tokio::sync::mpsc::channel(16);
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
     assert!(!host.is_empty());
 
     let mut flags: Option<serde_json::Value> = None;
@@ -729,7 +731,7 @@ rl.on("line", (line) => {
     let _lock = env_lock();
     let _home = tempdir::TempHome::with_extensions(&[("a.sh", BOTH_FAKE), ("b.sh", BOTH_FAKE)]);
     let (notices, mut rx) = tokio::sync::mpsc::channel(16);
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
     assert!(!host.is_empty());
 
     let mut flags = None;
@@ -798,7 +800,7 @@ rl.on("line", (line) => {
     let _home = tempdir::TempHome::with_extension("toolonly.sh", TOOLONLY_FAKE);
     let (notices, _rx) = tokio::sync::mpsc::channel(16);
     // No startup hook — the flags notification must arrive on its own.
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
     assert!(!host.is_empty());
 
     // The extension reads what it was given. With `--dry` absent (the test
@@ -844,7 +846,7 @@ async fn dead_extension_fails_fast_instead_of_stalling() {
     let (notices, _rx) = tokio::sync::mpsc::channel(16);
 
     let t0 = std::time::Instant::now();
-    let host = ExtensionHost::start(notices).await;
+    let host = start_host(notices).await;
     let elapsed = t0.elapsed();
     // The extension is discovered but skipped: initialize failed fast.
     // Bound well under INIT_TIMEOUT (5s); leave headroom for slow CI runners

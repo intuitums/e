@@ -526,11 +526,6 @@ fn rpc_options(defaults: &Options, request: &RpcRequest) -> Result<Options, Stri
     Ok(options)
 }
 
-const HEADLESS_QUESTION_WARNING: &str =
-    "ask tool question cancelled: headless mode does not support interactive answers";
-const RPC_QUESTION_WARNING: &str =
-    "ask tool question cancelled: RPC does not support interactive answers";
-
 #[derive(Default)]
 struct TurnAccumulator {
     output: String,
@@ -731,10 +726,6 @@ async fn rpc(
 
         let mut result = TurnAccumulator::with_warnings(model::config_warnings());
         while let Some(event) = events.recv().await {
-            if let SessionEvent::Question { id, .. } = &event {
-                agent.answer(*id, None);
-                result.warnings.push(RPC_QUESTION_WARNING.into());
-            }
             result.observe(&event);
             if result.terminal {
                 break;
@@ -871,13 +862,6 @@ async fn ask(
             SessionEvent::Warning(message) => {
                 if !options.json {
                     eprintln!("warning: {message}");
-                }
-            }
-            SessionEvent::Question { id, .. } => {
-                agent.answer(*id, None);
-                result.warnings.push(HEADLESS_QUESTION_WARNING.into());
-                if !options.json {
-                    eprintln!("warning: {HEADLESS_QUESTION_WARNING}");
                 }
             }
             SessionEvent::TurnEnd { .. } | SessionEvent::Usage { .. } => {}

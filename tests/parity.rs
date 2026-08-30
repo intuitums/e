@@ -139,9 +139,18 @@ fn code_panel_geometry_matches_the_reference() {
         code_panel(&t, "x", "漢", 6),
         vec!["\x1b[2m─ 漢 ─\x1b[22m", "x", "\x1b[2m──────\x1b[22m"]
     );
-    // An unlabeled fence with recognizable content names itself.
-    let inferred = code_panel(&t, "{\"a\": 1}", "", 80);
-    assert!(inferred[0].contains("─ json ─"), "{:?}", inferred[0]);
+    // A retired reference behavior, deliberately not ported back: nothing
+    // infers a language an unlabeled fence didn't declare. The fence
+    // renders bare — no label in the rule, the content unhighlighted.
+    let bare = code_panel(&t, "{\"a\": 1}", "", 80);
+    assert_eq!(
+        bare,
+        vec![
+            "\x1b[2m────────\x1b[22m",
+            "{\"a\": 1}",
+            "\x1b[2m────────\x1b[22m"
+        ]
+    );
 }
 
 #[test]
@@ -797,66 +806,21 @@ fn trust_panel_offers_the_broader_ancestor_between_its_rows() {
 }
 
 #[test]
-fn footnotes_number_by_first_use_and_flush_dim_definitions() {
+fn footnote_syntax_stays_inert() {
     let theme = e::tui::theme::resolve("dark", false);
+    // A retired reference behavior, deliberately not ported back: no
+    // footnote grammar. The reference mark renders as the literal text the
+    // author wrote, and a definition is an ordinary paragraph — nothing is
+    // collected, numbered, or flushed at the end.
     let md = "First[^b] then[^a].\n\n[^a]: alpha note\n[^b]: beta note";
-    let out = render_markdown(&theme, md, 80);
-    let joined = out.join("\n");
-    // References number by first use, dim.
-    assert!(joined.contains(&theme.fg("dim", "[1]")), "{joined:?}");
-    // Definitions flush at the end in number order, marker dim, body plain.
-    assert!(out.iter().any(|r| r.contains("beta note")), "{out:?}");
-    let beta = out.iter().position(|r| r.contains("beta note")).unwrap();
-    let alpha = out.iter().position(|r| r.contains("alpha note")).unwrap();
-    assert!(beta < alpha, "first-used note leads: {out:?}");
+    let joined = render_markdown(&theme, md, 80).join("\n");
     assert!(
-        out[beta].starts_with(&theme.fg("dim", "[1] ")),
-        "{:?}",
-        out[beta]
+        joined.contains("[^b]") && joined.contains("[^a]"),
+        "{joined:?}"
     );
-    // A definition nobody references never prints.
-    let unused = render_markdown(&theme, "plain text\n\n[^x]: hidden", 80).join("\n");
-    assert!(!unused.contains("hidden"), "{unused:?}");
-}
-
-#[test]
-fn footnote_lists_and_code_stay_in_the_definition_body() {
-    let theme = e::tui::theme::resolve("dark", false);
-    let md = "Body[^n].\n\n[^n]: intro\n\n    - nested item\n\n    ```text\n    code line\n    ```";
-    let out = render_markdown(&theme, md, 80);
-    let note = out.iter().position(|row| row.contains("intro")).unwrap();
-    let item = out
-        .iter()
-        .position(|row| row.contains("nested item"))
-        .unwrap();
-    let code = out
-        .iter()
-        .position(|row| row.contains("code line"))
-        .unwrap();
-
-    assert!(note < item && item < code, "{out:?}");
-    assert!(
-        out[item].starts_with("    "),
-        "list escaped footnote: {out:?}"
-    );
-    assert!(
-        out[code].starts_with("    "),
-        "code escaped footnote: {out:?}"
-    );
-}
-
-#[test]
-fn footnote_blockquotes_and_rules_stay_in_the_definition_body() {
-    let theme = e::tui::theme::resolve("dark", false);
-    let md = "Body[^n]. After.\n\n[^n]: intro\n\n    > quoted note\n\n    ---";
-    let out = render_markdown(&theme, md, 80);
-    let flow = out.iter().position(|r| r.contains("After.")).unwrap();
-    let note = out.iter().position(|r| r.contains("intro")).unwrap();
-    let quote = out.iter().position(|r| r.contains("quoted note")).unwrap();
-    // The definition's own blocks render under the definition, never in
-    // the message flow between the body and the footer.
-    assert!(note > flow && quote > note, "{out:?}");
-    assert!(out[quote].contains('│'), "the rail rode along: {out:?}");
+    assert!(joined.contains("alpha note"), "{joined:?}");
+    assert!(joined.contains("beta note"), "{joined:?}");
+    assert!(!joined.contains(&theme.fg("dim", "[1]")), "{joined:?}");
 }
 
 #[test]
@@ -953,75 +917,6 @@ fn picker_tabs_follow_the_reference_grammar() {
         "↑↓ Navigate  Tab Source  Enter Use  Esc Close"
     );
     assert_eq!(degrade_hint(HINT_MODELS, 12), "Enter Esc");
-}
-
-#[test]
-fn question_panel_frames_options_with_brightness_selection() {
-    use e::tui::questionpanel::Question;
-    let theme = e::tui::theme::resolve("dark", false);
-    let mut q = Question::new(
-        7,
-        "Pick a color".into(),
-        vec![
-            ("blue".into(), "the calm one".into()),
-            ("red".into(), String::new()),
-        ],
-        true,
-    );
-    let rows = q.render(&theme, 80);
-    // Framed like every footer surface: divider, question, blank, options,
-    // freeform slot, divider.
-    assert_eq!(rows.len(), 4 + 3);
-    assert!(rows[1].contains("Pick a color") && rows[1].contains("\x1b[1m"));
-    assert!(rows[3].contains("1) blue") && rows[3].contains("the calm one"));
-    assert!(rows[4].contains("2) red"));
-    assert!(rows[5].contains("3) Type an answer…"));
-    // Selection is brightness alone — no caret anywhere.
-    assert!(!rows.iter().any(|r| r.contains('›')));
-    assert_eq!(q.answer().as_deref(), Some("blue"));
-
-    // The freeform slot answers with the typed text, or refuses empty.
-    q.selected = 2;
-    assert!(q.freeform_selected());
-    assert_eq!(q.answer(), None);
-    q.freeform = "teal".into();
-    assert_eq!(q.answer().as_deref(), Some("teal"));
-    assert!(q.hint(80).starts_with("Type answer"));
-
-    // Hints degrade stepwise with the frame, like every picker's.
-    assert_eq!(
-        q.hint(12),
-        "Enter Answer  Esc Cancel",
-        "nothing longer fits at twelve cells"
-    );
-    q.selected = 0;
-    assert_eq!(
-        q.hint(80),
-        "1–2 Choose now    ↑↓ Options    Enter Answer    Esc Cancel"
-    );
-    assert_eq!(q.hint(40), "↑↓ Options    Enter Answer    Esc Cancel");
-
-    // The description column clears the widest label in display cells, so
-    // the wide-glyph row keeps the same three-cell gap as the narrow one.
-    let wide = Question::new(
-        8,
-        "pick".into(),
-        vec![
-            ("日本語".into(), "desc-a".into()),
-            ("ab".into(), "desc-b".into()),
-        ],
-        false,
-    );
-    let rows = wide.render(&theme, 80);
-    let col = |row: &str| {
-        let at = row.find("desc-").unwrap();
-        e::tui::markdown::visible_width(&row[..at])
-    };
-    let a = rows.iter().find(|r| r.contains("desc-a")).unwrap();
-    let b = rows.iter().find(|r| r.contains("desc-b")).unwrap();
-    // "  1) 日本語" is 2+3+6 = 11 cells; the description starts 3 past it.
-    assert_eq!(col(a), 14, "wide label clears the gap: {rows:?}");
-    assert_eq!(col(b), 14, "one shared column: {rows:?}");
 }
 
 #[test]
