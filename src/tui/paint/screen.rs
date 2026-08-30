@@ -163,14 +163,15 @@ impl Screen {
         }
         if self.debug_frames {
             use std::io::Write as _;
-            let mut f = std::fs::OpenOptions::new()
+            let f = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/tmp/e-frames.log")
-                .unwrap();
-            let _ = writeln!(f, "== frame {} rows ==", lines.len());
-            for l in lines {
-                let _ = writeln!(f, "{:?}", l);
+                .open("/tmp/e-frames.log");
+            if let Ok(mut f) = f {
+                let _ = writeln!(f, "== frame {} rows ==", lines.len());
+                for l in lines {
+                    let _ = writeln!(f, "{:?}", l);
+                }
             }
         }
         let cols = self.cols as usize;
@@ -375,8 +376,17 @@ impl Painter {
                 if let Some((cols, rows)) = resize {
                     screen.resize(cols, rows);
                 }
-                if let Some(frame) = frame {
-                    let _ = screen.paint(&frame);
+                // A panic in the paint path must cost one garbled frame —
+                // not the session. The screen is marked fully unknown so
+                // the next frame repaints everything over whatever the
+                // panicking write left behind.
+                let painted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(frame) = frame {
+                        let _ = screen.paint(&frame);
+                    }
+                }));
+                if painted.is_err() {
+                    screen.resize(screen.cols, screen.rows);
                 }
                 if shutdown {
                     // The final frame (taken above) has landed; done.
