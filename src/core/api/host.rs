@@ -98,9 +98,20 @@ impl ExtensionHost {
     /// Discover and start every extension. `notices` receives extension
     /// `notify` messages and startup diagnostics for the transcript.
     pub async fn start(notices: mpsc::Sender<String>) -> Arc<ExtensionHost> {
+        // Spawn and hand-shake every extension concurrently: a slow (or
+        // timing-out) child must not delay the ones after it, so startup
+        // costs one handshake, not their sum. Results are collected in
+        // discovery order — tool-clash resolution below is
+        // first-declaration-wins and must stay deterministic.
+        let paths = discover();
+        let started = futures::future::join_all(paths.iter().map(|path| {
+            let notices = notices.clone();
+            async move { (path, spawn(path, notices).await) }
+        }))
+        .await;
         let mut extensions = Vec::new();
-        for path in discover() {
-            match spawn(&path, notices.clone()).await {
+        for (path, result) in started {
+            match result {
                 Ok(ext) => extensions.push(ext),
                 Err(reason) => {
                     let name = path

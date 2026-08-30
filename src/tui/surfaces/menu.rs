@@ -8,15 +8,15 @@
 //!   Commands 7 · Type to filter          1–7
 //!
 //!     /login   sign in to a provider
-//!     /model   list or switch models       ← selected row filled, no caret
+//!     /model   list or switch models       ← selected row bright, no caret
 //!   ── divider ─────────────────────────────
 //!   ↑↓ Navigate     Enter Use     Esc Close   (rides the status row)
 //! ```
 //!
-//! Selection splits by surface — the model pickers brighten (bold ink), the
-//! rest fill the row (`selectedBg` behind `selectedText`); unselected rows
-//! stay dim, no caret either way. The band holds only its rows: at most
-//! MAX_VISIBLE, shrinking with a short match list instead of blank-padding.
+//! Selection is brightness alone on every surface — bold bright ink for the
+//! current row, the rest dim, no fill and no caret. The band holds only its
+//! rows: at most MAX_VISIBLE, shrinking with a short match list instead of
+//! blank-padding.
 
 use unicode_width::UnicodeWidthChar;
 
@@ -314,42 +314,22 @@ impl Menu {
     }
 
     /// The row's dress as an open/close pair, so matched spans can reset
-    /// and reopen mid-run. The reference splits its pickers: the catalog
-    /// menus — models, skills, sessions — signal by brightness alone,
-    /// while the inline completion pickers (slash commands, files) fill
-    /// the row — selection background, selection ink; unselected rows are
-    /// dim either way.
+    /// and reopen mid-run. Every picker signals selection by brightness
+    /// alone — bold bright ink for the current row — and leaves unselected
+    /// rows dim; no picker fills the row, and there is no caret either way.
     fn row_style(&self, theme: &Theme, selected: bool) -> (String, String) {
         if !selected {
             let open = theme.fg_prefix("dim").to_string();
             let close = if open.is_empty() { "" } else { "\x1b[39m" };
             return (open, close.into());
         }
-        let bright = || {
-            let fg = theme.fg_prefix("userMessageText");
-            let close = if fg.is_empty() {
-                "\x1b[22m"
-            } else {
-                "\x1b[39m\x1b[22m"
-            };
-            (format!("\x1b[1m{fg}"), close.to_string())
+        let fg = theme.fg_prefix("userMessageText");
+        let close = if fg.is_empty() {
+            "\x1b[22m"
+        } else {
+            "\x1b[39m\x1b[22m"
         };
-        match self.kind {
-            MenuKind::Models
-            | MenuKind::Scoped
-            | MenuKind::Skills
-            | MenuKind::Sessions
-            | MenuKind::Tree => bright(),
-            _ => {
-                let bg = theme.bg_prefix("selectedBg");
-                let fg = theme.fg_prefix("selectedText");
-                if bg.is_empty() && fg.is_empty() {
-                    bright()
-                } else {
-                    (format!("{bg}{fg}"), "\x1b[0m".into())
-                }
-            }
-        }
+        (format!("\x1b[1m{fg}"), close.to_string())
     }
 
     /// One tab, dressed: the active tab `[bracketed]` in the bright style,

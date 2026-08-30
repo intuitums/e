@@ -487,18 +487,22 @@ impl App {
                     TurnPhase::Thinking | TurnPhase::Tool | TurnPhase::AssistantText
                 ) {
                     // The activity dot runs on the same column as the user
-                    // rail — flush left, no indent — and the row persists
-                    // through every streaming phase: thinking, tool trees,
-                    // and reply text alike. The dot keeps its accent
+                    // rail — flush left, no indent. The dot keeps its accent
                     // presence-blink (shows and hides, no half-state); the
                     // label — verb, elapsed, and token tail — reads in one
-                    // dim tone beside it.
-                    let dot = if blink_on {
-                        self.theme.fg("accent", "•")
+                    // dim tone beside it. Once the reply text is streaming,
+                    // the answer itself carries the turn: the dot drops and
+                    // the label sits flush-left where the dot was.
+                    if s.turn.phase == TurnPhase::AssistantText {
+                        lines.push(self.theme.fg("dim", &label));
                     } else {
-                        " ".to_string()
-                    };
-                    lines.push(format!("{dot} {}", self.theme.fg("dim", &label)));
+                        let dot = if blink_on {
+                            self.theme.fg("accent", "•")
+                        } else {
+                            " ".to_string()
+                        };
+                        lines.push(format!("{dot} {}", self.theme.fg("dim", &label)));
+                    }
                 } else {
                     lines.push(label);
                 }
@@ -1810,6 +1814,19 @@ fn is_builtin_command(name: &str) -> bool {
             | "quit"
             | "exit"
     )
+}
+
+/// The `/` picker's functional group for a built-in command, shown as its
+/// right-aligned category. `value` is the slashed command (`/login`); an
+/// unknown name falls to General.
+fn builtin_category(value: &str) -> &'static str {
+    match value {
+        "/login" => "Account",
+        "/models" | "/scoped-models" => "Model",
+        "/resume" | "/new" | "/tree" | "/compact" => "Session",
+        "/trust" => "Workspace",
+        _ => "General",
+    }
 }
 
 fn stage_initial_prompt(

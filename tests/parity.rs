@@ -673,9 +673,15 @@ fn picker_band_shrinks_with_its_rows() {
         full[1]
     );
     assert!(full[1].starts_with(theme.fg_prefix("dim")), "{:?}", full[1]);
-    // The selected row fills: selection background and ink, no caret.
-    assert!(full[3].contains("\x1b[48;5;239m"), "{:?}", full[3]);
-    assert!(full[3].contains("\x1b[38;5;255m"), "{:?}", full[3]);
+    // The selected row signals by brightness alone: bold bright ink, no
+    // fill background, no caret.
+    assert!(full[3].contains("\x1b[1m"), "{:?}", full[3]);
+    assert!(
+        full[3].contains(theme.fg_prefix("userMessageText")),
+        "{:?}",
+        full[3]
+    );
+    assert!(!full[3].contains("\x1b[48;5;239m"), "{:?}", full[3]);
 
     // Filtering down to one match shrinks the band with it — the reference
     // never blank-pads a short list — and drops the filter clause from the
@@ -711,6 +717,54 @@ fn picker_band_shrinks_with_its_rows() {
     let empty = menu.render(&theme, 80);
     assert_eq!(empty.len(), 1 + 4);
     assert!(empty[3].contains("no matching slash commands"));
+}
+
+#[test]
+fn command_rows_carry_a_right_aligned_category() {
+    use e::tui::menu::{Menu, MenuItem, MenuKind, HINT_USE};
+    let theme = e::tui::theme::resolve("dark", false);
+    // The `/` picker's category column: a built-in's functional group, a
+    // prompt template's `Prompt` — each right-aligned in the row, and the
+    // selected row's category brightens with it (copying the reference).
+    let tag = |label: &str, meta: &str| {
+        let mut item = MenuItem::new(label, "description", label);
+        item.meta = meta.into();
+        item
+    };
+    let items = vec![tag("/login", "Account"), tag("/deploy", "Prompt")];
+    let menu = Menu::new(MenuKind::Commands, "Commands", HINT_USE, items);
+    let rows = menu.render(&theme, 80);
+    let strip = |row: &str| -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for e in chars.by_ref() {
+                    if e.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            out.push(c);
+        }
+        out
+    };
+    // Rows: divider, header, blank, 2 rows, divider. Each tag lands
+    // right-aligned past a run of padding.
+    assert!(strip(&rows[3]).ends_with("   Account"), "{:?}", rows[3]);
+    assert!(strip(&rows[4]).ends_with("   Prompt"), "{:?}", rows[4]);
+    // The selected row (row 3) is bold-bright end to end — the category
+    // `Account` rides inside that same bright dress, not a dim tail.
+    let bright = theme.fg_prefix("userMessageText");
+    let account_at = rows[3].find("Account").expect("category present");
+    let dress_at = rows[3].find(bright).expect("bright dress present");
+    assert!(dress_at < account_at, "category is inside the bright run");
+    assert!(
+        !rows[3][dress_at..account_at].contains("\x1b[39m"),
+        "no color reset between the dress and the category: {:?}",
+        rows[3]
+    );
 }
 
 #[test]
