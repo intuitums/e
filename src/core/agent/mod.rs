@@ -288,15 +288,6 @@ pub enum SessionEvent {
         attempt: u32,
         limit: u32,
     },
-    /// The ask tool wants an answer: the frontend shows the question panel
-    /// and replies through [`Agent::answer`]. Options are (label,
-    /// description) pairs; freeform adds a typed-answer slot.
-    Question {
-        id: u64,
-        question: String,
-        options: Vec<(String, String)>,
-        allow_freeform: bool,
-    },
     /// A steering message was accepted mid-turn (for display as a user block).
     Steered(String),
     /// The process was suspended and woke within the resume window; the
@@ -357,8 +348,8 @@ impl Default for AgentOptions {
 
 #[derive(Default)]
 struct PendingQueue {
-    items: Vec<String>,
-    paused: bool,
+    next_id: u64,
+    items: Vec<(u64, String)>,
 }
 
 pub struct Agent {
@@ -368,8 +359,10 @@ pub struct Agent {
     cwd: PathBuf,
     history: Arc<Mutex<Vec<ChatMessage>>>,
     events: mpsc::Sender<SessionEvent>,
-    /// Messages typed while a turn runs, plus the review pause guarded by
-    /// the same lock so pausing and taking the editable snapshot are atomic.
+    /// Messages typed while a turn runs. Entries are keyed so the frontend
+    /// can edit or drop a specific one after snapshotting: the turn loop
+    /// drains concurrently, and a key it already took is gone — the review
+    /// commits such an entry as a fresh prompt instead of resurrecting it.
     pending: Arc<Mutex<PendingQueue>>,
     cancel: Arc<AtomicBool>,
     running: bool,
@@ -388,15 +381,6 @@ pub struct Agent {
     /// The latest observed system-sleep gap. Written by the turn's
     /// heartbeat task; tests write it through [`Agent::inject_sleep_gap`].
     wake: wake::Shared,
-    /// Ask-tool calls waiting on the user, keyed by tool id. The panel
-    /// answers through [`Agent::answer`]; Esc resolves them as cancelled.
-    asks: Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<Option<String>>>>>,
-    /// Wakeup for the turn loop's hold-open wait: any change to the state
-    /// it sleeps on — a queued prompt, the review committing, the pause
-    /// lifting, an interrupt — notifies. Signals carry no payload; the
-    /// waiter re-reads state, so a signal that races a check is never
-    /// lost (Notify stores a permit for a not-yet-waiting waiter).
-    pending_signal: Arc<tokio::sync::Notify>,
     options: AgentOptions,
 }
 
@@ -423,8 +407,6 @@ impl Agent {
             session_name: Arc::new(Mutex::new(None)),
             persist_warned: Arc::new(AtomicBool::new(false)),
             tool_seq: Arc::new(AtomicU64::new(0)),
-            asks: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            pending_signal: Arc::new(tokio::sync::Notify::new()),
             wake: wake::shared(),
             options,
         };
@@ -616,41 +598,37 @@ impl Agent {
             .len()
     }
 
-    /// Pause queue draining and return the queued prompts, oldest first.
-    /// The worker tests the pause while holding this same lock, so it cannot
-    /// drain between the pause and snapshot used by the review.
-    pub fn pause_queue(&self) -> Vec<String> {
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.paused = true;
-        pending.items.clone()
-    }
-
-    /// Replace the queue wholesale (the review committing its edits).
-    pub fn set_queued(&self, items: Vec<String>) {
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).items = items;
-        self.pending_signal.notify_one();
-    }
-
-    /// Resume queue draining after a review closes.
-    pub fn resume_queue(&self) {
+    /// Snapshot the queued prompts, oldest first, with the keys the review
+    /// commit sends back. Purely a read: the turn keeps steering while the
+    /// review is open.
+    pub fn queue_snapshot(&self) -> Vec<(u64, String)> {
         self.pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .paused = false;
-        self.pending_signal.notify_one();
+            .items
+            .clone()
     }
 
-    /// Resolve a waiting ask-tool call: `Some(text)` is the user's answer,
-    /// `None` a dismissal (the tool records it as cancelled). Unknown ids —
-    /// a stale panel after Esc aborted the turn — are a no-op.
-    pub fn answer(&self, id: u64, reply: Option<String>) {
-        if let Some(tx) = self
-            .asks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id)
-        {
-            let _ = tx.send(reply);
+    /// Apply the queued-prompt review's edits. Each `(key, text)` replaces
+    /// that entry in place when the turn has not drained it yet, or queues
+    /// it fresh when it has — the user's edited intent, either way. Keys in
+    /// `removed` drop their entry if it is still waiting. Unnamed entries
+    /// are untouched.
+    pub fn update_queued(&self, edits: Vec<(u64, String)>, removed: Vec<u64>) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        for (key, text) in edits {
+            if let Some(entry) = pending.items.iter_mut().find(|(id, _)| *id == key) {
+                entry.1 = text;
+            } else {
+                // Drained while the review held it: the edit is still the
+                // user's intent — submit it as a fresh steering message.
+                pending.next_id += 1;
+                let key = pending.next_id;
+                pending.items.push((key, text));
+            }
+        }
+        for key in removed {
+            pending.items.retain(|(id, _)| *id != key);
         }
     }
 
@@ -686,12 +664,11 @@ impl Agent {
     /// acquire a new binary payload halfway through its provider stream.
     pub fn submit_message(&mut self, message: ChatMessage, system: String) -> bool {
         if self.running {
-            self.pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .items
-                .push(message.content);
-            self.pending_signal.notify_one();
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.next_id += 1;
+            let key = pending.next_id;
+            pending.items.push((key, message.content));
+            drop(pending);
             return true;
         }
         self.log().commit(message);
@@ -711,11 +688,9 @@ impl Agent {
         let cwd = self.cwd.clone();
         let effort = self.effort();
         let pending = self.pending.clone();
-        let pending_signal = self.pending_signal.clone();
         let host = self.host.clone();
         let tool_seq = self.tool_seq.clone();
         let wake = self.wake.clone();
-        let asks = self.asks.clone();
         let tool_mode = if model.supports_tools {
             self.options.tool_mode
         } else {
@@ -762,15 +737,11 @@ impl Agent {
                     break false;
                 }
                 // Steer: fold any pending messages into this turn between
-                // steps unless the queued-prompt review holds them. The pause
-                // check and drain share one lock with the review snapshot.
+                // steps. The queue review edits these entries by key
+                // concurrently; whatever the loop takes here is gone to it.
                 let steered: Vec<String> = {
                     let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
-                    if pending.paused {
-                        Vec::new()
-                    } else {
-                        std::mem::take(&mut pending.items)
-                    }
+                    pending.items.drain(..).map(|(_, text)| text).collect()
                 };
                 for message in steered {
                     let _ = events.send(SessionEvent::Steered(message.clone())).await;
@@ -1266,29 +1237,17 @@ impl Agent {
 
                 if calls.is_empty() {
                     // A plain reply would end the turn — but a message that
-                    // landed mid-reply must still be delivered, so continue the
-                    // turn to pick it up rather than stranding it. While the
-                    // queued-prompt review holds the queue, the turn holds
-                    // open here instead of consuming or stranding it.
-                    loop {
-                        if cancel.load(Ordering::SeqCst) {
-                            break 'turn true;
-                        }
-                        let (empty, paused) = {
-                            let pending = pending.lock().unwrap_or_else(|e| e.into_inner());
-                            (pending.items.is_empty(), pending.paused)
-                        };
-                        if empty {
-                            break 'turn false;
-                        }
-                        if !paused {
-                            continue 'turn;
-                        }
-                        // Asleep until the state above can have changed —
-                        // a queued prompt, the review resuming, Esc. No
-                        // polling; see `pending_signal`.
-                        pending_signal.notified().await;
+                    // landed mid-reply must still be delivered, so continue
+                    // the turn to pick it up rather than stranding it.
+                    if !pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .items
+                        .is_empty()
+                    {
+                        continue 'turn;
                     }
+                    break 'turn false;
                 }
 
                 // Resolve the complete batch before serial execution so the
@@ -1326,8 +1285,6 @@ impl Agent {
                     let cancel = cancel.clone();
                     let events = events.clone();
                     let cwd = cwd.clone();
-                    let asks = asks.clone();
-                    let pending_signal = pending_signal.clone();
                     handles.push((
                         call.clone(),
                         tokio::spawn(async move {
@@ -1340,8 +1297,6 @@ impl Agent {
                                     cancel,
                                     id,
                                     events: events.clone(),
-                                    asks,
-                                    pending_signal,
                                 },
                                 &call.name,
                                 &call.arguments,
@@ -1423,11 +1378,14 @@ impl Agent {
                         .unwrap_or_else(|e| e.into_inner())
                         .items
                         .insert(
+                        0,
+                        (
                             0,
                             "The turn was paused because the context ran low. Continue the task \
-                             from where it left off."
-                                .into(),
-                        );
+                                 from where it left off."
+                                .to_string(),
+                        ),
+                    );
                     break 'turn false;
                 }
             };
@@ -1447,14 +1405,11 @@ impl Agent {
     pub fn on_turn_end(&mut self) -> Vec<String> {
         self.running = false;
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.paused = false;
-        std::mem::take(&mut pending.items)
+        pending.items.drain(..).map(|(_, text)| text).collect()
     }
 
     pub fn interrupt(&mut self) {
         self.cancel.store(true, Ordering::SeqCst);
-        // Wake the hold-open wait so it can observe the latch.
-        self.pending_signal.notify_one();
         if !self.running {
             let _ = self
                 .events
@@ -1465,9 +1420,6 @@ impl Agent {
 
 /// Dispatch one tool call: extension hooks may block it, an extension that
 /// owns the name serves it, otherwise the built-in runs on a blocking thread.
-type AskRegistry =
-    Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<Option<String>>>>>;
-
 struct ToolRunContext {
     host: Option<std::sync::Arc<crate::core::api::ExtensionHost>>,
     tool_mode: ToolMode,
@@ -1475,94 +1427,6 @@ struct ToolRunContext {
     cancel: Arc<AtomicBool>,
     id: u64,
     events: mpsc::Sender<SessionEvent>,
-    asks: AskRegistry,
-    /// The turn loop's hold-open wakeup, shared so an ask's cancel wait is
-    /// signal-driven too — `interrupt` notifies, no polling.
-    pending_signal: Arc<tokio::sync::Notify>,
-}
-
-/// The ask tool runs here, not in the tool table: it blocks on the person
-/// at the keyboard, so it needs the event channel out and the answer
-/// registry back in. Esc resolves it as cancelled with the turn.
-async fn run_ask(
-    id: u64,
-    arguments: &str,
-    events: &mpsc::Sender<SessionEvent>,
-    asks: &AskRegistry,
-    cancel: &Arc<AtomicBool>,
-    pending_signal: &tokio::sync::Notify,
-) -> tools::ToolOutput {
-    let args: serde_json::Value =
-        serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
-    let question = args["question"].as_str().unwrap_or("").trim().to_string();
-    if question.is_empty() {
-        return tools::ToolOutput {
-            content: "ask: missing question".into(),
-            outcome: tools::ToolOutcome::Failed,
-            summary: "error".into(),
-            display: None,
-        };
-    }
-    let options: Vec<(String, String)> = args["options"]
-        .as_array()
-        .map(|list| {
-            list.iter()
-                .filter_map(|o| {
-                    let label = o["label"].as_str()?.trim();
-                    if label.is_empty() {
-                        return None;
-                    }
-                    Some((
-                        label.to_string(),
-                        o["description"].as_str().unwrap_or("").trim().to_string(),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    // With no options at all the freeform slot is the only way to answer.
-    let allow_freeform = args["allow_freeform"].as_bool().unwrap_or(true) || options.is_empty();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    asks.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(id, tx);
-    let _ = events
-        .send(SessionEvent::Question {
-            id,
-            question,
-            options,
-            allow_freeform,
-        })
-        .await;
-    // Asleep until the answer arrives or the turn is interrupted. The
-    // notify also fires on unrelated queue changes; a wake just re-checks
-    // the latch. No polling.
-    let mut rx = rx;
-    let reply = loop {
-        tokio::select! {
-            answer = &mut rx => break answer.ok().flatten(),
-            _ = pending_signal.notified() => {
-                if cancel.load(Ordering::SeqCst) {
-                    break None;
-                }
-            }
-        }
-    };
-    asks.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-    match reply {
-        Some(text) => tools::ToolOutput {
-            content: text,
-            outcome: tools::ToolOutcome::Completed,
-            summary: "answered".into(),
-            display: None,
-        },
-        None => tools::ToolOutput {
-            content: "The user dismissed the question without answering.".into(),
-            outcome: tools::ToolOutcome::Cancelled,
-            summary: "cancelled".into(),
-            display: None,
-        },
-    }
 }
 
 async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools::ToolOutput {
@@ -1573,8 +1437,6 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
         cancel,
         id,
         events,
-        asks,
-        pending_signal,
     } = context;
     if !tool_mode.allows(name) {
         let mode = match tool_mode {
@@ -1666,9 +1528,6 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
             };
         }
     }
-    if name == "ask" {
-        return run_ask(id, arguments, &events, &asks, &cancel, &pending_signal).await;
-    }
     let name = name.to_string();
     let arguments = arguments.to_string();
     tokio::task::spawn_blocking(move || {
@@ -1741,8 +1600,6 @@ mod option_tests {
                 cancel: Arc::new(AtomicBool::new(false)),
                 id: 1,
                 events,
-                asks: Arc::new(Mutex::new(std::collections::HashMap::new())),
-                pending_signal: Arc::new(tokio::sync::Notify::new()),
             },
             "bash",
             r#"{"command":"touch should-not-exist"}"#,

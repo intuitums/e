@@ -7,6 +7,31 @@ the pipeline publishes.
 
 ## Unreleased
 
+- The `ask` tool is retired outright, not moved. A coding agent decides
+  and acts; it does not interview its user. The core loses the ask schema,
+  the answer registry, the read-only special case, and the question panel,
+  and the extensions protocol does not grow a replacement: an extension
+  that needs the person at the keyboard gets the answer from configuration
+  under `~/.e/` or fails loudly and is steered, like any other missing
+  input. If a question capability ever earns its way back in, it does so
+  by need, with a use in hand.
+- The queued-prompt review no longer pauses the queue or holds the turn
+  open. Pending prompts are keyed; the review edits by key, so an entry
+  the turn already steered commits as a fresh prompt instead of being
+  resurrected, and `pause_queue`/`resume_queue` and the turn loop's
+  hold-open wait are gone.
+- The composer's paste-collapse threshold is a setting:
+  `paste_placeholder` in `~/.e/settings.json` (codepoints, default 1000,
+  `0` inserts pastes literally). The safety bounds — the 2 MiB diff-read
+  cap, the 4M-cell diff budget, the ctrl+o output store limits, the OSC 8
+  URL cap — stay as named constants: performance guards, not preferences.
+- Two reference ports retired as drift, deliberately: unlabeled code
+  fences no longer infer a language from their content (they render bare —
+  the highlighter colors nothing it cannot name), and the markdown
+  footnote grammar is gone (`[^label]` renders as the literal text the
+  author wrote; a definition is an ordinary paragraph). The parity suite
+  pins both retirements so they cannot creep back unnoticed.
+
 ## 0.0.1 — 2026-08-29
 
 - Provider failures are classified by the error body's own wording, not

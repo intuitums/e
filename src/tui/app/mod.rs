@@ -74,12 +74,13 @@ struct Viewer {
     scroll: usize,
 }
 
-/// The queued-prompt review's working state: a snapshot of the paused
+/// The queued-prompt review's working state: a keyed snapshot of the
 /// queue (oldest first), which entry the composer holds, and whether a
-/// draft is showing at all (↓ past the newest hides it while the queue
-/// stays paused).
+/// draft is showing at all (↓ past the newest hides it). The turn keeps
+/// steering meanwhile — an entry it already drained commits as a fresh
+/// prompt instead of resurrecting the sent text.
 struct QueueReview {
-    entries: Vec<String>,
+    entries: Vec<(u64, String)>,
     dirty: Vec<bool>,
     selected: usize,
     visible: bool,
@@ -272,11 +273,9 @@ struct App {
     /// changed (the cache's fingerprint), or the width or depth moved —
     /// not on every 33ms paint.
     viewer_cache: Option<(u64, usize, bool, Vec<String>)>,
-    /// The ask tool's open question, and any batch-mates queued behind it.
-    question: Option<crate::tui::questionpanel::Question>,
-    question_queue: std::collections::VecDeque<crate::tui::questionpanel::Question>,
     /// The queued-prompt review: ↑ on an empty composer while prompts wait
-    /// pauses the queue and loads the newest into the composer for editing.
+    /// loads the newest into the composer for editing; the turn keeps
+    /// steering while the review edits the queue.
     queue_review: Option<QueueReview>,
     /// Bumped whenever session identity changes (/new, resume). Async work
     /// launched in one epoch may not mutate a later one: a late extension
@@ -512,7 +511,7 @@ impl App {
             let cap = (height / 2 + 1).max(3);
             let mut composer = self.editor.render(&self.theme, width, cap);
             // The queued banner band: the collapsed summary (ink-bright),
-            // a paused hint when the review holds the queue, a gap row —
+            // the review's hint line while it edits the queue, a gap row —
             // and with chrome above it the composer trades its leading
             // blank for its top divider, the reference's rule.
             let steering = self.agent.queued_count();
@@ -542,11 +541,11 @@ impl App {
                 lines.push(self.theme.fg("userMessageText", &label));
                 if let Some(review) = &self.queue_review {
                     let hint = if !review.visible {
-                        "steering paused · enter to apply"
+                        "reviewing the queue · enter to apply"
                     } else if self.editor.is_empty() {
-                        "paused · delete again to remove queued prompt · enter to send unchanged"
+                        "delete again to remove the queued prompt · enter to send unchanged"
                     } else {
-                        "paused · enter to send"
+                        "enter to apply the edit"
                     };
                     lines.push(self.theme.fg("dim", hint));
                 }
@@ -558,8 +557,6 @@ impl App {
         if let Some(stage) = &self.trust {
             let dir = self.agent.cwd().to_string_lossy().into_owned();
             lines.extend(trustpanel::render(stage, &self.theme, width, &dir));
-        } else if let Some(question) = &self.question {
-            lines.extend(question.render(&self.theme, width));
         } else if let Some(stage) = &self.auth {
             lines.extend(authpanel::render(
                 stage,
@@ -580,18 +577,15 @@ impl App {
             context_used: self.context_tokens,
             context_total: Some(window),
         };
-        let question_hint = self.question.as_ref().map(|q| q.hint(width));
-        let hint = question_hint.as_deref().or_else(|| {
-            self.settings
-                .as_ref()
-                .map(|_| crate::tui::settingspanel::HINT)
-                .or_else(|| self.menu.as_ref().map(|m| m.hint))
-                .map(|h| crate::tui::menu::degrade_hint(h, width))
-        });
+        let hint = self
+            .settings
+            .as_ref()
+            .map(|_| crate::tui::settingspanel::HINT)
+            .or_else(|| self.menu.as_ref().map(|m| m.hint))
+            .map(|h| crate::tui::menu::degrade_hint(h, width));
         // A framed surface's bottom divider sits directly above the hint
         // row — the blank spacer belongs only to the bare-composer layout.
         let panel_open = self.trust.is_some()
-            || self.question.is_some()
             || self.auth.is_some()
             || self.settings.is_some()
             || self.menu.is_some();
@@ -651,7 +645,6 @@ impl App {
     /// deletes the entry. Returns true when the key was consumed.
     fn queue_review_key(&mut self, code: KeyCode) -> bool {
         if self.trust.is_some()
-            || self.question.is_some()
             || self.auth.is_some()
             || self.settings.is_some()
             || self.menu.is_some()
@@ -660,13 +653,12 @@ impl App {
         }
         let Some(mut review) = self.queue_review.take() else {
             if code == KeyCode::Up && self.editor.is_empty() && self.active.is_some() {
-                let entries = self.agent.pause_queue();
+                let entries = self.agent.queue_snapshot();
                 let Some(selected) = entries.len().checked_sub(1) else {
-                    self.agent.resume_queue();
                     return false;
                 };
                 let dirty = vec![false; entries.len()];
-                self.editor.set_text(&entries[selected]);
+                self.editor.set_text(&entries[selected].1);
                 self.queue_review = Some(QueueReview {
                     entries,
                     dirty,
@@ -678,8 +670,8 @@ impl App {
             return false;
         };
         let stash = |review: &mut QueueReview, text: String| {
-            if review.entries[review.selected] != text {
-                review.entries[review.selected] = text;
+            if review.entries[review.selected].1 != text {
+                review.entries[review.selected].1 = text;
                 review.dirty[review.selected] = true;
             }
         };
@@ -689,12 +681,12 @@ impl App {
                     stash(&mut review, self.editor.text());
                     if review.selected > 0 {
                         review.selected -= 1;
-                        self.editor.set_text(&review.entries[review.selected]);
+                        self.editor.set_text(&review.entries[review.selected].1);
                     }
                     true
                 } else if self.editor.is_empty() {
                     review.visible = true;
-                    self.editor.set_text(&review.entries[review.selected]);
+                    self.editor.set_text(&review.entries[review.selected].1);
                     true
                 } else {
                     false
@@ -704,7 +696,7 @@ impl App {
                 stash(&mut review, self.editor.text());
                 if review.selected + 1 < review.entries.len() {
                     review.selected += 1;
-                    self.editor.set_text(&review.entries[review.selected]);
+                    self.editor.set_text(&review.entries[review.selected].1);
                 } else {
                     self.editor.set_text("");
                     review.visible = false;
@@ -724,36 +716,33 @@ impl App {
                     // Only edited entries rewrite: a trim drops an entry that
                     // emptied, and leaves untouched entries verbatim — a
                     // multi-line prompt's trailing newline is not the user's
-                    // doing.
-                    let entries: Vec<String> = review
-                        .entries
-                        .iter()
-                        .zip(&review.dirty)
-                        .filter_map(|(entry, dirty)| {
-                            if !dirty {
-                                Some(entry.clone())
-                            } else {
-                                let trimmed = entry.trim().to_string();
-                                (!trimmed.is_empty()).then_some(trimmed)
-                            }
-                        })
-                        .collect();
-                    self.agent.set_queued(entries);
+                    // doing. An edit to an entry the turn already drained
+                    // lands as a fresh prompt, not a resurrection.
+                    let mut edits = Vec::new();
+                    let mut removed = Vec::new();
+                    for ((key, entry), dirty) in review.entries.iter().zip(&review.dirty) {
+                        if !dirty {
+                            continue;
+                        }
+                        match entry.trim() {
+                            "" => removed.push(*key),
+                            trimmed => edits.push((*key, trimmed.to_string())),
+                        }
+                    }
+                    self.agent.update_queued(edits, removed);
                 }
                 self.editor.set_text("");
-                self.agent.resume_queue();
                 return true;
             }
             KeyCode::Backspace if review.visible && self.editor.is_empty() => {
-                review.entries.remove(review.selected);
+                let (key, _) = review.entries.remove(review.selected);
                 review.dirty.remove(review.selected);
-                self.agent.set_queued(review.entries.clone());
+                self.agent.update_queued(Vec::new(), vec![key]);
                 if review.entries.is_empty() {
-                    self.agent.resume_queue();
                     return true;
                 }
                 review.selected = review.selected.min(review.entries.len() - 1);
-                self.editor.set_text(&review.entries[review.selected]);
+                self.editor.set_text(&review.entries[review.selected].1);
                 true
             }
             _ => false,
@@ -763,11 +752,11 @@ impl App {
     }
 
     /// Close the review without committing the visible draft. The draft is
-    /// discarded with the review, and the queue resumes as it stands.
+    /// discarded with the review; the queue was never paused, so there is
+    /// nothing to resume.
     fn close_queue_review(&mut self) {
         if self.queue_review.take().is_some() {
             self.editor.set_text("");
-            self.agent.resume_queue();
         }
     }
 
@@ -1944,12 +1933,6 @@ fn rewind_target(
 /// swallows the chord, `None` means "not mentioned"); anything left
 /// unmentioned falls through to e's built-in bindings below, so an empty or
 /// missing file reproduces this function's behavior exactly.
-/// Question panels handle local input but leave global interrupt and exit keys alone.
-fn question_owns_key(event: &KeyEvent) -> bool {
-    let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
-    !(ctrl && matches!(event.code, KeyCode::Char('c') | KeyCode::Char('d')))
-}
-
 fn key_of(event: &KeyEvent, keymap: &crate::core::config::keybindings::Keymap) -> Option<Key> {
     let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
     let alt = event.modifiers.contains(KeyModifiers::ALT);
@@ -2103,8 +2086,6 @@ pub async fn run(
         output_seq: 0,
         viewer: None,
         viewer_cache: None,
-        question: None,
-        question_queue: std::collections::VecDeque::new(),
         queue_review: None,
         session_epoch: 0,
         update_installed: None,
@@ -2290,48 +2271,6 @@ pub async fn run(
                                     }
                                 }
                                 _ => {}
-                            }
-                        } else if app.question.is_some() && question_owns_key(&k) {
-                            // The ask tool's panel owns its local keys while open.
-                            // Esc dismisses the question (the tool records a
-                            // cancel) without aborting the turn; a digit
-                            // chooses and answers in one stroke.
-                            let mut submit: Option<Option<String>> = None;
-                            if let Some(q) = &mut app.question {
-                                match k.code {
-                                    KeyCode::Esc => submit = Some(None),
-                                    KeyCode::Up => q.step(-1),
-                                    KeyCode::Down => q.step(1),
-                                    KeyCode::Enter => {
-                                        if let Some(text) = q.answer() {
-                                            submit = Some(Some(text));
-                                        }
-                                    }
-                                    KeyCode::Backspace if q.freeform_selected() => {
-                                        q.freeform.pop();
-                                    }
-                                    KeyCode::Char(c) if !ctrl => {
-                                        if q.freeform_selected() {
-                                            q.freeform.push(c);
-                                        } else if let Some(n) = c.to_digit(10) {
-                                            if q.choose(n as usize) {
-                                                if let Some(text) = q.answer() {
-                                                    submit = Some(Some(text));
-                                                }
-                                            }
-                                        } else if q.allow_freeform {
-                                            q.selected = q.options.len();
-                                            q.freeform.push(c);
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            if let Some(reply) = submit {
-                                if let Some(q) = app.question.take() {
-                                    app.agent.answer(q.id, reply);
-                                }
-                                app.question = app.question_queue.pop_front();
                             }
                         } else if let Some(panel) = &mut app.settings {
                             let mut setting_error = None;
@@ -2960,16 +2899,6 @@ mod tests {
     static KEY_OF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn question_panel_leaves_global_interrupt_and_exit_keys_unhandled() {
-        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
-        let plain_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
-        assert!(!question_owns_key(&ctrl_c));
-        assert!(!question_owns_key(&ctrl_d));
-        assert!(question_owns_key(&plain_c));
-    }
-
-    #[test]
     fn key_of_matches_the_built_in_bindings_when_the_keymap_is_empty() {
         let keymap = crate::core::config::keybindings::Keymap::empty();
         let ctrl_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
@@ -3217,8 +3146,6 @@ mod tests {
             output_seq: 0,
             viewer: None,
             viewer_cache: None,
-            question: None,
-            question_queue: std::collections::VecDeque::new(),
             queue_review: None,
             session_epoch: 0,
             update_installed: None,
@@ -3243,10 +3170,17 @@ mod tests {
     fn queue_review_commit_leaves_untouched_entries_verbatim() {
         let mut app = session_app();
         app.on_session_event(SessionEvent::TurnStart);
+        // The queue is paused-free: seed it directly, then open the review
+        // on the keyed snapshot the commit will edit against.
+        app.agent.update_queued(
+            vec![(1, "keep  me\n".into()), (2, "old draft".into())],
+            vec![],
+        );
+        let entries = app.agent.queue_snapshot();
         app.queue_review = Some(QueueReview {
             // The untouched entry carries a trailing newline a blanket trim
             // would silently strip; only the edited entry may rewrite.
-            entries: vec!["keep  me\n".into(), "old draft".into()],
+            entries,
             dirty: vec![false, true],
             selected: 1,
             visible: true,
@@ -3255,20 +3189,22 @@ mod tests {
 
         assert!(app.queue_review_key(KeyCode::Enter));
 
-        let entries = app.agent.pause_queue();
+        let entries = app.agent.queue_snapshot();
         assert_eq!(
             entries,
-            vec!["keep  me\n".to_string(), "new draft".to_string()]
+            vec![(1, "keep  me\n".to_string()), (2, "new draft".to_string())]
         );
-        app.agent.resume_queue();
     }
 
     #[test]
     fn queue_review_commit_drops_an_entry_edited_to_empty() {
         let mut app = session_app();
         app.on_session_event(SessionEvent::TurnStart);
+        app.agent
+            .update_queued(vec![(1, "first".into()), (2, "second".into())], vec![]);
+        let entries = app.agent.queue_snapshot();
         app.queue_review = Some(QueueReview {
-            entries: vec!["first".into(), "second".into()],
+            entries,
             dirty: vec![false, true],
             selected: 1,
             visible: true,
@@ -3277,9 +3213,8 @@ mod tests {
 
         assert!(app.queue_review_key(KeyCode::Enter));
 
-        let entries = app.agent.pause_queue();
-        assert_eq!(entries, vec!["first".to_string()]);
-        app.agent.resume_queue();
+        let entries = app.agent.queue_snapshot();
+        assert_eq!(entries, vec![(1, "first".to_string())]);
     }
 
     #[test]
@@ -3382,7 +3317,7 @@ mod tests {
         let mut app = session_app();
         app.on_session_event(SessionEvent::TurnStart);
         app.queue_review = Some(QueueReview {
-            entries: vec!["original".into()],
+            entries: vec![(9, "original".into())],
             dirty: vec![false],
             selected: 0,
             visible: true,

@@ -35,6 +35,7 @@ e → extension, notifications (no `id`, no reply):
 {"method":"shutdown"}
 ```
 
+
 extension → e:
 
 ```

@@ -193,3 +193,12 @@ pub fn theme() -> String {
 pub fn auto_update() -> bool {
     get_string("auto_update").as_deref() != Some("off")
 }
+
+/// The paste-collapse threshold in codepoints: a paste longer than this
+/// becomes a placeholder token in the composer instead of the raw text.
+/// `0` disables collapsing. Default 1000 — long enough that ordinary
+/// multi-line text inserts literally, short enough that a pasted log does
+/// not bury the draft.
+pub fn paste_placeholder() -> u64 {
+    get_u64("paste_placeholder").unwrap_or(1000)
+}
