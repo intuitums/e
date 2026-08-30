@@ -407,9 +407,12 @@ impl Block {
                 // burst's summary row dims (`dim` on light is one step
                 // further toward the background than statusline).
                 let color = if self.done { "dim" } else { "thinkingText" };
-                wrap_styled(text, width.saturating_sub(4).max(8))
+                // The collapsed summary keeps its `· ` marker; live thinking
+                // drops the dot, and the text starts where the dot was.
+                let (prefix, pad) = if self.done { ("  · ", 4) } else { ("  ", 2) };
+                wrap_styled(text, width.saturating_sub(pad).max(8))
                     .into_iter()
-                    .map(|l| theme.fg(color, &format!("  · {l}")))
+                    .map(|l| theme.fg(color, &format!("{prefix}{l}")))
                     .collect()
             }
             Kind::Tool => {
@@ -1047,7 +1050,9 @@ mod tests {
         let live = block.lines_for_test(&theme, 40);
         assert!(live.len() >= 2, "thinking rows render");
         for row in &live {
-            assert!(row.contains("·"), "thinking rows carry a marker");
+            // Live thinking carries no `·` — the dot belongs to the
+            // collapsed summary; here the text starts where it would be.
+            assert!(!row.contains("·"), "live thinking rows drop the marker");
             assert!(
                 row.contains(theme.fg_prefix("thinkingText")),
                 "live thinking wears thinkingText"
@@ -1061,6 +1066,10 @@ mod tests {
         let collapsed = block.lines_for_test(&theme, 40);
         assert_eq!(collapsed.len(), 1, "a collapsed burst is one row");
         assert!(collapsed[0].contains("Thought for 12s"));
+        assert!(
+            collapsed[0].contains("· "),
+            "the collapsed summary keeps its dot marker"
+        );
         assert!(
             collapsed[0].contains(theme.fg_prefix("dim")),
             "the collapsed row dims"
