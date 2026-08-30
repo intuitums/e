@@ -17,6 +17,11 @@ the pipeline publishes.
   enforced), its `model` a fallback. The `subagent.mjs` example reads
   `e agents --json` and offers each persona as a `delegate` choice; sample
   personas ship in `docs/agents/`.
+- The `e rpc` response gains a `session` field: the saved turn's JSONL path
+  (or `null` for a memory-only run). A delegated turn's whole transcript —
+  every tool call and its output — lives there, so the dispatching agent can
+  read the full turn when it needs more than the final answer, not just the
+  summary the tool returns.
 - Read-only tool mode is removed. `--read-only`/`--ro`, the `read_only`
   RPC `tool_mode`, and the `read_only_notice` override are gone; `ToolMode`
   is now `all` or `none`, with `--no-tools` the one deliberate opt-out. A

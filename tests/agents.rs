@@ -106,3 +106,48 @@ fn a_named_persona_shapes_the_delegated_turn() {
         "system prompt missing the persona body: {system}"
     );
 }
+
+/// A saved delegation returns its session's JSONL path, so the dispatching
+/// agent can read the full transcript — every tool call — not just the answer.
+#[test]
+fn a_saved_delegation_returns_its_transcript_path() {
+    let _lock = env_lock();
+    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n\
+                data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n\
+                data: [DONE]\n\n";
+    let (port, server) = serve_sse(&[body]);
+    let home = Home::new("agents-session");
+    home.write(
+        "models.json",
+        format!(
+            r#"{{"providers":{{"mock":{{"base_url":"http://127.0.0.1:{port}","api":"completions","models":["test"]}}}}}}"#
+        ),
+    );
+    home.auth(r#"{"format_version":1,"mock":{"key":"k"}}"#);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
+        .args(["--no-extensions", "rpc"])
+        .env("E_HOME", &home.dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"{\"id\":1,\"prompt\":\"go\",\"save\":true}\n")
+        .unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    server.join().unwrap();
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("one JSON response line");
+    let session = response["session"].as_str().unwrap_or_default();
+    assert!(
+        session.ends_with(".jsonl"),
+        "expected a saved transcript path, got {:?}",
+        response["session"]
+    );
+}

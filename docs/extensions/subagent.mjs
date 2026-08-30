@@ -117,8 +117,10 @@ connect({
     // than crash the extension.
     child.stdin.on("error", () => {});
     // `agent` names a persona; e resolves its system prompt, tool allowlist,
-    // and model. tool_mode only applies to a persona-less delegation.
-    const request = { id: 1, prompt: input.prompt, save: false };
+    // and model. tool_mode only applies to a persona-less delegation. save:true
+    // persists the child's session so its full transcript — every tool call and
+    // output — stays inspectable; the response returns that JSONL path.
+    const request = { id: 1, prompt: input.prompt, save: true };
     if (input.agent) request.agent = input.agent;
     else request.tool_mode = mode;
     if (input.model) request.model = input.model;
@@ -163,6 +165,12 @@ connect({
     if (result.error || status.code !== 0) {
       return { content: result.error || stderr || "delegate failed", is_error: true };
     }
-    return { content: result.final_output || result.output || "delegate returned no output" };
+    const answer = result.final_output || result.output || "delegate returned no output";
+    // Hand back the final answer plus a pointer to the full turn: the parent
+    // reads the JSONL session only if it needs more than this summary.
+    const trailer = result.session
+      ? `\n\n---\nFull transcript (every tool call) at ${result.session} — read it for detail beyond this summary.`
+      : "";
+    return { content: answer + trailer };
   },
 }).run();

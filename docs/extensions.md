@@ -248,9 +248,14 @@ specifications.
 Copy both `subagent.mjs` and `scaffold.mjs`, make the former executable, and
 restart. The model gains a `delegate` tool. Each delegation is a single-shot
 `e rpc` child in the same working directory: the extension writes one JSON
-request line, reads the one result object, and closes stdin. It is ephemeral
-and extension-free (so a delegated turn can never delegate again). Set `E_BIN`
+request line, reads the one result object, and closes stdin. It is
+extension-free (so a delegated turn can never delegate again). Set `E_BIN`
 when the child should use an e binary other than the one on `PATH`.
+
+The delegation runs with `save: true`, so the child's whole transcript — every
+tool call and its output — persists; the response's `session` path is appended
+to the tool result, and the dispatching agent can `read` that JSONL to see the
+full turn when the returned summary isn't enough.
 
 **Agent personas.** A delegation can name an `agent` — a persona defined in
 `~/.e/agents/<name>.md` (or a trusted repo's `.e/agents/<name>.md`). The file

@@ -31,8 +31,12 @@ accumulated output, terminal error/abort state, warnings, token usage,
 optional estimated cost, and tool counts, plus the request's `id`:
 
 ```json
-{"id":"one","output":"...","final_output":"...","model":"provider/model","effort":"high","aborted":false,"error":null,"warnings":[],"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_tokens":900},"cost_usd":null,"tools":{"calls":2,"failures":0}}
+{"id":"one","output":"...","final_output":"...","model":"provider/model","effort":"high","aborted":false,"error":null,"warnings":[],"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_tokens":900},"cost_usd":null,"tools":{"calls":2,"failures":0},"session":null}
 ```
+
+`session` is the saved turn's JSONL path when `save` was true (the whole
+transcript — every tool call and its output — lives there, so a caller that
+needs more than `final_output` can read it), or `null` for a memory-only run.
 
 Malformed requests also produce one line (`{"id":null,"error":"..."}`) and
 do not terminate the process. EOF shuts down extensions and exits cleanly.

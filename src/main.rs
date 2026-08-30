@@ -734,6 +734,14 @@ async fn rpc(
         result.finish();
         let mut body = result.json(&slug, effort.as_deref(), pricing.as_ref());
         body["id"] = request_id;
+        // The saved session's JSONL path, when this turn persisted one: the
+        // whole transcript — every tool call and its output — lives there, so
+        // a caller that needs more than the final text can read it. Null when
+        // the turn ran memory-only (`save` false).
+        body["session"] = agent
+            .session_path()
+            .map(|p| serde_json::Value::from(p.display().to_string()))
+            .unwrap_or(serde_json::Value::Null);
         println!("{body}");
     }
     host.shutdown().await;
