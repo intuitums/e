@@ -12,11 +12,12 @@ use std::path::Path;
 
 use crate::core::config::home;
 
+// The reference design's own guideline set. It keeps the always-on pair and
+// omits the bash-only file-exploration line, which the reference adds only when
+// no grep/find/ls tool exists — e ships grep, so it never applied here.
 const GUIDELINES: &[&str] = &[
-    "Prefer small, focused changes; preserve unrelated code and formatting",
-    "Show file paths clearly when working with files",
     "Be concise in your responses",
-    "When you finish a task, stop — don't narrate what you could do next",
+    "Show file paths clearly when working with files",
 ];
 
 /// The default base: identity, tools, guidelines (the reference's shape,

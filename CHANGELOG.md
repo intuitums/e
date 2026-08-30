@@ -7,6 +7,13 @@ the pipeline publishes.
 
 ## Unreleased
 
+- The base system prompt's guideline set now matches the reference design's
+  exactly — "Be concise in your responses" and "Show file paths clearly when
+  working with files" — dropping the two e-specific additions (the
+  small-focused-changes and stop-when-done lines). Everything else in the
+  prompt already tracked the reference; the tools list stays e's real toolset,
+  the self-docs section stays `e docs`, and the cwd/platform/date grounding
+  stays.
 - `e add <path>` installs a local extension file into `~/.e/extensions/`,
   makes it executable, and seeds `scaffold.mjs` beside it — so an extension's
   `import "./scaffold.mjs"` resolves with nothing for the author to place by
