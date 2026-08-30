@@ -14,13 +14,18 @@ the pipeline publishes.
   prompt already tracked the reference; the tools list stays e's real toolset,
   the self-docs section stays `e docs`, and the cwd/platform/date grounding
   stays.
-- `e add <path>` installs a local extension file into `~/.e/extensions/`,
-  makes it executable, and seeds `scaffold.mjs` beside it — so an extension's
-  `import "./scaffold.mjs"` resolves with nothing for the author to place by
-  hand. The scaffold is embedded in the binary (the copy always matches your
-  e) and seeded non-executable, so the host skips it while extensions import
-  it. Local files only for now; remote sources (git/https) are a later,
-  trust-gated addition.
+- An extension can be a **directory** under `~/.e/extensions/`, not just a
+  top-level file: `~/.e/extensions/foo/` bundles its entry point (`index.*`,
+  else a file matching the directory name, else its sole executable) together
+  with its helpers. Everything an extension needs lives in one folder, which
+  is where a user's additions belong.
+- `e add <path>` installs a local extension into its own bundle directory
+  (`~/.e/extensions/<name>/`), makes it executable, and seeds `scaffold.mjs`
+  inside the bundle — so an extension's `import "./scaffold.mjs"` resolves with
+  nothing for the author to place by hand. The scaffold is embedded in the
+  binary (the copy always matches your e) and seeded non-executable, so the
+  host runs the extension and skips the scaffold. Local files only for now;
+  remote sources (git/https) are a later, trust-gated addition.
 - `e rpc` gains two generic per-request knobs so a delegated turn can be
   shaped without the core binary learning any new concept: `system` (extra
   system-prompt text, appended to the base) and `tools` (a positive built-in

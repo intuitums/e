@@ -1,11 +1,12 @@
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-/// `e add` installs a local extension file executable and seeds a
-/// non-executable scaffold.mjs beside it, so the extension's
-/// `import "./scaffold.mjs"` resolves with nothing for the user to place.
+/// `e add` installs a local extension into its own bundle directory under
+/// `~/.e/extensions/<name>/`, executable, and seeds a non-executable
+/// scaffold.mjs in the bundle so the extension's `import "./scaffold.mjs"`
+/// resolves with nothing for the user to place.
 #[test]
-fn add_installs_a_local_extension_and_seeds_scaffold() {
+fn add_installs_a_local_extension_into_a_bundle_with_scaffold() {
     let stamp = format!("{}-{}", std::process::id(), uuid::Uuid::now_v7());
     let home = std::env::temp_dir().join(format!("e-cli-add-{stamp}"));
     let src_dir = std::env::temp_dir().join(format!("e-cli-add-src-{stamp}"));
@@ -24,8 +25,11 @@ fn add_installs_a_local_extension_and_seeds_scaffold() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let installed = home.join("extensions").join("myext.mjs");
-    let scaffold = home.join("extensions").join("scaffold.mjs");
+    // The bundle is named after the file's stem; the file and its scaffold
+    // live together inside it.
+    let bundle = home.join("extensions").join("myext");
+    let installed = bundle.join("myext.mjs");
+    let scaffold = bundle.join("scaffold.mjs");
     assert!(installed.exists(), "extension not installed");
     assert!(
         std::fs::read_to_string(&scaffold)

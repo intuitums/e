@@ -1,9 +1,12 @@
 # Extensions
 
-An extension is any executable file in `~/.e/extensions/`. Any language —
-shell, Python, Rust, Node — the process boundary is the API. e starts each
-one at launch, keeps it running for the whole session, and speaks a line
-protocol over stdin/stdout: one JSON object per line.
+An extension is an executable in `~/.e/extensions/` — either a top-level file
+(`~/.e/extensions/foo.mjs`) or a subdirectory that bundles everything it needs
+(`~/.e/extensions/foo/`, whose entry point is the executable inside named
+`index.*`, else one matching the directory name, else its sole executable).
+Any language — shell, Python, Rust, Node — the process boundary is the API. e
+starts each one at launch, keeps it running for the whole session, and speaks a
+line protocol over stdin/stdout: one JSON object per line.
 
 Extensions can:
 

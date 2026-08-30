@@ -423,16 +423,18 @@ fn agent_options(options: &Options) -> AgentOptions {
 }
 
 /// The wire-protocol helper every JS extension imports. Embedded so `e add`
-/// can seed it beside an installed extension — the author never copies a
-/// scaffold by hand. Kept in sync with the canonical example on disk.
+/// can seed it into an installed extension's bundle — the author never copies
+/// a scaffold by hand. Kept in sync with the canonical example on disk.
 const SCAFFOLD: &str = include_str!("../docs/extensions/scaffold.mjs");
 
-/// `e add <path>` — install a local extension file into `~/.e/extensions/`,
-/// make it executable, and seed `scaffold.mjs` beside it so the extension's
-/// `import "./scaffold.mjs"` resolves with nothing for the user to place. The
-/// seeded scaffold is left non-executable, so the host skips it as an
-/// extension while extensions still import it. Local sources only for now;
-/// remote fetch (git/https) is a separate, trust-gated feature.
+/// `e add <path>` — install a local extension file into its own bundle
+/// directory under `~/.e/extensions/<name>/`, make it executable, and seed
+/// `scaffold.mjs` inside that bundle so the extension's `import
+/// "./scaffold.mjs"` resolves with nothing for the user to place. Everything
+/// an extension needs lives together in its own folder; the seeded scaffold is
+/// non-executable, so the host runs the extension and skips the scaffold. Local
+/// sources only for now; remote fetch (git/https) is a separate, trust-gated
+/// feature.
 fn install_extension(source: &str) -> Result<String, String> {
     let src = std::path::Path::new(source);
     let meta = std::fs::metadata(src).map_err(|error| format!("{source}: {error}"))?;
@@ -444,10 +446,13 @@ fn install_extension(source: &str) -> Result<String, String> {
     let name = src
         .file_name()
         .ok_or_else(|| format!("{source}: no file name"))?;
-    let ext_dir = e::core::config::home::extensions_dir();
-    std::fs::create_dir_all(&ext_dir).map_err(|error| format!("{}: {error}", ext_dir.display()))?;
+    let bundle_name = src
+        .file_stem()
+        .ok_or_else(|| format!("{source}: no file name"))?;
+    let bundle = e::core::config::home::extensions_dir().join(bundle_name);
+    std::fs::create_dir_all(&bundle).map_err(|error| format!("{}: {error}", bundle.display()))?;
 
-    let scaffold = ext_dir.join("scaffold.mjs");
+    let scaffold = bundle.join("scaffold.mjs");
     let seeded = if scaffold.exists() {
         false
     } else {
@@ -456,13 +461,13 @@ fn install_extension(source: &str) -> Result<String, String> {
         true
     };
 
-    let dest = ext_dir.join(name);
+    let dest = bundle.join(name);
     std::fs::copy(src, &dest).map_err(|error| format!("{}: {error}", dest.display()))?;
     make_executable(&dest)?;
 
     let mut message = format!("installed {} → {}", name.to_string_lossy(), dest.display());
     if seeded {
-        message.push_str("\nseeded scaffold.mjs beside it");
+        message.push_str("\nseeded scaffold.mjs in the bundle");
     }
     message.push_str("\nrestart e to load it");
     Ok(message)

@@ -15,10 +15,10 @@ const PERSONAS = [
   {
     name: "Explore",
     description:
-      "Fast, read-only scout that searches and analyzes the codebase without editing; runs on a light model.",
+      "Fast, read-only scout that searches and analyzes the codebase without editing.",
     tools: ["read", "grep"],
-    // A light model keeps recon cheap. Adjust to one your providers expose.
-    model: "anthropic/claude-haiku-4-5",
+    // No model pinned: the delegation inherits the caller's model, or the
+    // caller passes a lighter one per call. Never hardcode one here.
     systemPrompt:
       "You are Explore: fast, read-only reconnaissance. Find the code that matters for the task — the files, the key symbols, and how they connect — and report back concisely, quoting only the lines that carry the answer. You never edit; another turn acts on what you find. End with a dense summary the dispatching agent can use without re-reading the files.",
   },
