@@ -1,8 +1,8 @@
 [package]
 name = "e"
-# Cargo requires a valid SemVer here, but the version users see is the
-# `dogfood` codename in src/lib.rs — e is unversioned while we dogfood it.
-version = "0.0.0"
+# The user-facing version, kept in sync with `VERSION` in src/lib.rs —
+# scripts/release-check.sh requires both to match the release tag.
+version = "0.0.1"
 edition = "2021"
 rust-version = "1.98"
 license = "MIT"

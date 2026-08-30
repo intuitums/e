@@ -46,16 +46,23 @@ fn parts(version: &str) -> [u64; 3] {
     out
 }
 
+/// True when the version is release SemVer — three numeric segments — the
+/// same shape `scripts/release-check.sh` demands of a `vX.Y.Z` tag. Anything
+/// else (a checkout stamped `dev`, a hand-edited identity) is not a release
+/// and must never update itself or check for updates.
 pub fn is_release_version(v: &str) -> bool {
     let v = v.trim_start_matches('v');
     let mut segs = v.split('.');
-    let major = segs.next().is_some_and(|s| s.parse::<u64>().is_ok());
-    let minor = segs.next().is_some_and(|s| s.parse::<u64>().is_ok());
-    major && minor
+    let three = [segs.next(), segs.next(), segs.next()];
+    segs.next().is_none()
+        && three
+            .iter()
+            .all(|s| s.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())))
 }
 
 pub fn is_newer(candidate: &str, current: &str) -> bool {
-    // A code-named/dev build never rolls itself forward to a release.
+    // A build whose version is not release SemVer never rolls itself
+    // forward: a source checkout must update via cargo, not over itself.
     if !is_release_version(current) {
         return false;
     }
@@ -161,8 +168,8 @@ async fn fetch(url: &str) -> Result<Vec<u8>, String> {
 /// The whole flow for the running binary: check, install if newer. Ok(None)
 /// means already current (or not applicable).
 pub async fn self_update() -> Result<Option<String>, String> {
-    // Dogfood builds carry a non-SemVer codename; don't auto-replace them
-    // with a published release.
+    // A build whose identity is not release SemVer — a source checkout —
+    // is never replaced by a published release.
     if !is_release_version(crate::VERSION) {
         return Ok(None);
     }

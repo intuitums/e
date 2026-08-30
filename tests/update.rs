@@ -7,15 +7,22 @@ use std::net::TcpListener;
 
 #[test]
 fn version_comparison() {
-    use e::core::update::is_newer;
+    use e::core::update::{is_newer, is_release_version};
     assert!(is_newer("v0.4.1", "0.4.0"));
     assert!(is_newer("1.0.0", "0.9.9"));
     assert!(!is_newer("v0.4.0", "0.4.0"));
     assert!(!is_newer("0.3.9", "0.4.0"));
     assert!(!is_newer("garbage", "0.4.0"));
-    // A code-named (non-SemVer) build is never newer than a release, so it
-    // never auto-updates over itself.
-    assert!(!is_newer("v9.9.9", "dogfood"));
+    // A build whose version is not release SemVer never rolls itself
+    // forward: a source checkout must update via cargo, not over itself.
+    assert!(!is_newer("v9.9.9", "dev"));
+    // Release SemVer — exactly three numeric segments, the shape
+    // release-check demands of a tag — and only that, counts as a release.
+    assert!(is_release_version("0.0.1"));
+    assert!(is_release_version("v1.2.3"));
+    assert!(!is_release_version("dev"));
+    assert!(!is_release_version("1.2"));
+    assert!(!is_release_version("1.2.3.4"));
 }
 
 fn serve_release(files: Vec<(String, Vec<u8>)>) -> (String, std::thread::JoinHandle<()>) {

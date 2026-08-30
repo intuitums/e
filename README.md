@@ -16,13 +16,12 @@ skills.
 
 ## Install
 
-Until the first binary release, install the pinned source with Rust:
-
 ```sh
-cargo install --locked --git https://github.com/intuitums/e
+curl -fsSL https://raw.githubusercontent.com/intuitums/e/main/install.sh | sh
 ```
 
-Published releases support:
+`install.sh` selects the matching binary, verifies its checksum, and installs
+it under `~/.local/bin`. Published releases support:
 
 | Operating system | Architectures | Status |
 |---|---|---|
@@ -30,11 +29,12 @@ Published releases support:
 | macOS | Apple Silicon, Intel | release-built; native-runner smoke test |
 | Windows | — | under consideration; not currently supported |
 
-After the first release, `install.sh` selects the matching binary, verifies
-its checksum, and installs it under `~/.local/bin`:
+After this one manual install, e updates itself (`e update`, or the
+launch-time background check; /reload switches to a downloaded update in
+place). Or install the pinned source with Rust:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/intuitums/e/main/install.sh | sh
+cargo install --locked --git https://github.com/intuitums/e
 ```
 
 Release assets also include a CycloneDX SBOM and signed GitHub build

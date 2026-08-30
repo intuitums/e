@@ -1,6 +1,7 @@
-//! The conformance suite: byte-pinned against the reference design's own
-//! test literals. Ported from `test/parity.test.ts`, which remains the
-//! executable TypeScript twin until the swap milestone.
+//! The conformance suite: e's terminal rendering, pinned byte-for-byte so
+//! the look cannot drift. Each assertion encodes a deliberate choice of the
+//! design (heading emphasis per level, divider tone, selection rules); an
+//! intentional rendering change updates the pinned literal and says why.
 
 use e::core::output::{compact_model_label, format_duration, format_tokens};
 use e::tui::render::heading_style;

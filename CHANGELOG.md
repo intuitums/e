@@ -1,12 +1,13 @@
 # Changelog
 
-All notable changes. Nothing has been cut as a release yet — every entry
-lives under `## Unreleased` until e's first deliberate release. To cut one:
-rename `## Unreleased` to `## X.Y.Z — <date>` (the release workflow's
-release notes are that section verbatim), open a fresh empty
-`## Unreleased` above it, tag `vX.Y.Z`, and the pipeline publishes.
+All notable changes. To cut a release: rename `## Unreleased` to
+`## X.Y.Z — <date>` (the release workflow's release notes are that section
+verbatim), open a fresh empty `## Unreleased` above it, tag `vX.Y.Z`, and
+the pipeline publishes.
 
 ## Unreleased
+
+## 0.0.1 — 2026-08-29
 
 - Provider failures are classified by the error body's own wording, not
   just the HTTP status: a hard quota or billing wall (OpenCode Zen Go's

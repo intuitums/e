@@ -366,7 +366,7 @@ impl Block {
 
     fn render(&self, theme: &Theme, width: usize, _blink_on: bool) -> Vec<String> {
         match self.kind {
-            // `𝑒 dogfood · Run /help for commands` — name bold ink, the rest
+            // `𝑒 {VERSION} · Run /help for commands` — name bold ink, the rest
             // in the reference's dim (247 on light, one step lighter than the
             // statusline gray).
             Kind::Banner => vec![format!(

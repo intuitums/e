@@ -19,6 +19,11 @@ if [ -n "$tag" ]; then
     echo "release-check: tag $tag does not match runtime version $identity" >&2
     exit 1
   }
+  manifest=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+  [ "$manifest" = "$version" ] || {
+    echo "release-check: tag $tag does not match Cargo.toml version $manifest" >&2
+    exit 1
+  }
   grep -Eq "^## $version( — [0-9]{4}-[0-9]{2}-[0-9]{2})?$" CHANGELOG.md || {
     echo "release-check: CHANGELOG.md has no section for $version" >&2
     exit 1

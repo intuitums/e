@@ -1,1 +1,5 @@
 blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/intuitums/e/discussions
+    about: Ask a question or sketch an idea before filing a feature request.

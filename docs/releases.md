@@ -1,10 +1,9 @@
 # Releases and verification
 
 A tag `vX.Y.Z` is publishable only when it exactly matches the user-facing
-`VERSION` in `src/lib.rs`, has a dated `CHANGELOG.md` section, and passes the
-complete repository contract. `Cargo.toml` deliberately stays at `0.0.0`
-while dogfood builds identify themselves as `dogfood`; a release changes the
-user-facing identity to `X.Y.Z` before tagging.
+`VERSION` in `src/lib.rs` and the `version` in `Cargo.toml`, has a dated
+`CHANGELOG.md` section, and passes the complete repository contract. Bump
+the identity to `X.Y.Z` in both places before tagging.
 Release jobs build with the committed lockfile and smoke-test the native
 binary and installer before publication.
 

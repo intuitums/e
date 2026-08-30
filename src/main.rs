@@ -299,7 +299,7 @@ e -v, --version"
         }
         if !e::core::update::is_release_version(e::VERSION) {
             println!(
-                "e {} is a dogfood build — update from source, not e update",
+                "e {} is not a release build — update from source, not e update",
                 e::VERSION
             );
             host.shutdown().await;

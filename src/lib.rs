@@ -11,8 +11,7 @@
 pub mod core;
 pub mod tui;
 
-/// The build's user-facing identity. While we dogfood, that's the `dogfood`
-/// codename rather than a version number — when e ships for real this becomes
-/// the released version. Cargo's manifest `version` stays a placeholder
-/// because Cargo requires valid SemVer there.
-pub const VERSION: &str = "dogfood";
+/// The build's user-facing version, kept in sync with the `version` in
+/// `Cargo.toml` — `scripts/release-check.sh` requires both to equal the
+/// release tag before a `vX.Y.Z` tag can publish.
+pub const VERSION: &str = "0.0.1";
