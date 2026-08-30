@@ -1827,6 +1827,19 @@ fn is_builtin_command(name: &str) -> bool {
     )
 }
 
+/// The `/` picker's functional group for a built-in command, shown as its
+/// right-aligned category. `value` is the slashed command (`/login`); an
+/// unknown name falls to General.
+fn builtin_category(value: &str) -> &'static str {
+    match value {
+        "/login" => "Account",
+        "/models" | "/scoped-models" => "Model",
+        "/resume" | "/new" | "/tree" | "/compact" => "Session",
+        "/trust" => "Workspace",
+        _ => "General",
+    }
+}
+
 fn stage_initial_prompt(
     initial: String,
     awaiting_trust: bool,

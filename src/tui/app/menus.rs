@@ -41,6 +41,12 @@ impl App {
             MenuItem::new("/version", "show the version", "/version"),
             MenuItem::new("/quit", "exit", "/quit"),
         ];
+        // Every row carries a right-aligned category, brightening with the
+        // selected row: a built-in gets its functional group, a prompt
+        // template reads `Prompt`, an extension command `Extension`.
+        for item in &mut items {
+            item.meta = builtin_category(&item.value).into();
+        }
         // Built-in dispatch wins name clashes, so a template or extension
         // command shadowed by a built-in is unreachable — listing it would
         // show a duplicate row that runs the built-in anyway.
@@ -54,14 +60,18 @@ impl App {
             } else {
                 format!("{} — {}", template.description, template.argument_hint)
             };
-            items.push(MenuItem::new(&slash, &description, &slash));
+            let mut item = MenuItem::new(&slash, &description, &slash);
+            item.meta = "Prompt".into();
+            items.push(item);
         }
         for (name, description) in self.host.commands() {
             if is_builtin_command(&name) {
                 continue;
             }
             let slash = format!("/{name}");
-            items.push(MenuItem::new(&slash, &description, &slash));
+            let mut item = MenuItem::new(&slash, &description, &slash);
+            item.meta = "Extension".into();
+            items.push(item);
         }
         items
     }
