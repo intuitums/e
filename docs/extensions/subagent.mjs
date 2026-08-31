@@ -69,6 +69,12 @@ connect({
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    // Register before writing. A child that fails or exits immediately must
+    // not beat the listeners and leave this call waiting forever.
+    const exited = new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    });
     children.add(child);
     let stdout = "";
     let stderr = "";
@@ -100,10 +106,7 @@ connect({
     timeout.unref();
     let status;
     try {
-      status = await new Promise((resolve, reject) => {
-        child.once("error", reject);
-        child.once("exit", (code, signal) => resolve({ code, signal }));
-      });
+      status = await exited;
     } finally {
       clearTimeout(timeout);
       clearTimeout(forceKill);
