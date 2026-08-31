@@ -1,0 +1,15 @@
+[package]
+name = "e-sdk"
+# The SDK's own version, independent of the application version. It stays
+# 0.0.0 until the first release declares the semantic-versioning policy.
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.98"
+license = "MIT"
+description = "Programmatic access to e's coding-agent core"
+publish = false
+
+# The path dependency is wired now so the build graph carries the edge from
+# day one; the facade begins consuming it with the first real SDK commit.
+[dependencies]
+e = { path = ".." }

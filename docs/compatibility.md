@@ -33,10 +33,13 @@ persisted compatibility contract.
 
 ## Not a supported contract
 
-The Cargo library target lets the binary and integration tests share code.
-Its public Rust items are not a stable third-party API. A supported Rust SDK,
-if one is ever introduced, will live behind an explicitly documented crate
-boundary and semantic-versioning policy.
+The Cargo library target lets the binary, the integration tests, and the
+`sdk/` package share code. Its public Rust items are not a stable third-party
+API in themselves. The supported Rust SDK is the separate `e-sdk` package in
+`sdk/` (see [sdk.md](sdk.md) and
+[decisions/0002-rust-sdk-package.md](decisions/0002-rust-sdk-package.md)): the
+API it consumes becomes its documented contract, and its first release
+declares the semantic-versioning policy. Until then its surface is unstable.
 
 ## Change process
 

@@ -4,14 +4,15 @@
 //! the terminal frontend, grouped as paint / content / surfaces / app.
 //!
 //! The library target exists so the binary and integration tests share one
-//! implementation. Its Rust items are not a stable third-party API; e's
-//! supported external surface is the CLI, file formats, and extension wire
-//! protocol documented in `docs/compatibility.md`.
+//! implementation, with the `sdk/` package (e-sdk) as a third in-repo
+//! consumer. Its Rust items are not a stable third-party API by themselves;
+//! the supported Rust surface is the `e-sdk` package behind the boundary
+//! described in `docs/compatibility.md`, and e's other supported external
+//! surfaces are the CLI, file formats, and extension wire protocol documented
+//! there.
 //
-// No panics in shipped code: explicit panic sites (unwrap, expect, panic!,
-// unreachable!) are denied outside test builds. Any that remain carry a
-// scoped allow with a proof comment — why the site is unreachable at
-// runtime. Panic-freedom is a maintenance rule, not an aspiration.
+// Shipped code denies explicit panic sites outside test builds. Every allowed
+// site needs a proof comment explaining why runtime input cannot reach it.
 #![cfg_attr(
     not(test),
     deny(
