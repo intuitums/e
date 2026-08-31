@@ -334,9 +334,9 @@ pub struct AgentOptions {
     pub save_session: bool,
     pub tool_mode: ToolMode,
     pub effort_override: Option<String>,
-    /// A positive allowlist for this run's tools — a delegated agent persona
-    /// that names `read, grep` sees only those built-ins. `None` is the whole
-    /// toolset; it composes under `tool_mode` (a `None` tool_mode still wins).
+    /// A positive built-in tool allowlist for this run. `None` is the full
+    /// built-in and extension set. It composes under `tool_mode`, so no-tools
+    /// mode always wins.
     pub allowed_tools: Option<Vec<String>>,
 }
 
@@ -703,12 +703,17 @@ impl Agent {
         } else {
             ToolMode::None
         };
-        // A persona's tool allowlist, shared read-only across this turn's tool
-        // tasks. Cheap to clone into each spawned call.
+        // The request's allowlist is shared across the turn's tool tasks.
         let allowed_tools = self.options.allowed_tools.clone().map(Arc::new);
-        let system = match tool_mode {
-            ToolMode::All => system,
-            ToolMode::None => format!("{system}\n\n{}", context::no_tools_notice()),
+        let system = match (tool_mode, allowed_tools.as_deref()) {
+            (ToolMode::None, _) => format!("{system}\n\n{}", context::no_tools_notice()),
+            (ToolMode::All, Some(tools)) if tools.is_empty() => {
+                format!("{system}\n\n{}", context::no_tools_notice())
+            }
+            (ToolMode::All, Some(tools)) => {
+                format!("{system}\n\n{}", context::tool_allowlist_notice(tools))
+            }
+            (ToolMode::All, None) => system,
         };
 
         tokio::spawn(async move {
@@ -784,10 +789,10 @@ impl Agent {
                     effort: effort.clone(),
                     tools: tools::restrict_to(
                         tools::filter_schemas(
-                            match (&host, tool_mode) {
-                                // Extensions augment the toolset only when tools
-                                // run at all; --no-tools advertises nothing.
-                                (Some(h), ToolMode::All) => h.merged_tool_schemas(),
+                            match (&host, tool_mode, allowed_tools.is_some()) {
+                                // A request allowlist names built-ins. Extension
+                                // tools and overrides stay outside that contract.
+                                (Some(h), ToolMode::All, false) => h.merged_tool_schemas(),
                                 _ => tools::schemas(),
                             },
                             tool_mode,
@@ -1461,20 +1466,21 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
             display: None,
         };
     }
-    // A persona's allowlist is enforced at execution too, not just in the
-    // advertised schemas: a call for a tool outside the list is refused.
+    // Enforce the request's list at execution too. The advertised schemas are
+    // not a security boundary because a provider can still emit any tool name.
     if let Some(allowed) = &allowed_tools {
         if !allowed.iter().any(|a| a == name) {
             return tools::ToolOutput {
-                content: format!("tool blocked by the agent's tool allowlist: {name}"),
+                content: format!("tool blocked by the request's tool allowlist: {name}"),
                 outcome: tools::ToolOutcome::Blocked,
                 summary: "blocked".into(),
                 display: None,
             };
         }
     }
-    // --no-tools is a no-op here (nothing reaches this point), so tools run
-    // with the full extension surface: schemas, overrides, tools, and hooks.
+    // Hooks still guard allowlisted built-ins, but an extension cannot replace
+    // one by claiming the same name.
+    let builtins_only = allowed_tools.is_some();
     if let (ToolMode::All, Some(h)) = (tool_mode, &host) {
         // The hook chain is bounded per extension, but Esc must not wait out
         // even one silent hook's timeout: race it against the cancel flag.
@@ -1500,7 +1506,7 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
                 display: None,
             };
         }
-        if h.owns_tool(name) {
+        if !builtins_only && h.owns_tool(name) {
             let (progress, mut updates) = mpsc::channel(64);
             let call = h.call_tool_streaming(name, arguments, progress);
             tokio::pin!(call);
@@ -1631,5 +1637,27 @@ mod option_tests {
 
         assert_eq!(output.outcome, tools::ToolOutcome::Blocked);
         assert!(output.content.contains("no-tools"));
+    }
+
+    #[tokio::test]
+    async fn request_allowlist_is_enforced_at_execution() {
+        let (events, _rx) = mpsc::channel(1);
+        let output = run_tool(
+            ToolRunContext {
+                host: None,
+                tool_mode: ToolMode::All,
+                allowed_tools: Some(Arc::new(vec!["read".into(), "grep".into()])),
+                cwd: std::path::PathBuf::from("."),
+                cancel: Arc::new(AtomicBool::new(false)),
+                id: 1,
+                events,
+            },
+            "bash",
+            r#"{"command":"touch should-not-exist"}"#,
+        )
+        .await;
+
+        assert_eq!(output.outcome, tools::ToolOutcome::Blocked);
+        assert!(output.content.contains("tool allowlist"));
     }
 }

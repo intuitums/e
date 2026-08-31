@@ -613,6 +613,20 @@ async fn rpc(
                 continue;
             }
         };
+        if let Some(unknown) = request
+            .tools
+            .as_ref()
+            .and_then(|names| names.iter().find(|name| !e::core::tools::is_builtin(name)))
+        {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "id": request_id,
+                    "error": format!("unknown built-in tool in allowlist: `{unknown}`")
+                })
+            );
+            continue;
+        }
         let options = match rpc_options(defaults, &request) {
             Ok(options) => options,
             Err(error) => {
@@ -646,8 +660,8 @@ async fn rpc(
         let pricing = selected.pricing.clone();
         let mut agent_opts = agent_options(&options);
         agent_opts.allowed_tools = request.tools.clone();
-        // The delegated turn runs e's ordinary system prompt — a tool
-        // allowlist shapes what it can do, nothing tells it what it is.
+        // The turn uses e's ordinary system prompt. The generic tool policy
+        // suffix records any request allowlist without adding a persona.
         let system = e::core::agent::context::system_prompt(&cwd);
         let (mut agent, mut events) = Agent::with_options(selected, agent_opts);
         let effort = agent.effort();

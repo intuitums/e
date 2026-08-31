@@ -7,33 +7,20 @@ the pipeline publishes.
 
 ## Unreleased
 
-- The base system prompt's guideline set now matches the reference design's
-  exactly — "Be concise in your responses" and "Show file paths clearly when
-  working with files" — dropping the two e-specific additions (the
-  small-focused-changes and stop-when-done lines). Everything else in the
-  prompt already tracked the reference; the tools list stays e's real toolset,
-  the self-docs section stays `e docs`, and the cwd/platform/date grounding
-  stays.
-- An extension can be a **directory** under `~/.e/extensions/`, not just a
-  top-level file: `~/.e/extensions/foo/` bundles its entry point (`index.*`,
-  else a file matching the directory name, else its sole executable) together
-  with its helpers. Everything an extension needs lives in one folder, which
-  is where a user's additions belong.
-- `e rpc` gains a generic `tools` knob — a positive built-in allowlist
-  (advertised and enforced) — so a caller can shape a delegated turn's tool
-  access without core learning any new concept. The `subagent.mjs` example
-  builds its agents on top of it: `Explore` and `Plan` (read-only, `read` +
-  `grep`) and `Build` (full access), each an editable tool/model envelope
-  defined in the extension. An agent is not a character — the delegated turn
-  runs e's ordinary system prompt and is never told it is a subagent; only its
-  tools and model differ. e ships no models: each agent's model is a
-  `"{provider/model}"` placeholder. No agents directory, no `system`-prompt
-  seam, and core never learns what an "agent" is.
-- The `e rpc` response gains a `session` field: the saved turn's JSONL path
-  (or `null` for a memory-only run). A delegated turn's whole transcript —
-  every tool call and its output — lives there, so the dispatching agent can
-  read the full turn when it needs more than the final answer, not just the
-  summary the tool returns.
+- The base system prompt now uses the reference design's two guidelines: "Be
+  concise in your responses" and "Show file paths clearly when working with
+  files." The tools list, `e docs` guidance, cwd, platform, and date remain.
+- An extension can be a directory under `~/.e/extensions/`. A directory keeps
+  its entry point and helper files together. Entry-point selection checks
+  `index.*`, a file matching the directory name, then a sole executable.
+- `e rpc` gains `tools`, a positive built-in allowlist. It rejects unknown
+  names, advertises only the selected built-ins, and enforces the same list at
+  execution. `subagent.mjs` uses it for `Explore` and `Plan`, while `Build`
+  keeps full access. The extension owns these agent definitions. Core has no
+  agent type or system-prompt injection field.
+- The `e rpc` response gains `session`, the saved turn's JSONL path or `null`
+  for a memory-only run. `subagent.mjs` returns the path so its parent can read
+  tool calls and outputs that the final answer omitted.
 - Read-only tool mode is removed. `--read-only`/`--ro`, the `read_only`
   RPC `tool_mode`, and the `read_only_notice` override are gone; `ToolMode`
   is now `all` or `none`, with `--no-tools` the one deliberate opt-out. A

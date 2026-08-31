@@ -748,11 +748,10 @@ impl Drop for PendingGuard {
     }
 }
 
-/// Extensions under `~/.e/extensions/`: a top-level executable file is one, and
-/// so is a subdirectory that bundles its own files (its executable, a scaffold,
-/// data) — an extension is where everything it needs lives together. A
-/// directory's entry point is the executable inside it named `index.*`, else
-/// one matching the directory name, else its sole executable.
+/// Extensions under `~/.e/extensions/`. A top-level executable is one
+/// extension. A subdirectory can bundle an entry point with helper files.
+/// Entry-point selection checks the first `index.*` executable in path order,
+/// a file matching the directory name, then a sole executable.
 fn discover() -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(home::extensions_dir()) else {
         return Vec::new();
@@ -777,12 +776,15 @@ fn discover() -> Vec<PathBuf> {
 /// `./scaffold.mjs` beside it resolves regardless of the process cwd.
 fn directory_entry_point(dir: &std::path::Path) -> Option<PathBuf> {
     let name = dir.file_name()?.to_string_lossy().into_owned();
-    let execs: Vec<PathBuf> = std::fs::read_dir(dir)
+    let mut execs: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file() && is_executable(p))
         .collect();
+    // read_dir order is filesystem-dependent. Sorting makes ambiguous bundles
+    // stable while preserving the documented entry-point precedence.
+    execs.sort();
     let by_stem = |stem: &str| {
         execs
             .iter()
@@ -1075,6 +1077,7 @@ mod tests {
         fn index_wins_and_the_non_executable_scaffold_is_skipped() {
             let dir = tmp("index");
             write(&dir, "index.mjs", true);
+            write(&dir, "index.sh", true); // lexical tie-break after the stem rule
             write(&dir, "scaffold.mjs", false); // library, not an entry point
             write(&dir, "helper.mjs", true); // another executable, but index wins
             assert_eq!(directory_entry_point(&dir), Some(dir.join("index.mjs")));

@@ -59,6 +59,8 @@ struct Settings {
     system_prompt: Option<String>,
     #[serde(default)]
     no_tools_notice: Option<String>,
+    #[serde(default)]
+    tool_allowlist_notice: Option<String>,
 }
 
 fn settings() -> Settings {
@@ -80,6 +82,19 @@ pub fn no_tools_notice() -> String {
         .no_tools_notice
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "This run has no tools. Answer without attempting tool calls.".into())
+}
+
+/// The suffix appended when a request allows only some built-in tools.
+/// `tool_allowlist_notice` can override the wording and use `{tools}` for the
+/// comma-separated names.
+pub fn tool_allowlist_notice(tools: &[String]) -> String {
+    settings()
+        .tool_allowlist_notice
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            "This run may use only these tools: {tools}. Do not attempt other tool calls.".into()
+        })
+        .replace("{tools}", &tools.join(", "))
 }
 
 /// The system prompt for the process's current directory — the entry point

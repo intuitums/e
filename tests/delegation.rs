@@ -51,9 +51,22 @@ const OK_STREAM: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\
      data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n\
      data: [DONE]\n\n";
 
-/// `tools` restricts the delegated turn to a positive allowlist — the request
-/// advertises only those built-ins. This is how an agent's tool envelope is
-/// enforced; no system prompt is involved.
+#[test]
+fn rpc_rejects_unknown_names_in_the_builtin_allowlist() {
+    let _lock = env_lock();
+    let home = Home::new("delegation-unknown-tool");
+    let stdout = run_rpc(
+        &home,
+        "{\"id\":1,\"prompt\":\"go\",\"tools\":[\"extension_tool\"]}\n",
+    );
+    let response: serde_json::Value = serde_json::from_slice(&stdout).expect("one JSON response");
+    assert!(response["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("unknown built-in tool")));
+}
+
+/// `tools` restricts the request schemas to named built-ins. Execution checks
+/// the same list, and the prompt gets a generic policy notice.
 #[test]
 fn rpc_tools_field_restricts_the_advertised_tools() {
     let _lock = env_lock();

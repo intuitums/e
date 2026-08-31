@@ -37,7 +37,7 @@ const agentNames = AGENTS.map((a) => a.name);
 const agentList = `Available agents: ${AGENTS.map((a) => `${a.name} (${a.description})`).join("; ")}.`;
 
 // A model counts only once the {provider/model} filler is replaced with a real
-// slug; until then the delegation inherits the caller's model.
+// slug. Otherwise the child uses e rpc's normal model resolution.
 const realModel = (model) => (model && !model.includes("{") ? model : undefined);
 
 const children = new Set();
@@ -124,11 +124,10 @@ async function runDelegate(input, update) {
     // The child may exit before we finish writing; swallow the EPIPE rather
     // than crash the extension.
     child.stdin.on("error", () => {});
-    // The agent is a tool/model envelope: its `tools` scope the delegated
-    // turn (omitted = the full set), its `model` runs it (the caller can
-    // override). No system prompt — the turn runs e's ordinary one. save:true
-    // persists the session so its full transcript stays inspectable via
-    // `session`.
+    // An agent selects tools and a model. Omitting tools grants the full set,
+    // and a model argument overrides the agent's model. The turn uses e's
+    // ordinary system prompt. save:true keeps the full transcript available
+    // through `session`.
     const request = { id: 1, prompt: input.prompt, save: true };
     if (agent?.tools) request.tools = agent.tools;
     const model = realModel(input.model) ?? realModel(agent?.model);
@@ -178,7 +177,7 @@ async function runDelegate(input, update) {
     // Hand back the final answer plus a pointer to the full turn: the parent
     // reads the JSONL session only if it needs more than this summary.
     const trailer = result.session
-      ? `\n\n---\nFull transcript (every tool call) at ${result.session} — read it for detail beyond this summary.`
+      ? `\n\n---\nFull transcript with every tool call: ${result.session}\nRead it for detail beyond this summary.`
       : "";
     return { content: answer + trailer };
 }
@@ -186,7 +185,7 @@ async function runDelegate(input, update) {
 // e's extension protocol: one JSON request per line on stdin, one response per
 // line on stdout. We answer `initialize` with the manifest, run `delegate` for
 // `tool_call` (streaming progress with `tool.update`), and exit on `shutdown`.
-// Any other method isn't ours — stay quiet.
+// Ignore methods this extension does not implement.
 function send(object) {
   process.stdout.write(`${JSON.stringify(object)}\n`);
 }

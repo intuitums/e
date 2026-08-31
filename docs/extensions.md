@@ -1,12 +1,14 @@
 # Extensions
 
-An extension is an executable in `~/.e/extensions/` — either a top-level file
-(`~/.e/extensions/foo.mjs`) or a subdirectory that bundles everything it needs
-(`~/.e/extensions/foo/`, whose entry point is the executable inside named
-`index.*`, else one matching the directory name, else its sole executable).
-Any language — shell, Python, Rust, Node — the process boundary is the API. e
-starts each one at launch, keeps it running for the whole session, and speaks a
-line protocol over stdin/stdout: one JSON object per line.
+An extension is an executable in `~/.e/extensions/`. It can be a top-level
+file such as `foo.mjs`, or the entry point of a directory such as `foo/` that
+also contains helper files. Directory entry-point selection checks `index.*`,
+a file matching the directory name, then a sole executable. Path order breaks
+a tie within one rule.
+
+Extensions can use any language. e starts each process at launch, keeps it
+running for the session, and exchanges one JSON object per line over stdin and
+stdout.
 
 Extensions can:
 
@@ -191,12 +193,12 @@ never installed for you, and it is not a thing you have to think about.
   hook like this fits.
 - **`worktree.mjs`** — the startup-hook launcher on the scaffold:
   `e -w [branch]` creates a Git worktree and relaunches e there.
-- **`subagent.mjs`** — a `delegate` tool that drives a single-shot `e rpc
-  --no-extensions` child: one JSON request line in, one result out. The
-  delegated turn is extension-free (so it can never delegate again). It ships
-  its own agents (`Explore`, `Plan`, `Build`) defined right in the extension
-  and composes each into the request's `system`/`tools`/`model` — while e's
-  core stays generic and never learns what an "agent" is.
+- **`subagent.mjs`.** Its `delegate` tool drives a single-shot `e rpc
+  --no-extensions` child with one JSON request line in and one result out. The
+  delegated turn is extension-free, so it cannot delegate again. It defines
+  `Explore`, `Plan`, and `Build` in the extension and sends each agent's
+  `tools` and optional `model` in the RPC request. Core stays generic and does
+  not have an agent type.
 - **`mcp.mjs`** — a dependency-free bridge from one configured MCP stdio
   server's `tools/list` / `tools/call` surface into e extension tools. It
   forwards MCP progress through the additive `tool.update` capability.
@@ -229,9 +231,8 @@ Restart e, type `/ping`, get `pong`.
 
 ## MCP tools
 
-Put `mcp.mjs` in `~/.e/extensions/` (with `scaffold.mjs` beside it), then
-configure
-the stdio server e should own in `~/.e/settings.json`:
+Put `mcp.mjs` in `~/.e/extensions/` with `scaffold.mjs` beside it, then
+configure the stdio server e should own in `~/.e/settings.json`:
 
 ```json
 {
@@ -258,34 +259,33 @@ specifications.
 Put `subagent.mjs` in `~/.e/extensions/` and restart — it is a single
 self-contained file, nothing beside it. The model gains a `delegate` tool. Each
 delegation is a single-shot `e rpc` child in the same working directory: the
-extension writes one JSON request line, reads the one result object, and closes
-stdin. It is extension-free (so a delegated turn can never delegate again). Set
-`E_BIN` when the child should use an e binary other than the one on `PATH`.
+extension writes one JSON request line, reads one result object, and closes
+stdin. The child loads no extensions, so it cannot delegate again. Set `E_BIN`
+when the child should use an e binary other than the one on `PATH`.
 
-The delegation runs with `save: true`, so the child's whole transcript — every
-tool call and its output — persists; the response's `session` path is appended
-to the tool result, and the dispatching agent can `read` that JSONL to see the
-full turn when the returned summary isn't enough.
+The delegation sets `save: true`. The response includes the saved JSONL path,
+and the tool result gives that path to the parent. The parent can read it when
+the final answer omits a useful tool call or result.
 
-**Agents — owned by the extension, not e.** A delegation can name an `agent`,
-defined right in `subagent.mjs`. An agent is a **tool/model envelope, not a
-character**: the delegated turn runs e's ordinary system prompt and is never
-told it is a subagent. What differs between agents is which tools they may use
-and which model runs them; the task the caller writes carries the instruction.
-The shipped set:
+### Agents live in the extension
 
-- **`Explore`** — read-only recon, `tools: [read, grep]`.
-- **`Plan`** — read-only planning, `tools: [read, grep]`.
-- **`Build`** — full access (no `tools` restriction).
+A delegation can name an `agent` defined in `subagent.mjs`. Each agent chooses
+a built-in tool allowlist and an optional model. The child receives the task as
+its user message and uses e's normal system prompt with a generic tool-policy
+suffix. Core does not have an agent type.
 
-Each is a small object: `name`, a `description` (shown to the dispatching model
-so it knows when to pick the agent), an optional `tools` allowlist (enforced in
-the advertised schemas *and* at execution), and a `model` — shipped as a
-`"{provider/model}"` placeholder with a `// ask the user what models to use`
-comment, since e ships no models. The extension composes these into the
-`e rpc` request (`tools`, `model`), never a system prompt. e's core knows
-nothing about agents; it runs a turn with the `tools` and `model` it is handed,
-so the whole concept lives in (and dies with) the extension.
+The extension defines these agents:
+
+- `Explore` can use `read` and `grep`.
+- `Plan` can use `read` and `grep`.
+- `Build` can use every built-in tool.
+
+Each object has `name`, `description`, optional `tools`, and optional `model`.
+The shipped `"{provider/model}"` values are placeholders. Until you replace
+one, that child uses the model `e rpc` normally resolves from configuration.
+A call can also pass `model` to override the selected agent. The core validates
+`tools` as built-in names, advertises only those schemas, and enforces the same
+list when a provider emits a tool call.
 
 ## What startup hooks are for
 
