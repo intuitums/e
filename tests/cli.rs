@@ -1,5 +1,22 @@
 use std::io::Write as _;
+#[cfg(unix)]
+use std::io::{BufRead as _, Read as _};
 use std::process::{Command, Stdio};
+
+#[cfg(unix)]
+fn wait_for_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "child ignored its shutdown signal"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
 
 #[test]
 fn json_auth_is_rejected_like_other_unsupported_subcommands() {
@@ -61,6 +78,49 @@ fn rpc_stops_cleanly_on_an_oversized_request_line() {
         .as_str()
         .unwrap()
         .contains("invalid request"));
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[cfg(unix)]
+#[test]
+fn rpc_sigterm_exits_while_waiting_for_input() {
+    let home = std::env::temp_dir().join(format!(
+        "e-cli-rpc-sigterm-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
+        .args(["--no-extensions", "rpc"])
+        .env("E_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"{\"id\":1,\"prompt\":\"\"}\n")
+        .unwrap();
+    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut response = String::new();
+    stdout.read_line(&mut response).unwrap();
+    assert!(response.contains("prompt is empty"));
+
+    unsafe {
+        assert_eq!(libc::kill(child.id() as i32, libc::SIGTERM), 0);
+    }
+    let status = wait_for_exit(&mut child);
+    assert_eq!(status.code(), Some(143));
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(stderr.is_empty(), "stderr: {stderr}");
     let _ = std::fs::remove_dir_all(home);
 }
 

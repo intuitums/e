@@ -21,6 +21,9 @@ the pipeline publishes.
 - The `e rpc` response gains `session`, the saved turn's JSONL path or `null`
   for a memory-only run. `subagent.mjs` returns the path so its parent can read
   tool calls and outputs that the final answer omitted.
+- SIGTERM and SIGHUP now shut `e rpc` down with their conventional exit status
+  after killing every tracked built-in bash process group. A delegated timeout
+  cannot leave its detached shell children running after the RPC child exits.
 - Read-only tool mode is removed. `--read-only`/`--ro`, the `read_only`
   RPC `tool_mode`, and the `read_only_notice` override are gone; `ToolMode`
   is now `all` or `none`, with `--no-tools` the one deliberate opt-out. A

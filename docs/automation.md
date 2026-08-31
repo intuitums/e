@@ -40,5 +40,9 @@ needs more than `final_output` can read it), or `null` for a memory-only run.
 
 Malformed requests also produce one line (`{"id":null,"error":"..."}`) and
 do not terminate the process. EOF shuts down extensions and exits cleanly.
+On Unix, SIGTERM and SIGHUP kill every built-in bash process group before
+extension shutdown, then exit with status 143 or 129. This includes detached
+children of the shell, not only the direct bash process.
+
 The protocol is sequential by design: response order is input order, so a
 caller never needs an out-of-band event channel or stream correlation.

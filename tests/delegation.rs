@@ -3,8 +3,22 @@
 //! stays generic — it never learns what an "agent" is, and nothing is
 //! appended to the delegated turn's prompt.
 
+#[cfg(unix)]
+use std::io::Read as _;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
+
+#[cfg(unix)]
+fn wait_for_rpc_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        assert!(std::time::Instant::now() < deadline, "rpc ignored SIGTERM");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
 
 mod common;
 
@@ -113,4 +127,85 @@ fn rpc_saved_turn_returns_its_transcript_path() {
         "expected a saved transcript path, got {:?}",
         response["session"]
     );
+}
+
+/// The subagent watchdog sends SIGTERM to its `e rpc` child. RPC must kill
+/// the active bash process group before exiting, or a detached grandchild can
+/// wake later and keep changing the workspace.
+#[cfg(unix)]
+#[test]
+fn rpc_sigterm_kills_delegated_bash_descendants() {
+    let _lock = env_lock();
+    let command = "printf started > rpc-started; sleep 1; printf escaped > rpc-marker";
+    let arguments = serde_json::json!({"command": command}).to_string();
+    let event = serde_json::json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "c1",
+                    "function": {"name": "bash", "arguments": arguments}
+                }]
+            }
+        }]
+    });
+    let stream = format!(
+        "data: {event}\n\ndata: {{\"choices\":[{{\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n"
+    );
+    let (port, server) = serve_sse(&[&stream]);
+    let home = mock_home("delegation-sigterm", port);
+    let workspace = std::env::temp_dir().join(format!(
+        "e-delegation-sigterm-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
+        .args(["--no-extensions", "rpc"])
+        .env("E_HOME", &home.dir)
+        .current_dir(&workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"{\"id\":1,\"prompt\":\"run it\"}\n")
+        .unwrap();
+    drop(child.stdin.take());
+
+    let started = workspace.join("rpc-started");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !started.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "delegated bash command never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    unsafe {
+        assert_eq!(libc::kill(child.id() as i32, libc::SIGTERM), 0);
+    }
+    let status = wait_for_rpc_exit(&mut child);
+    assert_eq!(status.code(), Some(143));
+
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(stderr.is_empty(), "stderr: {stderr}");
+    server.join().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1_200));
+    assert!(
+        !workspace.join("rpc-marker").exists(),
+        "delegated bash descendant survived RPC shutdown"
+    );
+    let _ = std::fs::remove_dir_all(workspace);
 }

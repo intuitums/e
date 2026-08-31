@@ -563,6 +563,47 @@ impl TurnAccumulator {
 /// a still-growing line with no newline yet cannot be safely resynced past.
 const MAX_RPC_LINE_BYTES: usize = 10 * 1024 * 1024;
 
+#[cfg(unix)]
+struct RpcSignals {
+    terminate: tokio::signal::unix::Signal,
+    hangup: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl RpcSignals {
+    fn new() -> std::io::Result<Self> {
+        use tokio::signal::unix::{signal, SignalKind};
+        Ok(Self {
+            terminate: signal(SignalKind::terminate())?,
+            hangup: signal(SignalKind::hangup())?,
+        })
+    }
+
+    async fn recv(&mut self) -> i32 {
+        tokio::select! {
+            _ = self.terminate.recv() => 143,
+            _ = self.hangup.recv() => 129,
+        }
+    }
+}
+
+/// Stop owned shell groups before extension cleanup. `process::exit` is
+/// intentional: Tokio's blocking stdin reader cannot be cancelled while RPC
+/// is idle, so returning from main could leave signal shutdown hung forever.
+#[cfg(unix)]
+async fn exit_rpc_on_signal(
+    host: &e::core::api::ExtensionHost,
+    agent: Option<&mut Agent>,
+    status: i32,
+) -> ! {
+    e::core::tools::kill_tracked_processes();
+    if let Some(agent) = agent {
+        agent.interrupt();
+    }
+    host.shutdown().await;
+    std::process::exit(status);
+}
+
 /// A deliberately small machine protocol: sequential JSONL requests in,
 /// exactly one JSON object out for each line. The extension host is reused,
 /// while each request gets an isolated Agent and is memory-only by default.
@@ -571,8 +612,17 @@ async fn rpc(
     defaults: &Options,
 ) -> std::io::Result<()> {
     let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+    #[cfg(unix)]
+    let mut signals = RpcSignals::new()?;
     loop {
-        let line = match e::core::api::read_bounded_line(&mut reader, MAX_RPC_LINE_BYTES).await {
+        #[cfg(unix)]
+        let line_result = tokio::select! {
+            line = e::core::api::read_bounded_line(&mut reader, MAX_RPC_LINE_BYTES) => line,
+            status = signals.recv() => exit_rpc_on_signal(&host, None, status).await,
+        };
+        #[cfg(not(unix))]
+        let line_result = e::core::api::read_bounded_line(&mut reader, MAX_RPC_LINE_BYTES).await;
+        let line = match line_result {
             Ok(Some(line)) => line,
             Ok(None) => break,
             Err(error) => {
@@ -672,7 +722,19 @@ async fn rpc(
         );
 
         let mut result = TurnAccumulator::with_warnings(model::config_warnings());
-        while let Some(event) = events.recv().await {
+        loop {
+            #[cfg(unix)]
+            let event = tokio::select! {
+                event = events.recv() => event,
+                status = signals.recv() => {
+                    exit_rpc_on_signal(&host, Some(&mut agent), status).await
+                }
+            };
+            #[cfg(not(unix))]
+            let event = events.recv().await;
+            let Some(event) = event else {
+                break;
+            };
             result.observe(&event);
             if result.terminal {
                 break;
@@ -691,6 +753,7 @@ async fn rpc(
             .unwrap_or(serde_json::Value::Null);
         println!("{body}");
     }
+    e::core::tools::kill_tracked_processes();
     host.shutdown().await;
     Ok(())
 }

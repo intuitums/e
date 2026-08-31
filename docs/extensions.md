@@ -263,6 +263,10 @@ extension writes one JSON request line, reads one result object, and closes
 stdin. The child loads no extensions, so it cannot delegate again. Set `E_BIN`
 when the child should use an e binary other than the one on `PATH`.
 
+`timeout_seconds` defaults to 240 seconds. At the deadline the extension sends
+SIGTERM, and `e rpc` kills every active built-in bash process group before it
+exits. A later SIGKILL remains as a watchdog if graceful shutdown stalls.
+
 The delegation sets `save: true`. The response includes the saved JSONL path,
 and the tool result gives that path to the parent. The parent can read it when
 the final answer omits a useful tool call or result.

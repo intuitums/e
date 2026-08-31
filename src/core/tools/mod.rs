@@ -112,6 +112,11 @@ pub fn is_builtin(name: &str) -> bool {
     SPECS.iter().any(|spec| spec.name == name)
 }
 
+/// Kill every shell process group still owned by this e process.
+pub fn kill_tracked_processes() {
+    bash::kill_tracked_processes();
+}
+
 /// Apply a run's safety mode after built-in and extension schemas have been
 /// merged. Execution independently enforces the same policy.
 pub fn filter_schemas(schemas: Vec<Value>, mode: ToolMode) -> Vec<Value> {
