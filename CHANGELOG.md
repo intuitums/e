@@ -19,22 +19,16 @@ the pipeline publishes.
   else a file matching the directory name, else its sole executable) together
   with its helpers. Everything an extension needs lives in one folder, which
   is where a user's additions belong.
-- `e add <path>` installs a local extension into its own bundle directory
-  (`~/.e/extensions/<name>/`), makes it executable, and seeds `scaffold.mjs`
-  inside the bundle — so an extension's `import "./scaffold.mjs"` resolves with
-  nothing for the author to place by hand. The scaffold is embedded in the
-  binary (the copy always matches your e) and seeded non-executable, so the
-  host runs the extension and skips the scaffold. Local files only for now;
-  remote sources (git/https) are a later, trust-gated addition.
-- `e rpc` gains two generic per-request knobs so a delegated turn can be
-  shaped without the core binary learning any new concept: `system` (extra
-  system-prompt text, appended to the base) and `tools` (a positive built-in
-  allowlist, advertised and enforced). The `subagent.mjs` example builds its
-  agents entirely on top of these — `Explore` (a light-model, read-only
-  scout), `Plan` (a read-only strategist), and `Build` (a full-access
-  worker) — defined right in the extension and composed into the request. No
-  separate agents directory: an extension is where a user's additions live,
-  and core never learns what an "agent" is.
+- `e rpc` gains a generic `tools` knob — a positive built-in allowlist
+  (advertised and enforced) — so a caller can shape a delegated turn's tool
+  access without core learning any new concept. The `subagent.mjs` example
+  builds its agents on top of it: `Explore` and `Plan` (read-only, `read` +
+  `grep`) and `Build` (full access), each an editable tool/model envelope
+  defined in the extension. An agent is not a character — the delegated turn
+  runs e's ordinary system prompt and is never told it is a subagent; only its
+  tools and model differ. e ships no models: each agent's model is a
+  `"{provider/model}"` placeholder. No agents directory, no `system`-prompt
+  seam, and core never learns what an "agent" is.
 - The `e rpc` response gains a `session` field: the saved turn's JSONL path
   (or `null` for a memory-only run). A delegated turn's whole transcript —
   every tool call and its output — lives there, so the dispatching agent can

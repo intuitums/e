@@ -1,6 +1,7 @@
-//! The generic `e rpc` knobs a subagent extension composes a persona from:
-//! `system` (appended to the base prompt) and the saved-transcript `session`
-//! path. Core stays generic — it never learns what a "persona" is.
+//! The generic `e rpc` knobs a subagent extension shapes a delegated turn
+//! with: the `tools` allowlist and the saved-transcript `session` path. Core
+//! stays generic — it never learns what an "agent" is, and nothing is
+//! appended to the delegated turn's prompt.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -50,34 +51,34 @@ const OK_STREAM: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\
      data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n\
      data: [DONE]\n\n";
 
-/// `system` is appended to the base prompt, not a replacement: the request
-/// carries both e's own grounding (the cwd line) and the caller's added text.
-/// This is the seam a subagent extension uses to apply a persona.
+/// `tools` restricts the delegated turn to a positive allowlist — the request
+/// advertises only those built-ins. This is how an agent's tool envelope is
+/// enforced; no system prompt is involved.
 #[test]
-fn rpc_system_field_appends_to_the_base_prompt() {
+fn rpc_tools_field_restricts_the_advertised_tools() {
     let _lock = env_lock();
     let (port, server) = serve_sse(&[OK_STREAM]);
-    let home = mock_home("delegation-system", port);
+    let home = mock_home("delegation-tools", port);
 
     run_rpc(
         &home,
-        "{\"id\":1,\"prompt\":\"go\",\"system\":\"You are the Explore agent for this test.\"}\n",
+        "{\"id\":1,\"prompt\":\"go\",\"tools\":[\"read\",\"grep\"]}\n",
     );
 
     let captured = server.join().unwrap().remove(0);
-    let system = request_json(&captured)["messages"]
+    let names: Vec<String> = request_json(&captured)["tools"]
         .as_array()
-        .and_then(|m| m.iter().find(|m| m["role"] == "system"))
-        .and_then(|m| m["content"].as_str())
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        system.contains("You are the Explore agent for this test."),
-        "appended text missing: {system}"
-    );
-    assert!(
-        system.contains("Current working directory:"),
-        "base grounding missing — system was replaced, not appended: {system}"
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        names,
+        vec!["read", "grep"],
+        "tools not restricted to the allowlist"
     );
 }
 

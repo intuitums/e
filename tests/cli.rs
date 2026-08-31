@@ -1,57 +1,6 @@
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-/// `e add` installs a local extension into its own bundle directory under
-/// `~/.e/extensions/<name>/`, executable, and seeds a non-executable
-/// scaffold.mjs in the bundle so the extension's `import "./scaffold.mjs"`
-/// resolves with nothing for the user to place.
-#[test]
-fn add_installs_a_local_extension_into_a_bundle_with_scaffold() {
-    let stamp = format!("{}-{}", std::process::id(), uuid::Uuid::now_v7());
-    let home = std::env::temp_dir().join(format!("e-cli-add-{stamp}"));
-    let src_dir = std::env::temp_dir().join(format!("e-cli-add-src-{stamp}"));
-    std::fs::create_dir_all(&src_dir).unwrap();
-    let src = src_dir.join("myext.mjs");
-    std::fs::write(&src, "import { connect } from \"./scaffold.mjs\";\n").unwrap();
-
-    let output = Command::new(env!("CARGO_BIN_EXE_e"))
-        .args(["--no-extensions", "add", src.to_str().unwrap()])
-        .env("E_HOME", &home)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // The bundle is named after the file's stem; the file and its scaffold
-    // live together inside it.
-    let bundle = home.join("extensions").join("myext");
-    let installed = bundle.join("myext.mjs");
-    let scaffold = bundle.join("scaffold.mjs");
-    assert!(installed.exists(), "extension not installed");
-    assert!(
-        std::fs::read_to_string(&scaffold)
-            .unwrap()
-            .contains("connect"),
-        "scaffold not seeded"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let bit = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o111;
-        assert!(
-            bit(&installed) != 0,
-            "installed extension must be executable"
-        );
-        assert!(bit(&scaffold) == 0, "scaffold must not be executable");
-    }
-
-    std::fs::remove_dir_all(&home).ok();
-    std::fs::remove_dir_all(&src_dir).ok();
-}
-
 #[test]
 fn json_auth_is_rejected_like_other_unsupported_subcommands() {
     let home = std::env::temp_dir().join(format!(

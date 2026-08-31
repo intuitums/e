@@ -157,24 +157,26 @@ relaunch ends the chain.
 
 ```
 docs/extensions/
-  scaffold.mjs   the wire-protocol helper (copy next to your extension)
-  hello.mjs      every surface at once, on the scaffold
+  subagent.mjs   bounded delegated e turns as a tool, over e rpc (self-contained)
+  hello.mjs      every surface at once, on the optional scaffold helper
   gate.mjs       the tool_call hook as a fail-open guard
   protected.mjs  the tool_call hook denying credential-shaped paths
   worktree.mjs   a minimal startup-hook launcher (e -w)
-  subagent.mjs   bounded delegated e turns as a tool, over e rpc
   mcp.mjs        one MCP stdio server's tools as extension tools
+  scaffold.mjs   an optional wire-protocol helper (not required, never installed)
 ```
 
-**`scaffold.mjs`** is the shared plumbing every extension needs: the
-stdin/stdout framing, id routing, and a `connect({ manifest, handlers })`
-that turns handlers into a running extension — the protocol's ergonomics
-without importing anything but Node. You don't place it yourself: `e add`
-seeds it into `~/.e/extensions/` (non-executable, so the host skips it while
-your extension's `import { connect } from "./scaffold.mjs"` still resolves).
-It is embedded in the binary, so the copy `e add` writes always matches your e.
+An extension speaks the protocol directly — `subagent.mjs` and the shell
+`ping.sh` below are single self-contained files, reading a JSON request per
+line and writing a response per line. e installs nothing beside an extension.
 
-- **`hello.mjs`** — every surface at once, on the scaffold: command,
+**`scaffold.mjs`** is an *optional* convenience: the same stdin/stdout framing,
+id routing, and a `connect({ manifest, handlers })` wrapper, so you write
+handlers instead of a read loop. If you want it, drop it into your extension's
+own bundle directory and `import { connect } from "./scaffold.mjs"` — it is
+never installed for you, and it is not a thing you have to think about.
+
+- **`hello.mjs`** — every surface at once, on the optional scaffold: command,
   tool, config, input hook, session naming — ~50 lines of handlers.
 - **`gate.mjs`** — the `tool_call` hook as a guard, in e's fail-open
   shape: only an explicit block stops a call; a slow or crashed
@@ -199,10 +201,11 @@ It is embedded in the binary, so the copy `e add` writes always matches your e.
   server's `tools/list` / `tools/call` surface into e extension tools. It
   forwards MCP progress through the additive `tool.update` capability.
 
-Install any of them with `e add <path>` — it copies the file into
-`~/.e/extensions/`, makes it executable, and seeds `scaffold.mjs` beside it —
-then restart e. (`e add` takes a local file for now; remote sources are a
-later, trust-gated addition.)
+To use one, put it in `~/.e/extensions/` (a top-level executable file, or a
+subdirectory bundling it and its helpers), make it executable, and restart e.
+An example that uses the optional scaffold helper needs `scaffold.mjs` beside
+it in its bundle; the self-contained ones (`subagent.mjs`, `ping.sh`) need
+nothing.
 
 ## A complete extension, in shell
 
@@ -226,7 +229,8 @@ Restart e, type `/ping`, get `pong`.
 
 ## MCP tools
 
-Install `mcp.mjs` with `e add`, then configure
+Put `mcp.mjs` in `~/.e/extensions/` (with `scaffold.mjs` beside it), then
+configure
 the stdio server e should own in `~/.e/settings.json`:
 
 ```json
@@ -251,37 +255,37 @@ specifications.
 
 ## Delegated turns
 
-Install `subagent.mjs` with `e add` (it seeds `scaffold.mjs`) and restart. The
-model gains a `delegate` tool. Each delegation is a single-shot
-`e rpc` child in the same working directory: the extension writes one JSON
-request line, reads the one result object, and closes stdin. It is
-extension-free (so a delegated turn can never delegate again). Set `E_BIN`
-when the child should use an e binary other than the one on `PATH`.
+Put `subagent.mjs` in `~/.e/extensions/` and restart — it is a single
+self-contained file, nothing beside it. The model gains a `delegate` tool. Each
+delegation is a single-shot `e rpc` child in the same working directory: the
+extension writes one JSON request line, reads the one result object, and closes
+stdin. It is extension-free (so a delegated turn can never delegate again). Set
+`E_BIN` when the child should use an e binary other than the one on `PATH`.
 
 The delegation runs with `save: true`, so the child's whole transcript — every
 tool call and its output — persists; the response's `session` path is appended
 to the tool result, and the dispatching agent can `read` that JSONL to see the
 full turn when the returned summary isn't enough.
 
-**Agents — owned by the extension, not e.** A delegation can name an `agent`.
-The agents are defined right in `subagent.mjs`, named for what they do:
+**Agents — owned by the extension, not e.** A delegation can name an `agent`,
+defined right in `subagent.mjs`. An agent is a **tool/model envelope, not a
+character**: the delegated turn runs e's ordinary system prompt and is never
+told it is a subagent. What differs between agents is which tools they may use
+and which model runs them; the task the caller writes carries the instruction.
+The shipped set:
 
-- **`Explore`** — a fast, read-only scout (`read`, `grep`) on a light model,
-  for searching and analyzing a codebase without editing it.
-- **`Plan`** — a read-only strategist (`read`, `grep`) that gathers context and
-  designs an implementation approach.
-- **`Build`** — a general-purpose worker with the full toolset, for multi-step
-  tasks and file modifications.
+- **`Explore`** — read-only recon, `tools: [read, grep]`.
+- **`Plan`** — read-only planning, `tools: [read, grep]`.
+- **`Build`** — full access (no `tools` restriction).
 
-Each is a small object with a `systemPrompt`, an optional `tools` allowlist,
-and an optional `model`. The extension composes them into the `e rpc` request:
-`systemPrompt` goes in `system` (appended to the base prompt), `tools` becomes
-the request's allowlist (enforced in the advertised schemas *and* at
-execution), and `model` is a fallback the caller can override. Add your own by
-adding an entry to the list — there is no separate agents directory, because an
-extension is the place a user's additions live. e's core knows nothing about
-any of this; it just runs a turn with the `system` and `tools` it is handed, so
-the whole concept lives in (and dies with) the extension.
+Each is a small object: `name`, a `description` (shown to the dispatching model
+so it knows when to pick the agent), an optional `tools` allowlist (enforced in
+the advertised schemas *and* at execution), and a `model` — shipped as a
+`"{provider/model}"` placeholder with a `// ask the user what models to use`
+comment, since e ships no models. The extension composes these into the
+`e rpc` request (`tools`, `model`), never a system prompt. e's core knows
+nothing about agents; it runs a turn with the `tools` and `model` it is handed,
+so the whole concept lives in (and dies with) the extension.
 
 ## What startup hooks are for
 

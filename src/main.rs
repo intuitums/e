@@ -1,7 +1,7 @@
 //! The `e` binary: CLI subcommands and handoff to the interactive frame.
 //!
 //! Session UI lives in `tui::app` — this file owns flags, one-shot commands
-//! (`auth`, `rpc`, `add`, `docs`, `update`), then opens the frame loop.
+//! (`auth`, `rpc`, `docs`, `update`), then opens the frame loop.
 // Same contract as the library: no panic sites outside test builds.
 #![cfg_attr(
     not(test),
@@ -124,7 +124,6 @@ usage:\n  e [message]           start a session (optionally with a first prompt;
 e -c, --continue      continue this directory's most recent session\n  \
 e -r, --resume        pick a session to resume\n  \
 e rpc                 JSONL request/response protocol on stdin/stdout\n  \
-e add <path>          install a local extension file (seeds scaffold.mjs)\n  \
 e docs [topic]        print a built-in format guide\n  \
 e update              update e to the latest release\n  \
 e auth                show sign-in status\n  \
@@ -273,17 +272,6 @@ e -v, --version"
     if args.first().map(String::as_str) == Some("rpc") {
         return rpc(host, &options).await;
     }
-    if args.first().map(String::as_str) == Some("add") {
-        match args.get(1) {
-            Some(source) => match install_extension(source) {
-                Ok(message) => println!("{message}"),
-                Err(error) => usage_error(&host, false, error).await,
-            },
-            None => usage_error(&host, false, "usage: e add <path>".into()).await,
-        }
-        host.shutdown().await;
-        return Ok(());
-    }
     if options.json {
         eprintln!("--json is supported by `e doctor` and `e providers`");
         host.shutdown().await;
@@ -422,69 +410,6 @@ fn agent_options(options: &Options) -> AgentOptions {
     }
 }
 
-/// The wire-protocol helper every JS extension imports. Embedded so `e add`
-/// can seed it into an installed extension's bundle — the author never copies
-/// a scaffold by hand. Kept in sync with the canonical example on disk.
-const SCAFFOLD: &str = include_str!("../docs/extensions/scaffold.mjs");
-
-/// `e add <path>` — install a local extension file into its own bundle
-/// directory under `~/.e/extensions/<name>/`, make it executable, and seed
-/// `scaffold.mjs` inside that bundle so the extension's `import
-/// "./scaffold.mjs"` resolves with nothing for the user to place. Everything
-/// an extension needs lives together in its own folder; the seeded scaffold is
-/// non-executable, so the host runs the extension and skips the scaffold. Local
-/// sources only for now; remote fetch (git/https) is a separate, trust-gated
-/// feature.
-fn install_extension(source: &str) -> Result<String, String> {
-    let src = std::path::Path::new(source);
-    let meta = std::fs::metadata(src).map_err(|error| format!("{source}: {error}"))?;
-    if !meta.is_file() {
-        return Err(format!(
-            "{source} is not a file — e add installs a single executable extension file"
-        ));
-    }
-    let name = src
-        .file_name()
-        .ok_or_else(|| format!("{source}: no file name"))?;
-    let bundle_name = src
-        .file_stem()
-        .ok_or_else(|| format!("{source}: no file name"))?;
-    let bundle = e::core::config::home::extensions_dir().join(bundle_name);
-    std::fs::create_dir_all(&bundle).map_err(|error| format!("{}: {error}", bundle.display()))?;
-
-    let scaffold = bundle.join("scaffold.mjs");
-    let seeded = if scaffold.exists() {
-        false
-    } else {
-        std::fs::write(&scaffold, SCAFFOLD)
-            .map_err(|error| format!("{}: {error}", scaffold.display()))?;
-        true
-    };
-
-    let dest = bundle.join(name);
-    std::fs::copy(src, &dest).map_err(|error| format!("{}: {error}", dest.display()))?;
-    make_executable(&dest)?;
-
-    let mut message = format!("installed {} → {}", name.to_string_lossy(), dest.display());
-    if seeded {
-        message.push_str("\nseeded scaffold.mjs in the bundle");
-    }
-    message.push_str("\nrestart e to load it");
-    Ok(message)
-}
-
-#[cfg(unix)]
-fn make_executable(path: &std::path::Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-        .map_err(|error| format!("{}: {error}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &std::path::Path) -> Result<(), String> {
-    Ok(())
-}
-
 fn load_images(
     options: &Options,
     model: &Model,
@@ -507,12 +432,6 @@ struct RpcRequest {
     effort: Option<String>,
     #[serde(default)]
     tool_mode: Option<String>,
-    /// Extra system-prompt text appended to the base for this turn — the seam
-    /// a caller uses to give a delegated turn a persona, without the core
-    /// binary knowing what a "persona" is (cf. the reference's
-    /// `--append-system-prompt`).
-    #[serde(default)]
-    system: Option<String>,
     /// A positive tool allowlist for this turn: the turn sees only these
     /// built-ins. `None` is the full toolset; composes under `tool_mode`.
     #[serde(default)]
@@ -727,17 +646,9 @@ async fn rpc(
         let pricing = selected.pricing.clone();
         let mut agent_opts = agent_options(&options);
         agent_opts.allowed_tools = request.tools.clone();
-        // A caller may append instructions to the base system prompt — the seam
-        // a subagent extension uses to give a delegated turn a persona. Core
-        // stays generic: it appends text, it never learns what a "persona" is.
-        let mut system = e::core::agent::context::system_prompt(&cwd);
-        if let Some(extra) = request.system.as_deref() {
-            let extra = extra.trim();
-            if !extra.is_empty() {
-                system.push_str("\n\n");
-                system.push_str(extra);
-            }
-        }
+        // The delegated turn runs e's ordinary system prompt — a tool
+        // allowlist shapes what it can do, nothing tells it what it is.
+        let system = e::core::agent::context::system_prompt(&cwd);
         let (mut agent, mut events) = Agent::with_options(selected, agent_opts);
         let effort = agent.effort();
         agent.set_host(host.clone());
@@ -805,7 +716,6 @@ mod tests {
             model: None,
             effort: None,
             tool_mode: Some("all".into()),
-            system: None,
             tools: None,
             save: true,
             images: Vec::new(),

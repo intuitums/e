@@ -1,47 +1,44 @@
 #!/usr/bin/env node
-/** Delegate one isolated turn to another e process over `e rpc`. Copy with
- *  scaffold.mjs. */
+/** Delegate one isolated turn to another e process over `e rpc`. A
+ *  self-contained extension: it speaks e's JSONL protocol directly (see the
+ *  loop at the bottom), so it is a single file with nothing to install beside
+ *  it. */
 import { spawn } from "node:child_process";
-import { connect } from "./scaffold.mjs";
+import { createInterface } from "node:readline";
 
 const E_BIN = process.env.E_BIN || "e";
 
-// The agents this extension offers, named for what they do. They belong to the
-// extension, not to e — e core knows nothing about them. Add one by adding an
-// entry: `systemPrompt` is appended to the delegated turn's system prompt,
-// `tools` scopes it to those built-ins (omit for the full set), `model` is an
-// optional lighter/heavier override.
-const PERSONAS = [
+// The agents this extension offers. Each is a tool/model envelope, not a
+// character: a delegated turn runs e's ordinary prompt and is shaped only by
+// which tools it may use and which model runs it. `tools` is the built-in
+// allowlist (omit for the full set); `model` selects the model.
+const AGENTS = [
   {
     name: "Explore",
-    description:
-      "Fast, read-only scout that searches and analyzes the codebase without editing.",
+    description: "Read-only recon: searches and analyzes the codebase without editing.",
     tools: ["read", "grep"],
-    // No model pinned: the delegation inherits the caller's model, or the
-    // caller passes a lighter one per call. Never hardcode one here.
-    systemPrompt:
-      "You are Explore: fast, read-only reconnaissance. Find the code that matters for the task — the files, the key symbols, and how they connect — and report back concisely, quoting only the lines that carry the answer. You never edit; another turn acts on what you find. End with a dense summary the dispatching agent can use without re-reading the files.",
+    model: "{provider/model}", // ask the user what models to use
   },
   {
     name: "Plan",
-    description:
-      "Read-only strategist that gathers context and designs an implementation approach; does not edit.",
+    description: "Read-only planning: gathers context and lays out an implementation approach.",
     tools: ["read", "grep"],
-    systemPrompt:
-      "You are Plan: a read-only strategist. Gather the context you need, then design the change as an ordered list of concrete steps — which files change, what each change is, and the order that keeps the tree building between steps. Call out the risks and the one or two decisions a human should confirm. You do not edit; you produce the plan another turn will follow. Keep it tight — a map, not an essay.",
+    model: "{provider/model}", // ask the user what models to use
   },
   {
     name: "Build",
-    description:
-      "General-purpose worker with full tool access; handles complex, multi-step tasks and file modifications.",
-    systemPrompt:
-      "You are Build: a general-purpose worker with the full toolset. Handle the task end to end — read what you need, make the edits, run the commands, and verify your work. When the task is done, stop.",
+    description: "Full access: makes edits and runs commands to carry a task to completion.",
+    model: "{provider/model}", // ask the user what models to use
   },
 ];
 
-const agentsByName = new Map(PERSONAS.map((p) => [p.name, p]));
-const agentNames = PERSONAS.map((p) => p.name);
-const agentList = `Available agents: ${PERSONAS.map((p) => `${p.name} (${p.description})`).join("; ")}.`;
+const agentsByName = new Map(AGENTS.map((a) => [a.name, a]));
+const agentNames = AGENTS.map((a) => a.name);
+const agentList = `Available agents: ${AGENTS.map((a) => `${a.name} (${a.description})`).join("; ")}.`;
+
+// A model counts only once the {provider/model} filler is replaced with a real
+// slug; until then the delegation inherits the caller's model.
+const realModel = (model) => (model && !model.includes("{") ? model : undefined);
 
 const children = new Set();
 function stopChildren(signal = "SIGTERM") {
@@ -57,58 +54,46 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 }
 process.once("exit", () => stopChildren());
 
-connect({
-  manifest: {
-    name: "subagent",
-    version: "1.0.0",
-    tools: [
-      {
-        name: "delegate",
-        description: `Delegate a bounded task to an isolated e turn and return its final answer. ${agentList}`,
-        parameters: {
-          type: "object",
-          properties: {
-            prompt: { type: "string", description: "Complete task and expected result" },
-            agent: {
-              type: "string",
-              ...(agentNames.length ? { enum: agentNames } : {}),
-              description:
-                "Optional persona: its system prompt, tool allowlist, and model shape the turn",
-            },
-            model: { type: "string", description: "Optional provider/model override" },
-            effort: { type: "string", description: "Optional reasoning effort" },
-            tool_mode: {
-              type: "string",
-              enum: ["all", "none"],
-              default: "all",
-              description:
-                "Ignored when `agent` sets a tool allowlist; otherwise 'all' runs the built-in tools, 'none' answers from the prompt alone",
-            },
-            timeout_seconds: {
-              type: "integer",
-              minimum: 1,
-              maximum: 290,
-              default: 240,
-              description: "Hard deadline for the delegated turn",
-            },
+const MANIFEST = {
+  name: "subagent",
+  version: "1.0.0",
+  tools: [
+    {
+      name: "delegate",
+      description: `Delegate a bounded task to an isolated e turn and return its final answer. ${agentList}`,
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: { type: "string", description: "Complete task and expected result" },
+          agent: {
+            type: "string",
+            ...(agentNames.length ? { enum: agentNames } : {}),
+            description: "Optional agent: its tool access and model shape the turn",
           },
-          required: ["prompt"],
-          additionalProperties: false,
+          model: { type: "string", description: "Optional provider/model override" },
+          effort: { type: "string", description: "Optional reasoning effort" },
+          timeout_seconds: {
+            type: "integer",
+            minimum: 1,
+            maximum: 290,
+            default: 240,
+            description: "Hard deadline for the delegated turn",
+          },
         },
+        required: ["prompt"],
+        additionalProperties: false,
       },
-    ],
-  },
-  async tool({ arguments: input }, { update }) {
-    const mode = input.tool_mode || "all";
-    if (mode !== "all" && mode !== "none") {
-      return { content: `invalid tool_mode: ${mode}`, is_error: true };
-    }
-    let persona;
+    },
+  ],
+};
+
+async function runDelegate(input, update) {
+    let agent;
     if (input.agent) {
-      persona = agentsByName.get(input.agent);
-      if (!persona) return { content: `unknown agent: ${input.agent}`, is_error: true };
+      agent = agentsByName.get(input.agent);
+      if (!agent) return { content: `unknown agent: ${input.agent}`, is_error: true };
     }
-    update(`delegating${persona ? ` to ${persona.name}` : ` (${mode})`}\n`);
+    update(`delegating${agent ? ` to ${agent.name}` : ""}\n`);
 
     // A single-shot `e rpc` child: one request line in, one response object
     // out, then EOF shuts it down. --no-extensions keeps the turn hermetic
@@ -139,20 +124,15 @@ connect({
     // The child may exit before we finish writing; swallow the EPIPE rather
     // than crash the extension.
     child.stdin.on("error", () => {});
-    // The extension composes the request from the persona it resolved: its
-    // body appends to the system prompt (`system`), its allowlist scopes the
-    // tools (`tools`), its model is a fallback the caller can override. Without
-    // a persona, tool_mode picks all-tools or none. save:true persists the
-    // child's session so its full transcript stays inspectable via `session`.
+    // The agent is a tool/model envelope: its `tools` scope the delegated
+    // turn (omitted = the full set), its `model` runs it (the caller can
+    // override). No system prompt — the turn runs e's ordinary one. save:true
+    // persists the session so its full transcript stays inspectable via
+    // `session`.
     const request = { id: 1, prompt: input.prompt, save: true };
-    if (persona) {
-      if (persona.systemPrompt) request.system = persona.systemPrompt;
-      if (persona.tools) request.tools = persona.tools;
-    } else {
-      request.tool_mode = mode;
-    }
-    const chosenModel = input.model || persona?.model;
-    if (chosenModel) request.model = chosenModel;
+    if (agent?.tools) request.tools = agent.tools;
+    const model = realModel(input.model) ?? realModel(agent?.model);
+    if (model) request.model = model;
     if (input.effort) request.effort = input.effort;
     child.stdin.write(`${JSON.stringify(request)}\n`);
     child.stdin.end();
@@ -201,5 +181,37 @@ connect({
       ? `\n\n---\nFull transcript (every tool call) at ${result.session} — read it for detail beyond this summary.`
       : "";
     return { content: answer + trailer };
-  },
-}).run();
+}
+
+// e's extension protocol: one JSON request per line on stdin, one response per
+// line on stdout. We answer `initialize` with the manifest, run `delegate` for
+// `tool_call` (streaming progress with `tool.update`), and exit on `shutdown`.
+// Any other method isn't ours — stay quiet.
+function send(object) {
+  process.stdout.write(`${JSON.stringify(object)}\n`);
+}
+createInterface({ input: process.stdin }).on("line", (line) => {
+  let request;
+  try {
+    request = JSON.parse(line);
+  } catch {
+    return;
+  }
+  const { id, method, params } = request;
+  if (method === "initialize") {
+    send({ id, result: MANIFEST });
+  } else if (method === "shutdown") {
+    process.exit(0);
+  } else if (method === "tool_call") {
+    const update = (chunk, stream = "stdout") => {
+      if (chunk === undefined || chunk === null) return;
+      send({ method: "tool.update", params: { id, stream, chunk: String(chunk) } });
+    };
+    Promise.resolve()
+      .then(() => runDelegate(params?.arguments ?? {}, update))
+      .then(
+        (result) => send({ id, result: result ?? {} }),
+        (error) => send({ id, error: error instanceof Error ? error.message : String(error) })
+      );
+  }
+});
