@@ -70,10 +70,17 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 }
 
 /// The latest release tag ("v0.4.1"), from the GitHub API.
-pub async fn latest_tag() -> Result<String, String> {
+/// `None` — no release published — means nothing to update to, which the
+/// flow reads as already current, not a failure.
+pub async fn latest_tag() -> Result<Option<String>, String> {
+    latest_tag_from(API_LATEST).await
+}
+
+/// `latest_tag` against an explicit API URL, so tests can serve the API.
+pub async fn latest_tag_from(url: &str) -> Result<Option<String>, String> {
     let response = crate::core::providers::http()
         .map_err(|e| e.message)?
-        .get(API_LATEST)
+        .get(url)
         .header("accept", "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(10))
         .send()
@@ -81,14 +88,14 @@ pub async fn latest_tag() -> Result<String, String> {
         .map_err(|e| format!("update check failed: {e}"))?;
     if !response.status().is_success() {
         if response.status() == 404 {
-            return Err("no releases published yet".into());
+            return Ok(None);
         }
         return Err(format!("update check failed: {}", response.status()));
     }
     let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
     body["tag_name"]
         .as_str()
-        .map(String::from)
+        .map(|tag| Some(tag.to_string()))
         .ok_or_else(|| "release has no tag".into())
 }
 
@@ -175,7 +182,10 @@ pub async fn self_update() -> Result<Option<String>, String> {
     if !is_release_version(crate::VERSION) {
         return Ok(None);
     }
-    let tag = latest_tag().await?;
+    // No published release: nothing exists to update to — already current.
+    let Some(tag) = latest_tag().await? else {
+        return Ok(None);
+    };
     if !is_newer(&tag, crate::VERSION) {
         return Ok(None);
     }
