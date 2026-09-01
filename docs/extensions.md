@@ -1,9 +1,14 @@
 # Extensions
 
-An extension is any executable file in `~/.e/extensions/`. Any language —
-shell, Python, Rust, Node — the process boundary is the API. e starts each
-one at launch, keeps it running for the whole session, and speaks a line
-protocol over stdin/stdout: one JSON object per line.
+An extension is an executable in `~/.e/extensions/`. It can be a top-level
+file such as `foo.mjs`, or the entry point of a directory such as `foo/` that
+also contains helper files. Directory entry-point selection checks `index.*`,
+a file matching the directory name, then a sole executable. Path order breaks
+a tie within one rule.
+
+Extensions can use any language. e starts each process at launch, keeps it
+running for the session, and exchanges one JSON object per line over stdin and
+stdout.
 
 Extensions can:
 
@@ -154,24 +159,26 @@ relaunch ends the chain.
 
 ```
 docs/extensions/
-  scaffold.mjs   the wire-protocol helper (copy next to your extension)
-  hello.mjs      every surface at once, on the scaffold
+  subagent.mjs   bounded delegated e turns as a tool, over e rpc (self-contained)
+  hello.mjs      every surface at once, on the optional scaffold helper
   gate.mjs       the tool_call hook as a fail-open guard
   protected.mjs  the tool_call hook denying credential-shaped paths
   worktree.mjs   a minimal startup-hook launcher (e -w)
-  subagent.mjs   bounded delegated e turns as a tool, over e rpc
   mcp.mjs        one MCP stdio server's tools as extension tools
+  scaffold.mjs   an optional wire-protocol helper (not required, never installed)
 ```
 
-**`scaffold.mjs`** is the shared plumbing every extension needs: the
-stdin/stdout framing, id routing, and a `connect({ manifest, handlers })`
-that turns handlers into a running extension — the protocol's ergonomics
-without importing anything but Node. Copy it next to your own extension
-and `import { connect } from "./scaffold.mjs"`. If it ends up in
-`~/.e/extensions/` (easy to do, since the examples import it from their
-own directory) it runs as a named no-op extension and stays silent.
+An extension speaks the protocol directly — `subagent.mjs` and the shell
+`ping.sh` below are single self-contained files, reading a JSON request per
+line and writing a response per line. e installs nothing beside an extension.
 
-- **`hello.mjs`** — every surface at once, on the scaffold: command,
+**`scaffold.mjs`** is an *optional* convenience: the same stdin/stdout framing,
+id routing, and a `connect({ manifest, handlers })` wrapper, so you write
+handlers instead of a read loop. If you want it, drop it into your extension's
+own bundle directory and `import { connect } from "./scaffold.mjs"` — it is
+never installed for you, and it is not a thing you have to think about.
+
+- **`hello.mjs`** — every surface at once, on the optional scaffold: command,
   tool, config, input hook, session naming — ~50 lines of handlers.
 - **`gate.mjs`** — the `tool_call` hook as a guard, in e's fail-open
   shape: only an explicit block stops a call; a slow or crashed
@@ -186,16 +193,21 @@ own directory) it runs as a named no-op extension and stays silent.
   hook like this fits.
 - **`worktree.mjs`** — the startup-hook launcher on the scaffold:
   `e -w [branch]` creates a Git worktree and relaunches e there.
-- **`subagent.mjs`** — a `delegate` tool that drives a single-shot `e rpc
-  --no-extensions` child: one JSON request line in, one result out. The
-  delegated turn is ephemeral and extension-free (so it can never delegate
-  again), and the caller picks a model, effort, or `tool_mode` per call.
+- **`subagent.mjs`.** Its `delegate` tool drives a single-shot `e rpc
+  --no-extensions` child with one JSON request line in and one result out. The
+  delegated turn is extension-free, so it cannot delegate again. It defines
+  `Explore`, `Plan`, and `Build` in the extension and sends each agent's
+  `tools` and optional `model` in the RPC request. Core stays generic and does
+  not have an agent type.
 - **`mcp.mjs`** — a dependency-free bridge from one configured MCP stdio
   server's `tools/list` / `tools/call` surface into e extension tools. It
   forwards MCP progress through the additive `tool.update` capability.
 
-Copy any of them to `~/.e/extensions/` (with `scaffold.mjs` beside
-them), `chmod +x`, and restart e.
+To use one, put it in `~/.e/extensions/` (a top-level executable file, or a
+subdirectory bundling it and its helpers), make it executable, and restart e.
+An example that uses the optional scaffold helper needs `scaffold.mjs` beside
+it in its bundle; the self-contained ones (`subagent.mjs`, `ping.sh`) need
+nothing.
 
 ## A complete extension, in shell
 
@@ -219,8 +231,8 @@ Restart e, type `/ping`, get `pong`.
 
 ## MCP tools
 
-Copy `mcp.mjs` into `~/.e/extensions/`, make it executable, then configure
-the stdio server e should own in `~/.e/settings.json`:
+Put `mcp.mjs` in `~/.e/extensions/` with `scaffold.mjs` beside it, then
+configure the stdio server e should own in `~/.e/settings.json`:
 
 ```json
 {
@@ -244,13 +256,40 @@ specifications.
 
 ## Delegated turns
 
-Copy both `subagent.mjs` and `scaffold.mjs`, make the former executable, and
-restart. The model gains a `delegate` tool. Each delegation is a single-shot
-`e rpc` child in the same working directory: the extension writes one JSON
-request line, reads the one result object, and closes stdin. It is ephemeral
-and extension-free (so a delegated turn can never delegate again); it runs
-the full toolset unless the caller passes `tool_mode: "none"`. Set `E_BIN`
+Put `subagent.mjs` in `~/.e/extensions/` and restart — it is a single
+self-contained file, nothing beside it. The model gains a `delegate` tool. Each
+delegation is a single-shot `e rpc` child in the same working directory: the
+extension writes one JSON request line, reads one result object, and closes
+stdin. The child loads no extensions, so it cannot delegate again. Set `E_BIN`
 when the child should use an e binary other than the one on `PATH`.
+
+`timeout_seconds` defaults to 240 seconds. At the deadline the extension sends
+SIGTERM, and `e rpc` kills every active built-in bash process group before it
+exits. A later SIGKILL remains as a watchdog if graceful shutdown stalls.
+
+The delegation sets `save: true`. The response includes the saved JSONL path,
+and the tool result gives that path to the parent. The parent can read it when
+the final answer omits a useful tool call or result.
+
+### Agents live in the extension
+
+A delegation can name an `agent` defined in `subagent.mjs`. Each agent chooses
+a built-in tool allowlist and an optional model. The child receives the task as
+its user message and uses e's normal system prompt with a generic tool-policy
+suffix. Core does not have an agent type.
+
+The extension defines these agents:
+
+- `Explore` can use `read` and `grep`.
+- `Plan` can use `read` and `grep`.
+- `Build` can use every built-in tool.
+
+Each object has `name`, `description`, optional `tools`, and optional `model`.
+The shipped `"{provider/model}"` values are placeholders. Until you replace
+one, that child uses the model `e rpc` normally resolves from configuration.
+A call can also pass `model` to override the selected agent. The core validates
+`tools` as built-in names, advertises only those schemas, and enforces the same
+list when a provider emits a tool call.
 
 ## What startup hooks are for
 

@@ -2790,8 +2790,11 @@ pub async fn run(
         }
     }
 
-    // Let the final frame land before the terminal is restored.
+    // Let the final frame land before the terminal is restored. Shells use
+    // detached process groups, so stop them explicitly before this process
+    // gives extensions their shutdown notification.
     painter.shutdown();
+    crate::core::tools::kill_tracked_processes();
     app.host.shutdown().await;
     drop(_guard);
     // The tab title we set at launch (or from a session name) is ours to

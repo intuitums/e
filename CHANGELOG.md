@@ -7,6 +7,23 @@ the pipeline publishes.
 
 ## Unreleased
 
+- The base system prompt now uses the reference design's two guidelines: "Be
+  concise in your responses" and "Show file paths clearly when working with
+  files." The tools list, `e docs` guidance, cwd, platform, and date remain.
+- An extension can be a directory under `~/.e/extensions/`. A directory keeps
+  its entry point and helper files together. Entry-point selection checks
+  `index.*`, a file matching the directory name, then a sole executable.
+- `e rpc` gains `tools`, a positive built-in allowlist. It rejects unknown
+  names, advertises only the selected built-ins, and enforces the same list at
+  execution. `subagent.mjs` uses it for `Explore` and `Plan`, while `Build`
+  keeps full access. The extension owns these agent definitions. Core has no
+  agent type or system-prompt injection field.
+- The `e rpc` response gains `session`, the saved turn's JSONL path or `null`
+  for a memory-only run. `subagent.mjs` returns the path so its parent can read
+  tool calls and outputs that the final answer omitted.
+- SIGTERM and SIGHUP now shut `e rpc` down with their conventional exit status
+  after killing every tracked built-in bash process group. A delegated timeout
+  cannot leave its detached shell children running after the RPC child exits.
 - Read-only tool mode is removed. `--read-only`/`--ro`, the `read_only`
   RPC `tool_mode`, and the `read_only_notice` override are gone; `ToolMode`
   is now `all` or `none`, with `--no-tools` the one deliberate opt-out. A

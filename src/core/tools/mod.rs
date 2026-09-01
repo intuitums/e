@@ -107,6 +107,16 @@ pub fn schemas() -> Vec<Value> {
     SPECS.iter().map(|s| (s.schema)()).collect()
 }
 
+/// Whether `name` identifies one of e's built-in tools.
+pub fn is_builtin(name: &str) -> bool {
+    SPECS.iter().any(|spec| spec.name == name)
+}
+
+/// Kill every shell process group still owned by this e process.
+pub fn kill_tracked_processes() {
+    bash::kill_tracked_processes();
+}
+
 /// Apply a run's safety mode after built-in and extension schemas have been
 /// merged. Execution independently enforces the same policy.
 pub fn filter_schemas(schemas: Vec<Value>, mode: ToolMode) -> Vec<Value> {
@@ -115,6 +125,22 @@ pub fn filter_schemas(schemas: Vec<Value>, mode: ToolMode) -> Vec<Value> {
     } else {
         Vec::new()
     }
+}
+
+/// Narrow the advertised schemas to a request's positive allowlist. `None`
+/// leaves the set untouched. Execution enforces the same list.
+pub fn restrict_to(schemas: Vec<Value>, allowed: Option<&[String]>) -> Vec<Value> {
+    let Some(allowed) = allowed else {
+        return schemas;
+    };
+    schemas
+        .into_iter()
+        .filter(|schema| {
+            schema["function"]["name"]
+                .as_str()
+                .is_some_and(|name| allowed.iter().any(|a| a == name))
+        })
+        .collect()
 }
 
 /// Labels and category used to project one tool through its lifecycle.
@@ -591,7 +617,9 @@ fn schema_object(name: &str, description: &str, properties: Value, required: &[&
 
 #[cfg(test)]
 mod tests {
-    use super::{failure_summary, filter_schemas, schemas, stable_path_key};
+    use super::{
+        failure_summary, filter_schemas, is_builtin, restrict_to, schemas, stable_path_key,
+    };
     use crate::core::cli::ToolMode;
 
     fn names(mode: ToolMode) -> Vec<String> {
@@ -607,6 +635,21 @@ mod tests {
         // whole built-in toolset.
         assert!(names(ToolMode::None).is_empty());
         assert_eq!(names(ToolMode::All).len(), schemas().len());
+    }
+
+    #[test]
+    fn a_request_allowlist_narrows_the_advertised_tools() {
+        let allow = vec!["read".to_string(), "grep".to_string()];
+        let kept = restrict_to(schemas(), Some(&allow));
+        let names: Vec<String> = kept
+            .into_iter()
+            .filter_map(|s| s["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(names, vec!["read", "grep"]);
+        // None leaves the set whole.
+        assert_eq!(restrict_to(schemas(), None).len(), schemas().len());
+        assert!(is_builtin("read"));
+        assert!(!is_builtin("extension_tool"));
     }
 
     #[test]

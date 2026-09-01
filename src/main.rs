@@ -406,6 +406,7 @@ fn agent_options(options: &Options) -> AgentOptions {
         save_session: !options.no_save,
         tool_mode: options.tool_mode,
         effort_override: options.effort.clone(),
+        allowed_tools: None,
     }
 }
 
@@ -431,6 +432,10 @@ struct RpcRequest {
     effort: Option<String>,
     #[serde(default)]
     tool_mode: Option<String>,
+    /// A positive tool allowlist for this turn: the turn sees only these
+    /// built-ins. `None` is the full toolset; composes under `tool_mode`.
+    #[serde(default)]
+    tools: Option<Vec<String>>,
     #[serde(default)]
     save: bool,
     #[serde(default)]
@@ -558,6 +563,47 @@ impl TurnAccumulator {
 /// a still-growing line with no newline yet cannot be safely resynced past.
 const MAX_RPC_LINE_BYTES: usize = 10 * 1024 * 1024;
 
+#[cfg(unix)]
+struct RpcSignals {
+    terminate: tokio::signal::unix::Signal,
+    hangup: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl RpcSignals {
+    fn new() -> std::io::Result<Self> {
+        use tokio::signal::unix::{signal, SignalKind};
+        Ok(Self {
+            terminate: signal(SignalKind::terminate())?,
+            hangup: signal(SignalKind::hangup())?,
+        })
+    }
+
+    async fn recv(&mut self) -> i32 {
+        tokio::select! {
+            _ = self.terminate.recv() => 143,
+            _ = self.hangup.recv() => 129,
+        }
+    }
+}
+
+/// Stop owned shell groups before extension cleanup. `process::exit` is
+/// intentional: Tokio's blocking stdin reader cannot be cancelled while RPC
+/// is idle, so returning from main could leave signal shutdown hung forever.
+#[cfg(unix)]
+async fn exit_rpc_on_signal(
+    host: &e::core::api::ExtensionHost,
+    agent: Option<&mut Agent>,
+    status: i32,
+) -> ! {
+    e::core::tools::kill_tracked_processes();
+    if let Some(agent) = agent {
+        agent.interrupt();
+    }
+    host.shutdown().await;
+    std::process::exit(status);
+}
+
 /// A deliberately small machine protocol: sequential JSONL requests in,
 /// exactly one JSON object out for each line. The extension host is reused,
 /// while each request gets an isolated Agent and is memory-only by default.
@@ -566,8 +612,17 @@ async fn rpc(
     defaults: &Options,
 ) -> std::io::Result<()> {
     let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+    #[cfg(unix)]
+    let mut signals = RpcSignals::new()?;
     loop {
-        let line = match e::core::api::read_bounded_line(&mut reader, MAX_RPC_LINE_BYTES).await {
+        #[cfg(unix)]
+        let line_result = tokio::select! {
+            line = e::core::api::read_bounded_line(&mut reader, MAX_RPC_LINE_BYTES) => line,
+            status = signals.recv() => exit_rpc_on_signal(&host, None, status).await,
+        };
+        #[cfg(not(unix))]
+        let line_result = e::core::api::read_bounded_line(&mut reader, MAX_RPC_LINE_BYTES).await;
+        let line = match line_result {
             Ok(Some(line)) => line,
             Ok(None) => break,
             Err(error) => {
@@ -608,6 +663,20 @@ async fn rpc(
                 continue;
             }
         };
+        if let Some(unknown) = request
+            .tools
+            .as_ref()
+            .and_then(|names| names.iter().find(|name| !e::core::tools::is_builtin(name)))
+        {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "id": request_id,
+                    "error": format!("unknown built-in tool in allowlist: `{unknown}`")
+                })
+            );
+            continue;
+        }
         let options = match rpc_options(defaults, &request) {
             Ok(options) => options,
             Err(error) => {
@@ -622,6 +691,7 @@ async fn rpc(
             );
             continue;
         }
+        let cwd = std::env::current_dir().unwrap_or_default();
         let selected = match resolve_model(&options) {
             Ok(selected) => selected,
             Err(error) => {
@@ -638,16 +708,33 @@ async fn rpc(
         };
         let slug = model::slug(&selected);
         let pricing = selected.pricing.clone();
-        let (mut agent, mut events) = Agent::with_options(selected, agent_options(&options));
+        let mut agent_opts = agent_options(&options);
+        agent_opts.allowed_tools = request.tools.clone();
+        // The turn uses e's ordinary system prompt. The generic tool policy
+        // suffix records any request allowlist without adding a persona.
+        let system = e::core::agent::context::system_prompt(&cwd);
+        let (mut agent, mut events) = Agent::with_options(selected, agent_opts);
         let effort = agent.effort();
         agent.set_host(host.clone());
         agent.submit_message(
             e::core::providers::ChatMessage::user_with_images(request.prompt, images),
-            e::core::agent::context::system_prompt_here(),
+            system,
         );
 
         let mut result = TurnAccumulator::with_warnings(model::config_warnings());
-        while let Some(event) = events.recv().await {
+        loop {
+            #[cfg(unix)]
+            let event = tokio::select! {
+                event = events.recv() => event,
+                status = signals.recv() => {
+                    exit_rpc_on_signal(&host, Some(&mut agent), status).await
+                }
+            };
+            #[cfg(not(unix))]
+            let event = events.recv().await;
+            let Some(event) = event else {
+                break;
+            };
             result.observe(&event);
             if result.terminal {
                 break;
@@ -656,8 +743,17 @@ async fn rpc(
         result.finish();
         let mut body = result.json(&slug, effort.as_deref(), pricing.as_ref());
         body["id"] = request_id;
+        // The saved session's JSONL path, when this turn persisted one: the
+        // whole transcript — every tool call and its output — lives there, so
+        // a caller that needs more than the final text can read it. Null when
+        // the turn ran memory-only (`save` false).
+        body["session"] = agent
+            .session_path()
+            .map(|p| serde_json::Value::from(p.display().to_string()))
+            .unwrap_or(serde_json::Value::Null);
         println!("{body}");
     }
+    e::core::tools::kill_tracked_processes();
     host.shutdown().await;
     Ok(())
 }
@@ -697,6 +793,7 @@ mod tests {
             model: None,
             effort: None,
             tool_mode: Some("all".into()),
+            tools: None,
             save: true,
             images: Vec::new(),
         };

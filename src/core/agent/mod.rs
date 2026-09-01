@@ -334,6 +334,10 @@ pub struct AgentOptions {
     pub save_session: bool,
     pub tool_mode: ToolMode,
     pub effort_override: Option<String>,
+    /// A positive built-in tool allowlist for this run. `None` is the full
+    /// built-in and extension set. It composes under `tool_mode`, so no-tools
+    /// mode always wins.
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 impl Default for AgentOptions {
@@ -342,6 +346,7 @@ impl Default for AgentOptions {
             save_session: true,
             tool_mode: ToolMode::All,
             effort_override: None,
+            allowed_tools: None,
         }
     }
 }
@@ -698,9 +703,17 @@ impl Agent {
         } else {
             ToolMode::None
         };
-        let system = match tool_mode {
-            ToolMode::All => system,
-            ToolMode::None => format!("{system}\n\n{}", context::no_tools_notice()),
+        // The request's allowlist is shared across the turn's tool tasks.
+        let allowed_tools = self.options.allowed_tools.clone().map(Arc::new);
+        let system = match (tool_mode, allowed_tools.as_deref()) {
+            (ToolMode::None, _) => format!("{system}\n\n{}", context::no_tools_notice()),
+            (ToolMode::All, Some(tools)) if tools.is_empty() => {
+                format!("{system}\n\n{}", context::no_tools_notice())
+            }
+            (ToolMode::All, Some(tools)) => {
+                format!("{system}\n\n{}", context::tool_allowlist_notice(tools))
+            }
+            (ToolMode::All, None) => system,
         };
 
         tokio::spawn(async move {
@@ -774,14 +787,17 @@ impl Agent {
                     system: system.clone(),
                     messages,
                     effort: effort.clone(),
-                    tools: tools::filter_schemas(
-                        match (&host, tool_mode) {
-                            // Extensions augment the toolset only when tools
-                            // run at all; --no-tools advertises nothing.
-                            (Some(h), ToolMode::All) => h.merged_tool_schemas(),
-                            _ => tools::schemas(),
-                        },
-                        tool_mode,
+                    tools: tools::restrict_to(
+                        tools::filter_schemas(
+                            match (&host, tool_mode, allowed_tools.is_some()) {
+                                // A request allowlist names built-ins. Extension
+                                // tools and overrides stay outside that contract.
+                                (Some(h), ToolMode::All, false) => h.merged_tool_schemas(),
+                                _ => tools::schemas(),
+                            },
+                            tool_mode,
+                        ),
+                        allowed_tools.as_deref().map(Vec::as_slice),
                     ),
                 };
 
@@ -1285,6 +1301,7 @@ impl Agent {
                     let cancel = cancel.clone();
                     let events = events.clone();
                     let cwd = cwd.clone();
+                    let allowed_tools = allowed_tools.clone();
                     handles.push((
                         call.clone(),
                         tokio::spawn(async move {
@@ -1293,6 +1310,7 @@ impl Agent {
                                 ToolRunContext {
                                     host,
                                     tool_mode,
+                                    allowed_tools,
                                     cwd,
                                     cancel,
                                     id,
@@ -1423,6 +1441,7 @@ impl Agent {
 struct ToolRunContext {
     host: Option<std::sync::Arc<crate::core::api::ExtensionHost>>,
     tool_mode: ToolMode,
+    allowed_tools: Option<Arc<Vec<String>>>,
     cwd: PathBuf,
     cancel: Arc<AtomicBool>,
     id: u64,
@@ -1433,6 +1452,7 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
     let ToolRunContext {
         host,
         tool_mode,
+        allowed_tools,
         cwd,
         cancel,
         id,
@@ -1446,8 +1466,21 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
             display: None,
         };
     }
-    // --no-tools is a no-op here (nothing reaches this point), so tools run
-    // with the full extension surface: schemas, overrides, tools, and hooks.
+    // Enforce the request's list at execution too. The advertised schemas are
+    // not a security boundary because a provider can still emit any tool name.
+    if let Some(allowed) = &allowed_tools {
+        if !allowed.iter().any(|a| a == name) {
+            return tools::ToolOutput {
+                content: format!("tool blocked by the request's tool allowlist: {name}"),
+                outcome: tools::ToolOutcome::Blocked,
+                summary: "blocked".into(),
+                display: None,
+            };
+        }
+    }
+    // Hooks still guard allowlisted built-ins, but an extension cannot replace
+    // one by claiming the same name.
+    let builtins_only = allowed_tools.is_some();
     if let (ToolMode::All, Some(h)) = (tool_mode, &host) {
         // The hook chain is bounded per extension, but Esc must not wait out
         // even one silent hook's timeout: race it against the cancel flag.
@@ -1473,7 +1506,7 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
                 display: None,
             };
         }
-        if h.owns_tool(name) {
+        if !builtins_only && h.owns_tool(name) {
             let (progress, mut updates) = mpsc::channel(64);
             let call = h.call_tool_streaming(name, arguments, progress);
             tokio::pin!(call);
@@ -1591,6 +1624,7 @@ mod option_tests {
             ToolRunContext {
                 host: None,
                 tool_mode: ToolMode::None,
+                allowed_tools: None,
                 cwd: std::path::PathBuf::from("."),
                 cancel: Arc::new(AtomicBool::new(false)),
                 id: 1,
@@ -1603,5 +1637,27 @@ mod option_tests {
 
         assert_eq!(output.outcome, tools::ToolOutcome::Blocked);
         assert!(output.content.contains("no-tools"));
+    }
+
+    #[tokio::test]
+    async fn request_allowlist_is_enforced_at_execution() {
+        let (events, _rx) = mpsc::channel(1);
+        let output = run_tool(
+            ToolRunContext {
+                host: None,
+                tool_mode: ToolMode::All,
+                allowed_tools: Some(Arc::new(vec!["read".into(), "grep".into()])),
+                cwd: std::path::PathBuf::from("."),
+                cancel: Arc::new(AtomicBool::new(false)),
+                id: 1,
+                events,
+            },
+            "bash",
+            r#"{"command":"touch should-not-exist"}"#,
+        )
+        .await;
+
+        assert_eq!(output.outcome, tools::ToolOutcome::Blocked);
+        assert!(output.content.contains("tool allowlist"));
     }
 }

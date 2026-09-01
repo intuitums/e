@@ -1,6 +1,8 @@
-//! The extension host: discovers executables in `~/.e/extensions/`, keeps one
-//! long-lived process per extension, and routes tools, commands, hooks, and
-//! events over the line protocol.
+//! The extension host: discovers extensions in `~/.e/extensions/` — a
+//! top-level executable file, or a subdirectory bundling its own files (its
+//! executable plus helpers like a scaffold or data) — keeps one long-lived
+//! process per extension, and routes tools, commands, hooks, and events over
+//! the line protocol.
 //!
 //! Failure posture: discovery and runtime hooks fail open and are reported.
 //! An extension that advertises a startup hook owns startup argument handling,
@@ -746,18 +748,52 @@ impl Drop for PendingGuard {
     }
 }
 
-/// Executable files directly under `~/.e/extensions/`.
+/// Extensions under `~/.e/extensions/`. A top-level executable is one
+/// extension. A subdirectory can bundle an entry point with helper files.
+/// Entry-point selection checks the first `index.*` executable in path order,
+/// a file matching the directory name, then a sole executable.
 fn discover() -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(home::extensions_dir()) else {
         return Vec::new();
     };
-    let mut paths: Vec<PathBuf> = entries
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(entry_point) = directory_entry_point(&path) {
+                paths.push(entry_point);
+            }
+        } else if path.is_file() && is_executable(&path) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths
+}
+
+/// The executable a directory extension runs. Node (and every other language's
+/// relative imports) resolve against this file's own directory, so a bundled
+/// `./scaffold.mjs` beside it resolves regardless of the process cwd.
+fn directory_entry_point(dir: &std::path::Path) -> Option<PathBuf> {
+    let name = dir.file_name()?.to_string_lossy().into_owned();
+    let mut execs: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file() && is_executable(p))
         .collect();
-    paths.sort();
-    paths
+    // read_dir order is filesystem-dependent. Sorting makes ambiguous bundles
+    // stable while preserving the documented entry-point precedence.
+    execs.sort();
+    let by_stem = |stem: &str| {
+        execs
+            .iter()
+            .find(|p| p.file_stem().is_some_and(|s| s == stem))
+            .cloned()
+    };
+    by_stem("index")
+        .or_else(|| by_stem(&name))
+        .or_else(|| (execs.len() == 1).then(|| execs[0].clone()))
 }
 
 #[cfg(unix)]
@@ -1008,4 +1044,76 @@ where
     String::from_utf8(line)
         .map(Some)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+#[cfg(test)]
+mod tests {
+    // The entry-point tests set file modes, so they are unix-only. Nested so
+    // the module opens with a bare `#[cfg(test)]` (the guard's prod/test split
+    // keys on that) without mixing an inner `#![cfg]` on the same module.
+    #[cfg(unix)]
+    mod unix {
+        use super::super::directory_entry_point;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fn write(dir: &std::path::Path, name: &str, executable: bool) {
+            let path = dir.join(name);
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            let mode = if executable { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        fn tmp(label: &str) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "e-entrypoint-{label}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::now_v7()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        #[test]
+        fn index_wins_and_the_non_executable_scaffold_is_skipped() {
+            let dir = tmp("index");
+            write(&dir, "index.mjs", true);
+            write(&dir, "index.sh", true); // lexical tie-break after the stem rule
+            write(&dir, "scaffold.mjs", false); // library, not an entry point
+            write(&dir, "helper.mjs", true); // another executable, but index wins
+            assert_eq!(directory_entry_point(&dir), Some(dir.join("index.mjs")));
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn a_file_named_for_the_bundle_is_the_entry_point() {
+            let dir = tmp("subagent");
+            // The bundle directory is named "e-entrypoint-subagent-…"; use a file
+            // whose stem matches the directory name exactly.
+            let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+            write(&dir, &format!("{name}.mjs"), true);
+            write(&dir, "scaffold.mjs", false);
+            assert_eq!(
+                directory_entry_point(&dir),
+                Some(dir.join(format!("{name}.mjs")))
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn a_lone_executable_is_the_entry_point() {
+            let dir = tmp("lone");
+            write(&dir, "whatever.sh", true);
+            write(&dir, "data.json", false);
+            assert_eq!(directory_entry_point(&dir), Some(dir.join("whatever.sh")));
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn no_executable_means_no_entry_point() {
+            let dir = tmp("empty");
+            write(&dir, "readme.md", false);
+            assert_eq!(directory_entry_point(&dir), None);
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
 }
