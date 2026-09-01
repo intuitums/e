@@ -19,6 +19,13 @@ OVERVIEW:
 INSTALL:
  curl -fsSL https://raw.githubusercontent.com/intuitums/e/main/install.sh | sh
 
+START:
+ e
+ e "why is this function 400 lines long"
+ e help
+
+///
+
 SAFETY:
  - Model-directed tools run as your user without a permission prompt by default.
  - Directory trust controls context loading; it does not sandbox execution.

@@ -194,9 +194,9 @@ fn typo_flags_are_rejected_with_suggestions_not_prompts() {
 }
 
 #[test]
-fn standalone_near_miss_words_suggest_commands_not_sessions() {
+fn help_subcommand_prints_the_same_usage_as_the_flag() {
     let home = std::env::temp_dir().join(format!(
-        "e-cli-help-word-{}-{}",
+        "e-cli-help-subcommand-{}-{}",
         std::process::id(),
         uuid::Uuid::now_v7()
     ));
@@ -205,10 +205,39 @@ fn standalone_near_miss_words_suggest_commands_not_sessions() {
         .env("E_HOME", &home)
         .output()
         .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("usage:"), "stdout: {stdout}");
+    assert!(stdout.contains("e docs [topic]"), "stdout: {stdout}");
+
+    // Anything after the word is a usage error, not a prompt.
+    let output = Command::new(env!("CARGO_BIN_EXE_e"))
+        .args(["--no-extensions", "help", "docs"])
+        .env("E_HOME", &home)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("usage: e help"), "stderr: {stderr}");
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn standalone_near_miss_words_suggest_commands_not_sessions() {
+    let home = std::env::temp_dir().join(format!(
+        "e-cli-help-word-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_e"))
+        .args(["--no-extensions", "version"])
+        .env("E_HOME", &home)
+        .output()
+        .unwrap();
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("did you mean `e --help`?"),
+        stderr.contains("did you mean `e --version`?"),
         "stderr: {stderr}"
     );
 

@@ -7,6 +7,8 @@ the pipeline publishes.
 
 ## Unreleased
 
+- `e help` is a subcommand now, printing the same usage as `e --help`; a bare
+  `help` no longer answers "help is not a command".
 - The base system prompt now uses the reference design's two guidelines: "Be
   concise in your responses" and "Show file paths clearly when working with
   files." The tools list, `e docs` guidance, cwd, platform, and date remain.
