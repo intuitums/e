@@ -151,7 +151,7 @@ pub async fn run(
 
     let response = require_success(
         send_request(
-            http()
+            http()?
                 .post(format!(
                     "{}/models/{}:streamGenerateContent?alt=sse",
                     request.model.base_url, request.model.id

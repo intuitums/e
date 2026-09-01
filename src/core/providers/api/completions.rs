@@ -12,6 +12,23 @@ use crate::core::providers::{
     Request, SseStream, StreamEnd, ToolCall,
 };
 
+/// One chat-completions request; retried without `stream_options` when a
+/// strict gateway names that field in its validation error.
+async fn send(
+    request: &Request,
+    authorization: &Authorization,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, ProviderError> {
+    send_request(
+        http()?
+            .post(format!("{}/chat/completions", request.model.base_url))
+            .bearer_auth(&authorization.bearer)
+            .header("accept", "text/event-stream")
+            .json(body),
+    )
+    .await
+}
+
 pub async fn run(
     request: &Request,
     authorization: &Authorization,
@@ -78,16 +95,7 @@ pub async fn run(
         body["tools"] = json!(request.tools);
     }
 
-    let send = |body: &serde_json::Value| {
-        send_request(
-            http()
-                .post(format!("{}/chat/completions", request.model.base_url))
-                .bearer_auth(&authorization.bearer)
-                .header("accept", "text/event-stream")
-                .json(body),
-        )
-    };
-    let first = send(&body).await?;
+    let first = send(request, authorization, &body).await?;
     let response = if matches!(first.status().as_u16(), 400 | 422) {
         let status = first.status();
         let retry_after = retry_after_seconds(&first);
@@ -102,7 +110,7 @@ pub async fn run(
             // rather than panicking.
             if let Some(body_object) = body.as_object_mut() {
                 body_object.remove("stream_options");
-                require_success(send(&body).await?).await?
+                require_success(send(request, authorization, &body).await?).await?
             } else {
                 return Err(ProviderError::from_status(status, &text).with_retry_after(retry_after));
             }

@@ -179,7 +179,7 @@ pub async fn run(
 
     let response = require_success(
         send_request(
-            http()
+            http()?
                 .post(format!("{}/v1/messages", request.model.base_url))
                 .header("x-api-key", &authorization.bearer)
                 .header("anthropic-version", ANTHROPIC_VERSION)

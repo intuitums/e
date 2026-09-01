@@ -1207,6 +1207,7 @@ async fn unanswered_request_fails_instead_of_hanging() {
     });
 
     let builder = http()
+        .expect("http client")
         .post(format!("http://127.0.0.1:{port}/v1/messages"))
         .body("{}");
     let err = send_request_within(builder, Duration::from_millis(300))
