@@ -2077,7 +2077,12 @@ pub async fn run(
     let keymap = crate::core::config::keybindings::load();
 
     let (mut cols, mut rows) = terminal::size()?;
-    let mut painter = Painter::spawn(cols, rows);
+    // The launch anchor: the frame paints below where the user launched e,
+    // never over what came before (the main-screen model mirrors pi's
+    // regular mode). A terminal that doesn't answer DSR 6n — a raw pty —
+    // falls back to the screen's bottom row, the common launch spot.
+    let anchor = crate::tui::paint::background::query_cursor_row(rows).unwrap_or(rows - 1) as usize;
+    let mut painter = Painter::spawn(cols, rows, anchor);
     let (mut agent, mut session_events) = Agent::with_options(model, agent_options.clone());
     let (logins_tx, mut logins_rx) =
         tokio::sync::mpsc::channel::<crate::core::auth::login::Outcome>(4);
