@@ -1,6 +1,7 @@
 //! Self-update. Pins: version comparison, the checksum gate (a bad sum
-//! refuses to install), and the full install path against a fake release —
-//! download, verify, unpack, atomic swap.
+//! refuses to install), the full install path against a fake release —
+//! download, verify, unpack, atomic swap — and the update check: a repo
+//! with no published release reads as already current, never as an error.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -26,6 +27,16 @@ fn version_comparison() {
 }
 
 fn serve_release(files: Vec<(String, Vec<u8>)>) -> (String, std::thread::JoinHandle<()>) {
+    serve_files(files, "200 OK")
+}
+
+/// A raw HTTP server answering every request with one status line and one
+/// body — enough to stand in for the GitHub releases API in the check test.
+fn serve_files(
+    files: Vec<(String, Vec<u8>)>,
+    status: &str,
+) -> (String, std::thread::JoinHandle<()>) {
+    let status = status.to_string();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let handle = std::thread::spawn(move || {
@@ -42,7 +53,7 @@ fn serve_release(files: Vec<(String, Vec<u8>)>) -> (String, std::thread::JoinHan
                 .unwrap_or_default();
             let _ = stream.write_all(
                 format!(
-                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
                 )
                 .as_bytes(),
@@ -132,4 +143,30 @@ async fn poisoned_checksum_refuses_to_install() {
     assert_eq!(std::fs::read_to_string(&dest).unwrap(), "old-binary");
     server.join().unwrap();
     let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+/// A repo with no published release answers the API with 404: the check
+/// reads as already current — nothing to update to — never as an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_published_release_is_already_current_not_an_error() {
+    // One dummy entry so the server accepts the single request; no name
+    // matches, so the body stays empty under the 404 status.
+    let (base, server) = serve_files(vec![("none".to_string(), vec![])], "404 Not Found");
+    assert_eq!(e::core::update::latest_tag_from(&base).await.unwrap(), None);
+    server.join().unwrap();
+}
+
+/// A published release answers with its tag.
+#[tokio::test(flavor = "multi_thread")]
+async fn latest_tag_reads_the_published_tag() {
+    let (base, server) = serve_files(
+        vec![(
+            "releases".to_string(),
+            br#"{"tag_name": "v9.9.9"}"#.to_vec(),
+        )],
+        "200 OK",
+    );
+    let tag = e::core::update::latest_tag_from(&base).await.unwrap();
+    assert_eq!(tag.as_deref(), Some("v9.9.9"));
+    server.join().unwrap();
 }
