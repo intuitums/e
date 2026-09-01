@@ -475,6 +475,10 @@ pub fn default_model() -> Model {
             return m;
         }
     }
+    // The catalog embeds DEFAULT_MODEL, so this resolves for any shipped
+    // data; if the embedded data were malformed, that is a build bug CI
+    // catches, not a runtime state. Scoped allow, proof: compile-time data.
+    #[allow(clippy::expect_used)]
     available()
         .into_iter()
         .next()

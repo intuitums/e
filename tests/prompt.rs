@@ -1,7 +1,7 @@
 //! The system prompt: the reference's structure, the settings override,
 //! layered context.
 
-use e::core::agent::context::{no_tools_notice, read_only_notice, system_prompt};
+use e::core::agent::context::{no_tools_notice, system_prompt, tool_allowlist_notice};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -84,8 +84,11 @@ fn settings_prompt_replaces_the_base() {
 #[test]
 fn tool_mode_notices_default_to_the_built_in_wording() {
     with_home("mode-notices-default", || {
-        assert!(read_only_notice().contains("read-only"));
         assert!(no_tools_notice().contains("no tools"));
+        assert_eq!(
+            tool_allowlist_notice(&["read".into(), "grep".into()]),
+            "This run may use only these tools: read, grep. Do not attempt other tool calls."
+        );
     });
 }
 
@@ -95,11 +98,14 @@ fn tool_mode_notices_are_file_backed_overrides() {
         let home = std::env::var("E_HOME").unwrap();
         std::fs::write(
             format!("{home}/settings.json"),
-            r#"{"read_only_notice":"Custom read-only wording.","no_tools_notice":"Custom no-tools wording."}"#,
+            r#"{"no_tools_notice":"Custom no-tools wording.","tool_allowlist_notice":"Only {tools}, please."}"#,
         )
         .unwrap();
-        assert_eq!(read_only_notice(), "Custom read-only wording.");
         assert_eq!(no_tools_notice(), "Custom no-tools wording.");
+        assert_eq!(
+            tool_allowlist_notice(&["read".into(), "grep".into()]),
+            "Only read, grep, please."
+        );
     });
 }
 

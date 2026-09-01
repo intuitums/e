@@ -12,11 +12,12 @@ use std::path::Path;
 
 use crate::core::config::home;
 
+// The reference design's own guideline set. It keeps the always-on pair and
+// omits the bash-only file-exploration line, which the reference adds only when
+// no grep/find/ls tool exists — e ships grep, so it never applied here.
 const GUIDELINES: &[&str] = &[
-    "Prefer small, focused changes; preserve unrelated code and formatting",
-    "Show file paths clearly when working with files",
     "Be concise in your responses",
-    "When you finish a task, stop — don't narrate what you could do next",
+    "Show file paths clearly when working with files",
 ];
 
 /// The default base: identity, tools, guidelines (the reference's shape,
@@ -57,9 +58,9 @@ struct Settings {
     #[serde(default)]
     system_prompt: Option<String>,
     #[serde(default)]
-    read_only_notice: Option<String>,
-    #[serde(default)]
     no_tools_notice: Option<String>,
+    #[serde(default)]
+    tool_allowlist_notice: Option<String>,
 }
 
 fn settings() -> Settings {
@@ -74,18 +75,6 @@ fn custom_prompt() -> Option<String> {
     settings().system_prompt.filter(|p| !p.trim().is_empty())
 }
 
-/// The suffix appended to the system prompt in read-only tool mode — a
-/// `~/.e/settings.json` `read_only_notice` overrides it, same as
-/// `system_prompt` overrides the base.
-pub fn read_only_notice() -> String {
-    settings()
-        .read_only_notice
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| {
-            "This run is read-only. Only the read and grep tools are available.".into()
-        })
-}
-
 /// The suffix appended to the system prompt when no tools are available —
 /// a `~/.e/settings.json` `no_tools_notice` overrides it.
 pub fn no_tools_notice() -> String {
@@ -93,6 +82,19 @@ pub fn no_tools_notice() -> String {
         .no_tools_notice
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "This run has no tools. Answer without attempting tool calls.".into())
+}
+
+/// The suffix appended when a request allows only some built-in tools.
+/// `tool_allowlist_notice` can override the wording and use `{tools}` for the
+/// comma-separated names.
+pub fn tool_allowlist_notice(tools: &[String]) -> String {
+    settings()
+        .tool_allowlist_notice
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            "This run may use only these tools: {tools}. Do not attempt other tool calls.".into()
+        })
+        .replace("{tools}", &tools.join(", "))
 }
 
 /// The system prompt for the process's current directory — the entry point

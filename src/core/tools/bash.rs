@@ -12,7 +12,7 @@
 //! cleanup — matches the foreground path; only the waiting is removed.
 
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
@@ -69,6 +69,55 @@ struct BackgroundProcess {
 /// everything else in this tool, nothing here survives past the e process
 /// itself; there is no daemon and no persistence to reload on restart.
 static BACKGROUND: Mutex<Option<HashMap<String, Arc<BackgroundProcess>>>> = Mutex::new(None);
+
+/// Shells run in their own process groups. Track each live leader so process
+/// shutdown can kill the groups before the runtime exits.
+static PROCESS_GROUPS: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
+
+fn track_group(pid: u32) {
+    PROCESS_GROUPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashSet::new)
+        .insert(pid);
+}
+
+fn untrack_group(pid: u32) {
+    if let Some(groups) = PROCESS_GROUPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        groups.remove(&pid);
+    }
+}
+
+/// Kill every live shell process group before the owning e process exits.
+pub fn kill_tracked_processes() {
+    let groups = PROCESS_GROUPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .unwrap_or_default();
+    for pid in groups {
+        kill_group(pid);
+    }
+}
+
+struct TrackedGroup(u32);
+
+impl TrackedGroup {
+    fn new(pid: u32) -> Self {
+        track_group(pid);
+        Self(pid)
+    }
+}
+
+impl Drop for TrackedGroup {
+    fn drop(&mut self) {
+        untrack_group(self.0);
+    }
+}
 
 fn prune_background(map: &mut HashMap<String, Arc<BackgroundProcess>>) {
     let mut finished: Vec<(String, u64)> = map
@@ -129,6 +178,7 @@ fn start_background(command: &str, cwd: &Path) -> ToolOutput {
         Err(error) => return failure(&format!("bash: {error}")),
     };
     let pid = child.id();
+    track_group(pid);
     let id = uuid::Uuid::new_v4().to_string();
     let process = Arc::new(BackgroundProcess {
         pid,
@@ -141,6 +191,7 @@ fn start_background(command: &str, cwd: &Path) -> ToolOutput {
     if !register_background(id.clone(), process.clone()) {
         kill_group(pid);
         let _ = child.wait();
+        untrack_group(pid);
         return failure("bash: background process limit reached; check or stop existing handles");
     }
 
@@ -232,6 +283,7 @@ fn reap_background(
         BACKGROUND_FINISHED_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         Ordering::Relaxed,
     );
+    untrack_group(process.pid);
     if let Some(map) = BACKGROUND
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -378,6 +430,7 @@ where
         Ok(child) => child,
         Err(error) => return failure(&format!("bash: {error}")),
     };
+    let _tracked_group = TrackedGroup::new(child.id());
 
     let (tx, rx) = mpsc::channel::<(OutputStream, Vec<u8>)>();
     let reader_stop = Arc::new(AtomicBool::new(false));
@@ -478,7 +531,10 @@ where
         }
     }
 
-    let status = status.expect("loop stops only after child exit");
+    // The loop only exits once try_wait() reported an exit; if that
+    // invariant somehow broke, an unknown failure is the honest reading —
+    // never a panic.
+    let exit_code = status.as_ref().and_then(|s| s.code());
     // The model's copy: decoded, stripped of colour codes and progress-bar
     // rewrites — token noise it should never pay for.
     let mut combined =
@@ -497,12 +553,12 @@ where
         (ToolOutcome::Cancelled, "cancelled".to_string())
     } else if timed_out {
         (ToolOutcome::TimedOut, format!("timeout {timeout}s"))
-    } else if status.success() {
+    } else if exit_code == Some(0) {
         (ToolOutcome::Completed, "done".to_string())
     } else {
         (
             ToolOutcome::Failed,
-            format!("exit {}", status.code().unwrap_or(-1)),
+            format!("exit {}", exit_code.unwrap_or(-1)),
         )
     };
     if outcome == ToolOutcome::TimedOut {
@@ -654,7 +710,10 @@ fn drain_complete_utf8(carry: &mut Vec<u8>) -> String {
             }
             Err(e) => {
                 let valid = e.valid_up_to();
-                out.push_str(std::str::from_utf8(&carry[..valid]).expect("validated prefix"));
+                // valid_up_to() proves the prefix decodes; lossy is byte-
+                // identical there and degrades instead of panicking if a
+                // future refactor breaks that proof.
+                out.push_str(&String::from_utf8_lossy(&carry[..valid]));
                 match e.error_len() {
                     Some(bad) => {
                         out.push('\u{FFFD}');

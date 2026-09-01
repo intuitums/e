@@ -55,9 +55,11 @@ pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
             Err(e) => return err(format!("read {path}: {e}"), "read", path),
         };
         let after = super::file_stamp(&full);
-        if before.is_some() && before == after {
-            stable = Some((text, after.unwrap()));
-            break;
+        if let (Some(before), Some(after)) = (before, after) {
+            if before == after {
+                stable = Some((text, after));
+                break;
+            }
         }
     }
     let Some((text, stamp)) = stable else {
@@ -203,11 +205,6 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
     if let Err(output) = super::check_fresh(&full, "write", path) {
         return output;
     }
-    let before_lines = match count_text_lines(&full) {
-        Ok(lines) => lines,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
-        Err(error) => return err(format!("write {path}: {error}"), "write", path),
-    };
     // Capture the previous content while it still exists, so the detail
     // viewer can show a real diff. Bounded: a huge or non-UTF-8 previous
     // file degrades to the summary-only detail, never an error.
@@ -216,6 +213,18 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
         Ok(meta) if meta.len() <= DIFF_SOURCE_CAP => std::fs::read_to_string(&full).ok(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Some(String::new()),
         _ => None,
+    };
+    // The deletion count comes free from the diff source we just read. Only
+    // when that read yielded nothing (oversize, or non-UTF-8) do we fall back
+    // to a streaming count — which also enforces the no-binary contract:
+    // refusing to overwrite a file that isn't text.
+    let before_lines = match &before_text {
+        Some(text) => text.lines().count(),
+        None => match count_text_lines(&full) {
+            Ok(lines) => lines,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+            Err(error) => return err(format!("write {path}: {error}"), "write", path),
+        },
     };
     if let Some(parent) = full.parent() {
         if let Err(error) = std::fs::create_dir_all(parent) {

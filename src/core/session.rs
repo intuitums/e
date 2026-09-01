@@ -344,9 +344,16 @@ impl Session {
         drop(seen);
         drop(by_id);
         let mut nodes: Vec<Option<Node>> = nodes.into_iter().map(Some).collect();
+        // Every index was validated against by_id above; get_mut degrades
+        // to a dropped message instead of a panic if that ever breaks.
         let mut messages = path_indexes
             .into_iter()
-            .map(|index| nodes[index].take().expect("validated node index").message)
+            .filter_map(|index| {
+                nodes
+                    .get_mut(index)
+                    .and_then(|slot| slot.take())
+                    .map(|n| n.message)
+            })
             .collect();
         repair_tail(&mut messages);
         Ok(messages)

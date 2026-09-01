@@ -97,8 +97,15 @@ pub async fn run(
         // error; a rejected request generated no content, so one retry without
         // it is safe and avoids a provider-specific compatibility table.
         if text.to_ascii_lowercase().contains("stream_options") {
-            body.as_object_mut().unwrap().remove("stream_options");
-            require_success(send(&body).await?).await?
+            // The body was built from our own typed request, so it is an
+            // object; a non-object falls through to the plain error path
+            // rather than panicking.
+            if let Some(body_object) = body.as_object_mut() {
+                body_object.remove("stream_options");
+                require_success(send(&body).await?).await?
+            } else {
+                return Err(ProviderError::from_status(status, &text).with_retry_after(retry_after));
+            }
         } else {
             return Err(ProviderError::from_status(status, &text).with_retry_after(retry_after));
         }

@@ -10,6 +10,18 @@
 //! described in `docs/compatibility.md`, and e's other supported external
 //! surfaces are the CLI, file formats, and extension wire protocol documented
 //! there.
+//
+// Shipped code denies explicit panic sites outside test builds. Every allowed
+// site needs a proof comment explaining why runtime input cannot reach it.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )
+)]
 
 pub mod core;
 pub mod tui;

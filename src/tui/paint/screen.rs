@@ -103,7 +103,11 @@ pub(crate) fn plan<'a>(
 pub(crate) fn scroll_rows(prev_len: usize, len: usize, height: usize) -> usize {
     let prev_overflow = prev_len.saturating_sub(height);
     let overflow = len.saturating_sub(height);
-    overflow.saturating_sub(prev_overflow)
+    // The screen can only give up `height` scroll rows per frame — shadow
+    // holds exactly one slot per row, and a reflow (resize, tab switch) can
+    // make a frame jump by hundreds of rows at once. Uncapped, drain(0..scroll)
+    // panicked past the shadow (#the blank-screen freeze).
+    overflow.saturating_sub(prev_overflow).min(height)
 }
 
 impl Screen {
@@ -157,14 +161,15 @@ impl Screen {
         }
         if self.debug_frames {
             use std::io::Write as _;
-            let mut f = std::fs::OpenOptions::new()
+            let f = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/tmp/e-frames.log")
-                .unwrap();
-            let _ = writeln!(f, "== frame {} rows ==", lines.len());
-            for l in lines {
-                let _ = writeln!(f, "{:?}", l);
+                .open("/tmp/e-frames.log");
+            if let Ok(mut f) = f {
+                let _ = writeln!(f, "== frame {} rows ==", lines.len());
+                for l in lines {
+                    let _ = writeln!(f, "{:?}", l);
+                }
             }
         }
         let cols = self.cols as usize;
@@ -318,6 +323,11 @@ mod tests {
         // Shrinking never scrolls — the window repaints in place.
         assert_eq!(scroll_rows(13, 10, 10), 0);
         assert_eq!(scroll_rows(23, 20, 10), 0);
+        // A reflow can make one frame jump by more rows than the screen
+        // has; the scroll never exceeds the height (shadow holds exactly
+        // one slot per row).
+        assert_eq!(scroll_rows(0, 739, 53), 53);
+        assert_eq!(scroll_rows(0, 686, 10), 10);
     }
 }
 
@@ -364,8 +374,17 @@ impl Painter {
                 if let Some((cols, rows)) = resize {
                     screen.resize(cols, rows);
                 }
-                if let Some(frame) = frame {
-                    let _ = screen.paint(&frame);
+                // A panic in the paint path must cost one garbled frame —
+                // not the session. The screen is marked fully unknown so
+                // the next frame repaints everything over whatever the
+                // panicking write left behind.
+                let painted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(frame) = frame {
+                        let _ = screen.paint(&frame);
+                    }
+                }));
+                if painted.is_err() {
+                    screen.resize(screen.cols, screen.rows);
                 }
                 if shutdown {
                     // The final frame (taken above) has landed; done.
