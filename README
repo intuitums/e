@@ -1,0 +1,37 @@
+■ INTUITUM
+PROJECT: 𝑒
+
+///
+
+CONTACT: SUPPORT@INTUITUM.SH
+LOCATION: USA
+STATUS: DEVELOPMENT
+
+///
+
+OVERVIEW:
+ - Small, fast coding agent for the terminal.
+ - One Rust binary with tools, commands, themes, prompts, and skills.
+ - Executable JSONL extensions add tools, commands, hooks, and startup behavior.
+
+///
+
+INSTALL:
+ curl -fsSL https://raw.githubusercontent.com/intuitums/e/main/install.sh | sh
+
+SAFETY:
+ - Model-directed tools run as your user without a permission prompt by default.
+ - Directory trust controls context loading; it does not sandbox execution.
+ - Use a container, VM, or OS sandbox when work needs containment.
+
+///
+
+REFERENCE:
+ - [Models](https://github.com/intuitums/e/blob/main/docs/models.md)
+ - [Extensions](https://github.com/intuitums/e/blob/main/docs/extensions.md)
+ - [Skills](https://github.com/intuitums/e/blob/main/docs/skills.md)
+ - [Themes](https://github.com/intuitums/e/blob/main/docs/themes.md)
+ - [Releases](https://github.com/intuitums/e/blob/main/docs/releases.md)
+ - [Security](https://github.com/intuitums/e/blob/main/SECURITY.md)
+ - [Contributing](https://github.com/intuitums/e/blob/main/CONTRIBUTING.md)
+ - [Agent guide](https://github.com/intuitums/e/blob/main/AGENTS.md)
