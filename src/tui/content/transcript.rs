@@ -274,7 +274,12 @@ impl Block {
             let lines = self.render(theme, width, phase);
             self.cache = Some((width, phase, lines));
         }
-        &self.cache.as_ref().unwrap().2
+        match &self.cache {
+            Some((_, _, lines)) => lines,
+            // Unreachable: the cache was just filled above. An empty slice
+            // renders as nothing rather than panicking if that ever breaks.
+            None => &[],
+        }
     }
 
     /// The child owning execution focus: the latest running call of a live

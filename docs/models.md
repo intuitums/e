@@ -64,7 +64,7 @@ built-in's provider and id replaces it — the file wins, like themes.
   declared sibling model's override.
 - `pricing` declares USD rates per million input, output, and optionally
   cache-read tokens. e shows a turn estimate and includes `cost_usd` in
-  `e ask --json`. If cache pricing is omitted, cache reads use the normal
+  the `e rpc` response. If cache pricing is omitted, cache reads use the normal
   input rate. Pricing is optional because it changes independently of the
   wire protocol; use the provider's current published rates.
 - Credentials: `/login <provider>` stores an API key for any provider name.

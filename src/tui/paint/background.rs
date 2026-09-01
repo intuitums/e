@@ -172,8 +172,8 @@ fn parse_colorfgbg(value: &str) -> Option<bool> {
     Some(bg >= 7)
 }
 
-/// Whether stdout is a terminal — `e ask` styles for a human, streams plain
-/// for a pipe.
+/// Whether stdout is a terminal: styling and background detection apply only
+/// when a human is watching, not when output is piped.
 pub fn stdout_is_tty() -> bool {
     unsafe { libc::isatty(1) == 1 }
 }

@@ -152,6 +152,10 @@ fn default_true() -> bool {
 impl Provider {
     /// The wire dialect this provider speaks. `all()` validates the string
     /// at startup, so an unknown value never reaches this match silently.
+    // Fail-fast for a data bug (registry JSON vs. code) at startup, before
+    // any user state is touched — by design, not a runtime panic. Scoped
+    // allow, proof: the dialect strings ship inside this binary.
+    #[allow(clippy::panic)]
     pub fn api(&self) -> Api {
         Api::parse(&self.api)
             .unwrap_or_else(|| panic!("provider {}: unknown api dialect `{}`", self.name, self.api))
@@ -183,6 +187,10 @@ pub fn all() -> &'static [Provider] {
         ]
         .iter()
         .map(|json| {
+            // Parse of include_str! data compiled into this binary: a
+            // malformed file is a build bug CI catches, not a runtime
+            // state. Scoped allow, proof: compile-time data.
+            #[allow(clippy::expect_used)]
             let provider: Provider =
                 serde_json::from_str(json).expect("embedded provider data is valid");
             // Fail at startup, not on the wire: a typo'd dialect or OAuth

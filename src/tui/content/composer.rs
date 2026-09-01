@@ -239,11 +239,12 @@ impl Editor {
 
     /// A paste becomes a placeholder token when it runs past the
     /// configured threshold (codepoints, line count regardless; the token
-    /// expands back on submit). Anything smaller inserts literally.
+    /// expands back on submit). Anything smaller inserts literally, and a
+    /// threshold of `0` disables collapsing entirely — every paste inserts raw.
     pub fn insert_paste(&mut self, text: &str) {
         self.delete_selection();
         let lines = text.lines().count().max(1);
-        if text.chars().count() <= self.paste_limit {
+        if self.paste_limit == 0 || text.chars().count() <= self.paste_limit {
             self.insert_str(text);
             return;
         }

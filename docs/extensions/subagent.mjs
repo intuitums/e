@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-/** Delegate one isolated turn to another e process. Copy with scaffold.mjs. */
+/** Delegate one isolated turn to another e process over `e rpc`. Copy with
+ *  scaffold.mjs. */
 import { spawn } from "node:child_process";
 import { connect } from "./scaffold.mjs";
 
@@ -25,7 +26,7 @@ connect({
       {
         name: "delegate",
         description:
-          "Delegate a bounded task to an isolated e turn and return its final answer. Read-only by default.",
+          "Delegate a bounded task to an isolated e turn and return its final answer.",
         parameters: {
           type: "object",
           properties: {
@@ -34,8 +35,9 @@ connect({
             effort: { type: "string", description: "Optional reasoning effort" },
             tool_mode: {
               type: "string",
-              enum: ["read_only", "all", "none"],
-              default: "read_only",
+              enum: ["all", "none"],
+              default: "all",
+              description: "'all' runs the built-in tools, 'none' answers from the prompt alone",
             },
             timeout_seconds: {
               type: "integer",
@@ -52,20 +54,26 @@ connect({
     ],
   },
   async tool({ arguments: input }, { update }) {
-    const mode = input.tool_mode || "read_only";
-    const modeFlag = { read_only: "--read-only", all: null, none: "--no-tools" }[mode];
-    if (modeFlag === undefined) return { content: `invalid tool_mode: ${mode}`, is_error: true };
-    const args = ["--no-extensions", "--no-save", "--json"];
-    if (modeFlag) args.push(modeFlag);
-    if (input.model) args.push("--model", input.model);
-    if (input.effort) args.push("--effort", input.effort);
-    args.push("ask", "--", input.prompt);
+    const mode = input.tool_mode || "all";
+    if (mode !== "all" && mode !== "none") {
+      return { content: `invalid tool_mode: ${mode}`, is_error: true };
+    }
     update(`delegating (${mode})\n`);
 
-    const child = spawn(process.env.E_BIN || "e", args, {
+    // A single-shot `e rpc` child: one request line in, one response object
+    // out, then EOF shuts it down. --no-extensions keeps the turn hermetic
+    // and, crucially, bounds recursion — the child has no delegate tool of
+    // its own, so a delegation is never a chain.
+    const child = spawn(process.env.E_BIN || "e", ["rpc", "--no-extensions"], {
       cwd: process.cwd(),
       env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    // Register before writing. A child that fails or exits immediately must
+    // not beat the listeners and leave this call waiting forever.
+    const exited = new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code, signal) => resolve({ code, signal }));
     });
     children.add(child);
     let stdout = "";
@@ -78,6 +86,15 @@ connect({
       stderr += chunk;
       update(chunk, "stderr");
     });
+    // The child may exit before we finish writing; swallow the EPIPE rather
+    // than crash the extension.
+    child.stdin.on("error", () => {});
+    const request = { id: 1, prompt: input.prompt, save: false, tool_mode: mode };
+    if (input.model) request.model = input.model;
+    if (input.effort) request.effort = input.effort;
+    child.stdin.write(`${JSON.stringify(request)}\n`);
+    child.stdin.end();
+
     const deadline = Math.min(290, Math.max(1, Number(input.timeout_seconds) || 240));
     let forceKill;
     const timeout = setTimeout(() => {
@@ -89,10 +106,7 @@ connect({
     timeout.unref();
     let status;
     try {
-      status = await new Promise((resolve, reject) => {
-        child.once("error", reject);
-        child.once("exit", (code, signal) => resolve({ code, signal }));
-      });
+      status = await exited;
     } finally {
       clearTimeout(timeout);
       clearTimeout(forceKill);
@@ -101,9 +115,14 @@ connect({
     if (timedOut) {
       return { content: `delegate exceeded its ${deadline}s deadline`, is_error: true };
     }
+    // Exactly one response line for our one request; take the first non-empty.
+    const line = stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length > 0);
     let result;
     try {
-      result = JSON.parse(stdout.trim());
+      result = JSON.parse(line);
     } catch {
       return {
         content: `delegate returned invalid JSON (${status.code ?? status.signal}): ${stderr || stdout}`,

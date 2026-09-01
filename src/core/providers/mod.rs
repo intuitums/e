@@ -445,6 +445,10 @@ const RATE_LIMITED_TEXT_PATTERNS: &[&str] =
     &["rate.?limit", "too many requests", "ResourceExhausted"];
 
 fn compile(patterns: &[&str]) -> regex::Regex {
+    // The pattern lists are static literals reviewed alongside this code;
+    // an invalid one is a build bug CI catches, not a runtime state.
+    // Scoped allow, proof: compile-time data.
+    #[allow(clippy::expect_used)]
     regex::Regex::new(&format!("(?i){}", patterns.join("|"))).expect("pattern lists compile")
 }
 
@@ -892,6 +896,11 @@ fn skip_separator(buf: &[u8], pos: usize) -> usize {
 /// per-chunk in `next_sse_chunk`.
 pub fn http() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    // Client::build only fails when the TLS backend cannot initialize —
+    // a state where no request could ever succeed. There is no graceful
+    // fallback worth having; the panic names the real problem. Scoped
+    // allow, proof: environment is broken beyond e's ability to help.
+    #[allow(clippy::expect_used)]
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .user_agent(format!("e/{}", crate::VERSION))

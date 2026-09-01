@@ -103,13 +103,17 @@ pub fn substitute(content: &str, args: &str) -> String {
                 out.push_str(&expand_braced(&inner, &words, &all));
             }
             Some(d) if d.is_ascii_digit() => {
-                let n = chars.next().unwrap().to_digit(10).unwrap() as usize;
-                out.push_str(
-                    words
-                        .get(n.wrapping_sub(1))
-                        .map(String::as_str)
-                        .unwrap_or(""),
-                );
+                // The peek matched a digit, so the next char decodes as one;
+                // None degrades to an empty expansion instead of panicking
+                // on a malformed template.
+                if let Some(n) = chars.next().and_then(|c| c.to_digit(10)) {
+                    out.push_str(
+                        words
+                            .get((n as usize).wrapping_sub(1))
+                            .map(String::as_str)
+                            .unwrap_or(""),
+                    );
+                }
             }
             _ => {
                 // $ARGUMENTS, or a literal dollar.

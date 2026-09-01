@@ -159,7 +159,7 @@ docs/extensions/
   gate.mjs       the tool_call hook as a fail-open guard
   protected.mjs  the tool_call hook denying credential-shaped paths
   worktree.mjs   a minimal startup-hook launcher (e -w)
-  subagent.mjs   bounded delegated e turns as a tool
+  subagent.mjs   bounded delegated e turns as a tool, over e rpc
   mcp.mjs        one MCP stdio server's tools as extension tools
 ```
 
@@ -186,9 +186,10 @@ own directory) it runs as a named no-op extension and stays silent.
   hook like this fits.
 - **`worktree.mjs`** — the startup-hook launcher on the scaffold:
   `e -w [branch]` creates a Git worktree and relaunches e there.
-- **`subagent.mjs`** — a `delegate` tool that runs an isolated `e ask
-  --json --no-save --no-extensions` child. It defaults to read-only and can
-  select a model or effort without creating a recursive extension chain.
+- **`subagent.mjs`** — a `delegate` tool that drives a single-shot `e rpc
+  --no-extensions` child: one JSON request line in, one result out. The
+  delegated turn is ephemeral and extension-free (so it can never delegate
+  again), and the caller picks a model, effort, or `tool_mode` per call.
 - **`mcp.mjs`** — a dependency-free bridge from one configured MCP stdio
   server's `tools/list` / `tools/call` surface into e extension tools. It
   forwards MCP progress through the additive `tool.update` capability.
@@ -244,10 +245,12 @@ specifications.
 ## Delegated turns
 
 Copy both `subagent.mjs` and `scaffold.mjs`, make the former executable, and
-restart. The model gains a `delegate` tool. Each delegation is a fresh child
-turn in the same working directory; it is ephemeral, extension-free, and
-read-only unless the caller explicitly selects another `tool_mode`. Set
-`E_BIN` when the child should use an e binary other than the one on `PATH`.
+restart. The model gains a `delegate` tool. Each delegation is a single-shot
+`e rpc` child in the same working directory: the extension writes one JSON
+request line, reads the one result object, and closes stdin. It is ephemeral
+and extension-free (so a delegated turn can never delegate again); it runs
+the full toolset unless the caller passes `tool_mode: "none"`. Set `E_BIN`
+when the child should use an e binary other than the one on `PATH`.
 
 ## What startup hooks are for
 
