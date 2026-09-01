@@ -198,6 +198,7 @@ async fn codex_login_inner(
             .map_err(|error| error.to_string())??;
 
     let response = crate::core::providers::http()
+        .map_err(|e| e.message)?
         .post(format!("{AUTH_BASE}/oauth/token"))
         .form(&[
             ("grant_type", "authorization_code"),
@@ -432,6 +433,7 @@ async fn xai_login_inner(
     cancellation: &LoginCancellation,
 ) -> Result<(), String> {
     let device: serde_json::Value = crate::core::providers::http()
+        .map_err(|e| e.message)?
         .post(XAI_DEVICE_CODE_URL)
         .form(&[
             ("client_id", XAI_CLIENT_ID),
@@ -482,6 +484,7 @@ async fn xai_login_inner(
             return Err("xAI device code expired".into());
         }
         let response = crate::core::providers::http()
+            .map_err(|e| e.message)?
             .post(XAI_TOKEN_URL)
             .form(&[
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
@@ -520,6 +523,7 @@ async fn xai_login_inner(
 /// Exchange the refresh token; xAI may omit `refresh_token` when unrotated.
 pub async fn xai_refresh(refresh: &str) -> Result<crate::core::auth::Credential, String> {
     let response = crate::core::providers::http()
+        .map_err(|e| e.message)?
         .post(XAI_TOKEN_URL)
         .form(&[
             ("grant_type", "refresh_token"),
@@ -568,6 +572,7 @@ pub async fn codex_access(provider: &str) -> Result<(String, String), String> {
     }
 
     let response = crate::core::providers::http()
+        .map_err(|e| e.message)?
         .post(format!("{AUTH_BASE}/oauth/token"))
         .form(&[
             ("grant_type", "refresh_token"),

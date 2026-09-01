@@ -256,6 +256,7 @@ async fn fetch_models(
         format!("{base}/models")
     };
     let mut request = crate::core::providers::http()
+        .ok()?
         .get(url)
         .timeout(std::time::Duration::from_secs(15));
     request = match (authorization.credentialed, catalog_strategy) {

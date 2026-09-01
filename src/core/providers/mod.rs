@@ -894,26 +894,46 @@ fn skip_separator(buf: &[u8], pos: usize) -> usize {
 /// the overall request is not — a live SSE stream can run for minutes. The
 /// wait for response headers is bounded in `send_request`, idle bodies
 /// per-chunk in `next_sse_chunk`.
-pub fn http() -> &'static reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    // Client::build only fails when the TLS backend cannot initialize —
-    // a state where no request could ever succeed. There is no graceful
-    // fallback worth having; the panic names the real problem. Scoped
-    // allow, proof: environment is broken beyond e's ability to help.
-    #[allow(clippy::expect_used)]
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .user_agent(format!("e/{}", crate::VERSION))
-            .connect_timeout(std::time::Duration::from_secs(30))
-            // After a system sleep, pooled connections are dead but look
-            // alive locally — a request that reuses one would sit out the
-            // full stall budget before failing. Keepalives retire them
-            // quickly on both sides instead.
-            .tcp_keepalive(std::time::Duration::from_secs(15))
-            .pool_idle_timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("http client")
-    })
+///
+/// A failed build (the TLS backend cannot initialize) is an environment
+/// state, not a code bug, so it surfaces as a network error at the point of
+/// use: the request fails with a reason and the session survives. The
+/// outcome is cached either way — TLS init does not heal mid-process, and
+/// re-attempting a deterministic failure on every request only multiplies it.
+pub fn http() -> Result<&'static reqwest::Client, ProviderError> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    cached_client(&CLIENT, build_client)
+}
+
+/// The build steps for the shared client, kept separate from the cache glue
+/// so the glue is testable without touching process-global state.
+fn build_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent(format!("e/{}", crate::VERSION))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        // After a system sleep, pooled connections are dead but look
+        // alive locally — a request that reuses one would sit out the
+        // full stall budget before failing. Keepalives retire them
+        // quickly on both sides instead.
+        .tcp_keepalive(std::time::Duration::from_secs(15))
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// One cached build outcome, mapped to the error callers see. `build` runs
+/// at most once per cell — a failure is remembered, not retried.
+fn cached_client(
+    cell: &std::sync::OnceLock<Result<reqwest::Client, String>>,
+    build: impl FnOnce() -> Result<reqwest::Client, String>,
+) -> Result<&reqwest::Client, ProviderError> {
+    match cell.get_or_init(build) {
+        Ok(client) => Ok(client),
+        Err(reason) => Err(ProviderError::network(format!(
+            "network client unavailable: {reason}"
+        ))),
+    }
 }
 
 /// Seconds of provider silence — awaiting response headers or the next body
@@ -995,6 +1015,42 @@ pub fn retry_after_seconds(response: &reqwest::Response) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_client_build_failure_is_a_network_error_and_is_cached() {
+        let cell = std::sync::OnceLock::new();
+        let attempts = std::cell::Cell::new(0);
+        let first = cached_client(&cell, || {
+            attempts.set(attempts.get() + 1);
+            Err("tls backend unavailable".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(attempts.get(), 1, "the build runs once");
+        assert!(
+            first.message.contains("network client unavailable")
+                && first.message.contains("tls backend unavailable"),
+            "the error names the cause: {}",
+            first.message
+        );
+        // The second call must reuse the cached failure, not re-attempt it.
+        let again = cached_client(&cell, || panic!("build must not re-run")).unwrap_err();
+        assert_eq!(again.message, first.message);
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn http_client_success_is_shared_across_calls() {
+        let cell = std::sync::OnceLock::new();
+        let attempts = std::cell::Cell::new(0);
+        let build = || {
+            attempts.set(attempts.get() + 1);
+            build_client()
+        };
+        let first = cached_client(&cell, build).unwrap();
+        let second = cached_client(&cell, || panic!("build must not re-run")).unwrap();
+        assert!(std::ptr::eq(first, second), "one client, shared");
+        assert_eq!(attempts.get(), 1);
+    }
 
     #[test]
     fn status_classification_matches_retry_policy() {

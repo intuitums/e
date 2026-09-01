@@ -117,7 +117,7 @@ pub async fn run(
             })?;
             let session_id = uuid::Uuid::new_v4().to_string();
             body["prompt_cache_key"] = json!(session_id);
-            http()
+            http()?
                 .post(format!("{}/codex/responses", request.model.base_url))
                 .header("chatgpt-account-id", account)
                 .header("originator", "e")
@@ -126,7 +126,7 @@ pub async fn run(
                 .header("x-client-request-id", &session_id)
         }
         crate::core::providers::registry::ResponsesMount::Platform => {
-            http().post(format!("{}/responses", request.model.base_url))
+            http()?.post(format!("{}/responses", request.model.base_url))
         }
     };
     builder = builder
