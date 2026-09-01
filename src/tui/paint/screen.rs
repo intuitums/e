@@ -1,22 +1,36 @@
-//! The main-screen line renderer.
+//! The main-screen line renderer, anchored where the user launched e.
 //!
-//! The frame is a flat list of styled lines. The visible window is the last
-//! `rows` lines of the frame (a short frame sits at the top of the screen,
-//! as the reference launch does). Each paint diffs the window row-by-row
-//! against a shadow of what every screen row currently shows, and rewrites
-//! only the rows that changed, at absolute positions. When the frame
-//! overflows further down the screen, the display scrolls up first so the
-//! transcript keeps flowing into the terminal's scrollback, and only the
-//! blank rows at the bottom get painted. Paints are wrapped in synchronized
-//! output (?2026) to kill flicker where supported.
+//! The frame is a flat list of styled lines — the transcript with the
+//! composer dock at its tail. The screen shows a window of that buffer:
+//! buffer row `b` sits at screen row `anchor + b - viewport_top`, where
+//! `anchor` is the cursor row at launch and `viewport_top` counts the rows
+//! the display has scrolled up as the frame outgrew the screen. Rows above
+//! the anchor hold whatever the terminal showed before e started and are
+//! never touched: the UI grows downward from where the user launched it,
+//! exactly like a plain program appending below its prompt (pi's
+//! regular-mode renderer, which this model mirrors). Once the frame
+//! overflows, the display scrolls and the transcript flows into the
+//! terminal's scrollback above the dock.
 //!
-//! Launch starts from a clean slate: whatever the terminal showed before e
-//! started is scrolled into the scrollback with newlines (so it stays
-//! reachable by scrolling up, and the transcript reads as one continuous
-//! flow), and the screen is marked known-blank before the first frame.
+//! Three paint routes:
 //!
-//! There is deliberately no cursor arithmetic. Every row run starts with a
-//! `\r` followed by an absolute position, so no relative move can ever
+//! - Diff: rewrite the changed rows at absolute positions, scrolling first
+//!   when the frame's tail must move the display up.
+//! - Flow: the changed range starts between the old and new screen tops —
+//!   a large append, or the first frame of a session whose transcript
+//!   already overflows. The range prints sequentially from where it starts
+//!   and the terminal scrolls as the rows flow, so the head lands in the
+//!   scrollback in order: no gap, no clear.
+//! - Replay: a resize reflows everything on screen, so row positions are
+//!   unknowable — the screen (and scrollback, which would otherwise stack
+//!   replayed heads) is cleared and the whole frame is printed from the
+//!   screen top. Changes that land above the screen top without a resize
+//!   (a compaction shrink, an edit above the window) patch only the
+//!   visible range and leave the stale rows above stale: the pre-launch
+//!   content there is worth more than a perfect scrollback.
+//!
+//! There is deliberately no cursor arithmetic. Every absolute write starts
+//! with a `\r` followed by a position, so no relative move can ever
 //! interact with the terminal's pending-wrap state — the `\x1b[F` off-by-one
 //! bug class (issue #123) cannot occur, because no motion depends on where
 //! the cursor was left.
@@ -29,14 +43,15 @@ pub struct Screen {
     /// The last painted frame, for the no-op fast path.
     prev: Vec<String>,
     /// Per-screen-row shadow: what each screen row currently shows; None
-    /// when unknown (never painted, or scrolled-in blank).
+    /// when unknown (never painted).
     shadow: Vec<Option<String>>,
-    /// True after a resize: rows outside the window must be cleared even
-    /// when the shadow never painted them — the terminal reflowed stale
-    /// content into them.
-    clear_unpainted: bool,
-    /// Set by `clear_slate` so the launch scroll cannot run twice.
-    cleared: bool,
+    /// The launch cursor row (0-based). Buffer row 0 paints here until the
+    /// display scrolls; a replay resets it to 0 with the screen cleared.
+    anchor: usize,
+    /// Buffer rows scrolled off above the screen; never decreases.
+    viewport_top: usize,
+    /// Set by `resize`: the next paint replays from a cleared screen.
+    replay_pending: bool,
     pub cols: u16,
     pub rows: u16,
     debug_frames: bool,
@@ -50,25 +65,29 @@ pub(crate) struct RowAction<'a> {
     pub write: Option<&'a str>,
 }
 
-/// Which screen rows need a rewrite for `lines` to be visible, given the
-/// `shadow` of what each row currently shows. The window is the frame's
-/// last `height` lines; rows outside it are cleared when they may hold
-/// stale content (`clear_unpainted`), and left alone when they are already
-/// blank or were never painted (launch's `clear_slate` leaves no unknown
-/// rows, so this is pure conservatism for the differ's callers).
+/// Which screen rows need a rewrite for the frame to be visible. Buffer row
+/// `b` lives at screen row `anchor + b - viewport_top`; rows above the
+/// buffer's visible start hold pre-launch content and are left alone, rows
+/// below the frame's end are cleared when they hold painted content.
 pub(crate) fn plan<'a>(
     lines: &'a [String],
     height: usize,
+    anchor: usize,
+    viewport_top: usize,
     shadow: &[Option<String>],
-    clear_unpainted: bool,
 ) -> Vec<RowAction<'a>> {
     let len = lines.len();
-    let n0 = len.saturating_sub(height);
-    let in_window = len.saturating_sub(n0); // min(len, height)
     let mut actions = Vec::new();
     for row in 0..height {
-        let action = if row < in_window {
-            let line = &lines[n0 + row];
+        let b = row as i64 - anchor as i64 + viewport_top as i64;
+        if b < 0 {
+            // Above the buffer's visible start: pre-launch content, or rows
+            // that scrolled away — never touched.
+            continue;
+        }
+        let b = b as usize;
+        let action = if b < len {
+            let line = &lines[b];
             if shadow
                 .get(row)
                 .and_then(|s| s.as_deref())
@@ -83,10 +102,8 @@ pub(crate) fn plan<'a>(
             }
         } else {
             match shadow.get(row).and_then(|s| s.as_deref()) {
-                Some("") => None,
+                Some("") | None => None,
                 Some(_) => Some(RowAction { row, write: None }),
-                None if clear_unpainted => Some(RowAction { row, write: None }),
-                None => None,
             }
         };
         if let Some(a) = action {
@@ -96,63 +113,88 @@ pub(crate) fn plan<'a>(
     actions
 }
 
-/// How many rows the display must scroll up so the frame's visible window
-/// (its last `height` lines) sits at screen rows 0..height. Zero when the
-/// window did not move downward — shrinking frames repaint in place rather
-/// than pulling from scrollback.
-pub(crate) fn scroll_rows(prev_len: usize, len: usize, height: usize) -> usize {
-    let prev_overflow = prev_len.saturating_sub(height);
-    let overflow = len.saturating_sub(height);
-    // The screen can only give up `height` scroll rows per frame — shadow
-    // holds exactly one slot per row, and a reflow (resize, tab switch) can
-    // make a frame jump by hundreds of rows at once. Uncapped, drain(0..scroll)
-    // panicked past the shadow (#the blank-screen freeze).
-    overflow.saturating_sub(prev_overflow).min(height)
+/// The first and last buffer rows that differ between two frames. Appends
+/// extend the range to the new tail; deletions end at the old tail.
+pub(crate) fn diff_range(prev: &[String], lines: &[String]) -> (usize, usize) {
+    let mut first = usize::MAX;
+    let mut last = 0;
+    for i in 0..prev.len().max(lines.len()) {
+        let old = prev.get(i).map(String::as_str).unwrap_or("");
+        let new = lines.get(i).map(String::as_str).unwrap_or("");
+        if old != new {
+            first = first.min(i);
+            last = last.max(i);
+        }
+    }
+    (first, last)
+}
+
+/// How the next paint reaches its frame.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Route {
+    /// Rewrite the changed rows at absolute positions, scrolling `scroll`
+    /// display rows up first.
+    Diff { scroll: usize },
+    /// Print the changed range sequentially from where it starts; the
+    /// terminal scrolls as the rows flow past the bottom, so the head lands
+    /// in the scrollback in order.
+    Flow,
+    /// Clear the screen and scrollback, then print the whole frame from the
+    /// screen top (a resize reflowed every row position).
+    Replay,
+}
+
+/// Pick the route for a frame. `anchor` is the launch row; `viewport_top`
+/// the rows already scrolled off. The new viewport top is monotonic: the
+/// display only ever scrolls up, and a shrinking frame repaints in place.
+pub(crate) fn route(
+    first_changed: usize,
+    len: usize,
+    anchor: usize,
+    viewport_top: usize,
+    height: usize,
+    replay_pending: bool,
+) -> Route {
+    if replay_pending {
+        return Route::Replay;
+    }
+    let top = (anchor + len).saturating_sub(height).max(viewport_top);
+    let pos_first = anchor as i64 + first_changed as i64 - top as i64;
+    if pos_first < 0 && first_changed as i64 >= viewport_top as i64 - anchor as i64 {
+        // The changed range starts between the old and new screen tops —
+        // unreachable by absolute positioning, but painted before: repaint
+        // it flowing, so nothing lands in the scrollback out of order.
+        return Route::Flow;
+    }
+    Route::Diff {
+        scroll: top - viewport_top,
+    }
 }
 
 impl Screen {
-    pub fn new(cols: u16, rows: u16) -> Self {
+    pub fn new(cols: u16, rows: u16, anchor: usize) -> Self {
         Screen {
             prev: Vec::new(),
             shadow: vec![None; rows as usize],
-            clear_unpainted: false,
-            cleared: false,
+            anchor: anchor.min(rows.saturating_sub(1) as usize),
+            viewport_top: 0,
+            replay_pending: false,
             cols,
             rows,
             debug_frames: std::env::var("E_DEBUG_FRAMES").is_ok(),
         }
     }
 
-    /// Scrolls whatever the terminal currently shows into the scrollback
-    /// (newlines from the bottom row, so it stays reachable above the
-    /// transcript) and marks every row known-blank, so launch paints onto a
-    /// clean slate and nothing of the pre-launch shell session can show
-    /// through below the frame. Runs once; later calls are no-ops.
-    pub fn clear_slate(&mut self) -> io::Result<()> {
-        if self.cleared {
-            return Ok(());
-        }
-        self.cleared = true;
-        let mut out = io::stdout().lock();
-        write!(out, "\x1b[?2026h\r\x1b[{};1H", self.rows)?;
-        for _ in 0..self.rows {
-            writeln!(out)?;
-        }
-        write!(out, "\x1b[?2026l")?;
-        out.flush()?;
-        self.shadow = vec![Some(String::new()); self.rows as usize];
-        Ok(())
-    }
-
-    /// A resize never clears the display: the shadow goes unknown and the
-    /// next paint rewrites the whole window in place (and clears anything
-    /// below a short frame) — no blank-flash frame.
+    /// A resize reflows every row on screen — ours and the user's — so the
+    /// shadow's positions are meaningless. The next paint clears the screen
+    /// and scrollback and replays the whole frame from the top (the replayed
+    /// heads would otherwise stack in the scrollback on every resize).
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
         self.rows = rows;
         self.prev.clear();
         self.shadow = vec![None; rows as usize];
-        self.clear_unpainted = true;
+        self.replay_pending = true;
     }
 
     pub fn paint(&mut self, lines: &[String]) -> io::Result<()> {
@@ -174,7 +216,9 @@ impl Screen {
         }
         let cols = self.cols as usize;
         let rows = self.rows as usize;
-        let scroll = scroll_rows(self.prev.len(), lines.len(), rows);
+        let anchor = self.anchor;
+        let (first_changed, _last_changed) = diff_range(&self.prev, lines);
+        let len = lines.len();
 
         // A line that fills the row leaves the cursor in the pending-wrap
         // state, where erase-to-end clears the cell under it — eating the
@@ -194,140 +238,123 @@ impl Screen {
         let mut out = io::stdout().lock();
         write!(out, "\x1b[?2026h\x1b[?25l")?;
 
-        // The window moved down the frame: scroll the display up by that
-        // many rows so the top rows enter the terminal's scrollback and
-        // blank rows appear at the bottom for the new content. The `\r`
-        // homes the cursor without resolving a pending wrap first (#123).
-        if scroll > 0 {
-            write!(out, "\r\x1b[{rows};1H")?;
-            for _ in 0..scroll {
-                writeln!(out)?;
-            }
-            self.shadow.drain(0..scroll);
-            self.shadow.extend((0..scroll).map(|_| None));
-        }
-
-        let actions = plan(lines, rows, &self.shadow, self.clear_unpainted);
-        // Runs of adjacent dirty rows: position once, then `\r\n` between
-        // rows. The `\r` before the absolute position is what keeps the
-        // differ independent of the terminal's pending-wrap state.
-        let mut at = 0usize;
-        while at < actions.len() {
-            let mut end = at + 1;
-            while end < actions.len() && actions[end].row == actions[end - 1].row + 1 {
-                end += 1;
-            }
-            write!(out, "\r\x1b[{};1H", actions[at].row + 1)?;
-            for (i, action) in actions[at..end].iter().enumerate() {
-                if i > 0 {
-                    write!(out, "\r\n")?;
-                }
-                match action.write {
-                    Some(line) => {
-                        put(&mut out, line)?;
-                        self.shadow[action.row] = Some(line.to_string());
+        match route(
+            first_changed,
+            len,
+            anchor,
+            self.viewport_top,
+            rows,
+            self.replay_pending,
+        ) {
+            Route::Replay => {
+                write!(out, "\x1b[2J\x1b[H\x1b[3J")?;
+                self.anchor = 0;
+                for (i, line) in lines.iter().enumerate() {
+                    if i > 0 {
+                        write!(out, "\r\n")?;
                     }
-                    None => {
-                        // Below the frame: leave the row blank.
-                        write!(out, "\x1b[2K")?;
-                        self.shadow[action.row] = Some(String::new());
+                    put(&mut out, line)?;
+                }
+                self.viewport_top = len.saturating_sub(rows);
+                self.shadow = (0..rows)
+                    .map(|r| {
+                        let b = r + self.viewport_top;
+                        if b < len {
+                            Some(lines[b].clone())
+                        } else {
+                            Some(String::new())
+                        }
+                    })
+                    .collect();
+            }
+            Route::Flow => {
+                // Bring the first changed row to a paintable position: one
+                // past the bottom means it scrolls in with a single newline;
+                // otherwise it is already on screen where it was painted.
+                let pos = (anchor + first_changed).saturating_sub(self.viewport_top);
+                if pos >= rows {
+                    // One past the bottom: the first changed row scrolls in
+                    // with a single newline and paints at the bottom row.
+                    write!(out, "\r\x1b[{rows};1H")?;
+                    writeln!(out)?;
+                } else {
+                    write!(out, "\r\x1b[{};1H", pos + 1)?;
+                }
+                for (i, line) in lines[first_changed..len].iter().enumerate() {
+                    if i > 0 {
+                        write!(out, "\r\n")?;
+                    }
+                    put(&mut out, line)?;
+                }
+                let top = (anchor + len).saturating_sub(rows);
+                let total = top - self.viewport_top;
+                self.viewport_top = top;
+                let drained = total.min(rows);
+                self.shadow.drain(0..drained);
+                self.shadow
+                    .extend((0..drained).map(|_| Some(String::new())));
+                // The flowed rows landed at their mapping positions; rows
+                // the flow pushed into the scrollback leave the screen.
+                for (offset, line) in lines[first_changed..len].iter().enumerate() {
+                    let r = (anchor + first_changed + offset) as i64 - top as i64;
+                    if r >= 0 && (r as usize) < rows {
+                        self.shadow[r as usize] = Some(line.clone());
                     }
                 }
             }
-            at = end;
+            Route::Diff { scroll } => {
+                // The window moved down the frame: scroll the display up so
+                // the top rows enter the terminal's scrollback and blank
+                // rows appear at the bottom for the new content. The `\r`
+                // homes the cursor without resolving a pending wrap (#123).
+                if scroll > 0 {
+                    write!(out, "\r\x1b[{rows};1H")?;
+                    for _ in 0..scroll {
+                        writeln!(out)?;
+                    }
+                    let drained = scroll.min(rows);
+                    self.shadow.drain(0..drained);
+                    self.shadow
+                        .extend((0..drained).map(|_| Some(String::new())));
+                }
+                self.viewport_top += scroll;
+                let actions = plan(lines, rows, anchor, self.viewport_top, &self.shadow);
+                // Runs of adjacent dirty rows: position once, then `\r\n`
+                // between rows. The `\r` before the absolute position is what
+                // keeps the differ independent of the terminal's pending-wrap
+                // state.
+                let mut at = 0usize;
+                while at < actions.len() {
+                    let mut end = at + 1;
+                    while end < actions.len() && actions[end].row == actions[end - 1].row + 1 {
+                        end += 1;
+                    }
+                    write!(out, "\r\x1b[{};1H", actions[at].row + 1)?;
+                    for (i, action) in actions[at..end].iter().enumerate() {
+                        if i > 0 {
+                            write!(out, "\r\n")?;
+                        }
+                        match action.write {
+                            Some(line) => {
+                                put(&mut out, line)?;
+                                self.shadow[action.row] = Some(line.to_string());
+                            }
+                            None => {
+                                // Below the frame: leave the row blank.
+                                write!(out, "\x1b[2K")?;
+                                self.shadow[action.row] = Some(String::new());
+                            }
+                        }
+                    }
+                    at = end;
+                }
+            }
         }
-        self.clear_unpainted = false;
+        self.replay_pending = false;
         write!(out, "\x1b[?2026l")?;
         out.flush()?;
         self.prev = lines.to_vec();
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn shadow(s: &[Option<&str>]) -> Vec<Option<String>> {
-        s.iter().map(|o| o.map(str::to_string)).collect()
-    }
-
-    #[test]
-    fn short_frame_paints_the_blank_screen_rows() {
-        let lines = vec!["a".to_string(), "b".to_string()];
-        let actions = plan(&lines, 3, &shadow(&[None, None, None]), false);
-        assert_eq!(actions.len(), 2);
-        assert_eq!(actions[0].row, 0);
-        assert_eq!(actions[0].write, Some("a"));
-        assert_eq!(actions[1].row, 1);
-        assert_eq!(actions[1].write, Some("b"));
-    }
-
-    #[test]
-    fn unchanged_rows_are_skipped_but_dirty_rows_rewrite() {
-        let lines = vec!["a".to_string(), "b".to_string()];
-        let actions = plan(&lines, 3, &shadow(&[Some("a"), None, None]), false);
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].row, 1);
-    }
-
-    #[test]
-    fn tall_frame_maps_its_tail_onto_the_screen() {
-        let lines: Vec<String> = (0..5).map(|i| format!("row{i}")).collect();
-        let actions = plan(&lines, 3, &shadow(&[None, None, None]), false);
-        assert_eq!(actions.len(), 3);
-        assert_eq!(actions[0].write, Some("row2"));
-        assert_eq!(actions[2].write, Some("row4"));
-    }
-
-    #[test]
-    fn rows_below_a_short_frame_clear_only_when_painted() {
-        let lines = vec!["a".to_string()];
-        // Painted content below the last row: cleared.
-        let actions = plan(&lines, 3, &shadow(&[Some("a"), Some("stale"), None]), false);
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].row, 1);
-        assert_eq!(actions[0].write, None);
-        // Already blank: left alone.
-        assert!(plan(&lines, 3, &shadow(&[Some("a"), Some(""), None]), false).is_empty());
-        // Never painted and not forced: left alone (plan stays conservative;
-        // in practice `clear_slate` marks every row known-blank at launch).
-        assert!(plan(&lines, 3, &shadow(&[Some("a"), None, None]), false).is_empty());
-        // Never painted but forced (after a resize): cleared.
-        let actions = plan(&lines, 3, &shadow(&[Some("a"), None, None]), true);
-        assert_eq!(actions.len(), 2);
-        assert!(actions.iter().all(|a| a.write.is_none()));
-    }
-
-    #[test]
-    fn after_clear_slate_a_short_frame_paints_its_rows_on_the_blank_screen() {
-        let mut screen = Screen::new(10, 3);
-        screen.shadow = vec![Some(String::new()); 3];
-        let lines = vec!["a".to_string()];
-        // Every frame row writes (nothing is unknown), and no other row
-        // needs touching — the slate is known-blank.
-        let actions = plan(&lines, 3, &screen.shadow, false);
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].row, 0);
-        assert_eq!(actions[0].write, Some("a"));
-    }
-
-    #[test]
-    fn scroll_rows_tracks_window_movement_only() {
-        // Both short: no scroll.
-        assert_eq!(scroll_rows(2, 3, 10), 0);
-        // Tall growth overflows one further row.
-        assert_eq!(scroll_rows(20, 23, 10), 3);
-        // Short→tall scrolls the overflow.
-        assert_eq!(scroll_rows(2, 13, 10), 3);
-        // Shrinking never scrolls — the window repaints in place.
-        assert_eq!(scroll_rows(13, 10, 10), 0);
-        assert_eq!(scroll_rows(23, 20, 10), 0);
-        // A reflow can make one frame jump by more rows than the screen
-        // has; the scroll never exceeds the height (shadow holds exactly
-        // one slot per row).
-        assert_eq!(scroll_rows(0, 739, 53), 53);
-        assert_eq!(scroll_rows(0, 686, 10), 10);
     }
 }
 
@@ -338,30 +365,29 @@ mod tests {
 #[derive(Default)]
 struct PaintMailbox {
     frame: Option<Vec<String>>,
-    /// Latest wins here too; the resize clears the screen, so painting the
+    /// Latest wins here too; the resize replays, so painting the
     /// pre-resize frame once at the new size is a one-frame blip at most.
     resize: Option<(u16, u16)>,
     shutdown: bool,
 }
 
 /// The paint thread: owns the `Screen` and its blocking stdout writes so a
-/// slow terminal can never stall the event loop.
+/// slow terminal can never stall the event loop. `anchor` is the launch
+/// cursor row — the frame paints below it, never over what came before.
 pub struct Painter {
     mailbox: std::sync::Arc<(std::sync::Mutex<PaintMailbox>, std::sync::Condvar)>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Painter {
-    pub fn spawn(cols: u16, rows: u16) -> Self {
+    pub fn spawn(cols: u16, rows: u16, anchor: usize) -> Self {
         let mailbox = std::sync::Arc::new((
             std::sync::Mutex::new(PaintMailbox::default()),
             std::sync::Condvar::new(),
         ));
         let shared = mailbox.clone();
         let thread = std::thread::spawn(move || {
-            let mut screen = Screen::new(cols, rows);
-            // Launch starts from a clean slate (see `clear_slate`).
-            let _ = screen.clear_slate();
+            let mut screen = Screen::new(cols, rows, anchor);
             let (lock, wake) = &*shared;
             loop {
                 let (frame, resize, shutdown) = {
@@ -375,9 +401,9 @@ impl Painter {
                     screen.resize(cols, rows);
                 }
                 // A panic in the paint path must cost one garbled frame —
-                // not the session. The screen is marked fully unknown so
-                // the next frame repaints everything over whatever the
-                // panicking write left behind.
+                // not the session. The screen is marked unknown so the next
+                // frame repaints everything over whatever the panicking
+                // write left behind.
                 let painted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if let Some(frame) = frame {
                         let _ = screen.paint(&frame);
@@ -418,5 +444,173 @@ impl Painter {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shadow(s: &[Option<&str>]) -> Vec<Option<String>> {
+        s.iter().map(|o| o.map(str::to_string)).collect()
+    }
+
+    fn lines(n: usize, tag: &str) -> Vec<String> {
+        (0..n).map(|i| format!("{tag}{i}")).collect()
+    }
+
+    #[test]
+    fn a_short_frame_paints_from_the_anchor_down() {
+        // Launch row 20 of a 30-row screen: buffer rows sit at 20, 21, 22;
+        // rows above hold the user's pre-launch content and stay untouched.
+        let ls = lines(3, "row");
+        let actions = plan(&ls, 30, 20, 0, &shadow(&[None; 30]));
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0].row, 20);
+        assert_eq!(actions[0].write, Some("row0"));
+        assert_eq!(actions[2].row, 22);
+    }
+
+    #[test]
+    fn the_frame_never_touches_the_rows_above_the_anchor() {
+        let ls = lines(5, "row");
+        let actions = plan(&ls, 10, 5, 0, &shadow(&[None; 10]));
+        assert!(actions.iter().all(|a| a.row >= 5));
+    }
+
+    #[test]
+    fn unchanged_rows_are_skipped_but_dirty_rows_rewrite() {
+        let ls = lines(2, "row");
+        // Buffer row 0 is at screen row 5 and already matches; row 1 at 6
+        // holds stale content and rewrites.
+        let mut sh = shadow(&[None; 10]);
+        sh[5] = Some("row0".into());
+        sh[6] = Some("stale".into());
+        let actions = plan(&ls, 10, 5, 0, &sh);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].row, 6);
+        assert_eq!(actions[0].write, Some("row1"));
+    }
+
+    #[test]
+    fn scrolled_rows_map_linearly_across_the_screen() {
+        // anchor 5, viewport_top 4: buffer row b sits at screen row b + 1;
+        // the frame's head is above the visible start and not visited.
+        let ls = lines(12, "row");
+        let actions = plan(&ls, 10, 5, 4, &shadow(&[None; 10]));
+        assert_eq!(actions.len(), 9);
+        assert_eq!(actions[0].row, 1);
+        assert_eq!(actions[0].write, Some("row0"));
+        assert_eq!(actions[8].row, 9);
+        assert_eq!(actions[8].write, Some("row8"));
+    }
+
+    #[test]
+    fn rows_below_a_shrunk_frame_clear_only_when_painted() {
+        let ls = lines(1, "row");
+        // The frame's row paints; painted content below the frame end clears.
+        let actions = plan(&ls, 10, 5, 0, &shadow(&[None; 10]).with_row(6, "stale"));
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].row, 5);
+        assert_eq!(actions[0].write, Some("row0"));
+        assert_eq!(actions[1].row, 6);
+        assert_eq!(actions[1].write, None);
+        // Already blank below: left alone.
+        assert!(plan(&ls, 10, 5, 0, &shadow(&[None; 10]).with_row(6, "")).len() == 1);
+    }
+
+    #[test]
+    fn the_viewport_tail_maps_across_the_whole_screen() {
+        // anchor 8, viewport_top 20: buffer rows 12.. sit at screen rows
+        // 0.. — every screen row is a buffer row, the frame's head long
+        // since scrolled away.
+        let ls = lines(30, "row");
+        let actions = plan(&ls, 10, 8, 20, &shadow(&[None; 10]));
+        assert_eq!(actions.len(), 10);
+        assert_eq!(actions[0].row, 0);
+        assert_eq!(actions[0].write, Some("row12"));
+        assert_eq!(actions[9].write, Some("row21"));
+    }
+
+    trait WithRow {
+        fn with_row(self, row: usize, content: &str) -> Self;
+    }
+    impl WithRow for Vec<Option<String>> {
+        fn with_row(mut self, row: usize, content: &str) -> Self {
+            self[row] = Some(content.to_string());
+            self
+        }
+    }
+
+    #[test]
+    fn diff_range_covers_appends_deletions_and_edits() {
+        let prev = lines(5, "a");
+        // Pure append: the range starts at the old tail.
+        assert_eq!(diff_range(&prev, &lines(8, "a")), (5, 7));
+        // Pure deletion: the range ends at the old tail.
+        assert_eq!(diff_range(&prev, &lines(2, "a")), (2, 4));
+        // An edit that replaces one row: the range is that row alone.
+        let mut next = lines(5, "a");
+        next[1] = "edited".into();
+        assert_eq!(diff_range(&prev, &next), (1, 1));
+        // An insertion shifts every row below it.
+        let mut next = lines(5, "a");
+        next.insert(1, "inserted".into());
+        assert_eq!(diff_range(&prev, &next), (1, 5));
+    }
+
+    #[test]
+    fn a_fitting_first_frame_diffs_from_the_anchor() {
+        // First frame, fits below the anchor: plain diff, no scroll.
+        assert!(matches!(
+            route(0, 5, 20, 0, 30, false),
+            Route::Diff { scroll: 0 }
+        ));
+    }
+
+    #[test]
+    fn an_overflowing_first_frame_flows_below_the_cursor() {
+        // First frame of a restored session: print from the anchor and let
+        // the terminal scroll — the pre-launch content above stays put.
+        assert!(matches!(route(0, 100, 20, 0, 30, false), Route::Flow));
+    }
+
+    #[test]
+    fn a_small_append_diffs_without_scrolling_past_the_screen() {
+        // anchor 5, viewport_top 4, three more rows: top 8, scroll 4, and
+        // the changed range [9..12) lands at screen rows 6..9 — in reach.
+        assert_eq!(route(9, 13, 5, 4, 10, false), Route::Diff { scroll: 4 });
+    }
+
+    #[test]
+    fn a_huge_append_flows_instead_of_skipping_rows() {
+        // Appending 700 rows would put the first new row 647 rows above the
+        // new screen top — the diff route would never paint them.
+        assert!(matches!(route(10, 710, 0, 0, 10, false), Route::Flow));
+    }
+
+    #[test]
+    fn a_change_above_the_old_screen_top_replays_only_on_resize() {
+        // A compaction shrink above the viewport patches in place; the
+        // pre-launch content above survives.
+        assert!(matches!(
+            route(2, 4, 0, 20, 10, false),
+            Route::Diff { scroll: 0 }
+        ));
+        // A resize reflowed every position: replay from a cleared screen.
+        assert!(matches!(route(2, 4, 0, 20, 10, true), Route::Replay));
+    }
+
+    #[test]
+    fn the_viewport_never_scrolls_back_for_a_shrinking_frame() {
+        assert_eq!(route(9, 11, 0, 4, 10, false), Route::Diff { scroll: 0 });
+    }
+
+    #[test]
+    fn the_route_is_stable_when_nothing_changed() {
+        // An unchanged frame takes the caller's fast path; route() is only
+        // consulted when the diff range is non-empty, but a same-length
+        // same-tail edit still diffs in place.
+        assert_eq!(route(3, 10, 0, 4, 10, false), Route::Diff { scroll: 0 });
     }
 }

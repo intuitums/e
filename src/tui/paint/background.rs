@@ -1,12 +1,20 @@
-//! Terminal background detection.
+//! Terminal probes.
 //!
-//! `auto` follows the terminal. We prefer an OSC 11 background query — the
-//! terminal's real RGB background — then fall back to the `COLORFGBG` env
-//! report, and finally assume dark. The OSC 11 probe runs where the TUI owns
-//! the terminal reader (after raw mode) with a short timeout, so it can't
-//! block startup or swallow keystrokes; if no clean reply arrives we fall
-//! back. (The libc poll/read here is the audited terminal-poll site —
-//! `guard.sh` permits `unsafe` only in this file and the bash tool.)
+//! Two launch-time queries against the real terminal, both poll/read with a
+//! short timeout where the TUI owns the terminal reader, so neither can
+//! block startup or swallow keystrokes (audit #93):
+//!
+//! - `detect_light`: `auto` follows the terminal theme — OSC 11 background
+//!   color first (the terminal's real RGB), then the `COLORFGBG` env
+//!   report, then dark.
+//! - `query_cursor_row`: the launch anchor for the main-screen renderer —
+//!   e paints below where the user launched it (pi's regular-mode
+//!   behavior), which needs the cursor row. DSR 6n answers it. No reply
+//!   (raw pty, exotic terminal) falls back to the screen's bottom row at
+//!   the caller.
+//!
+//! (The libc poll/read here is the audited terminal-poll site — `guard.sh`
+//! permits `unsafe` only in this file and the bash tool.)
 
 use std::time::{Duration, Instant};
 
@@ -23,6 +31,75 @@ pub fn detect_light() -> Option<bool> {
     colorfgbg()
 }
 
+/// The cursor's screen row (0-based, clamped to `rows - 1`) at call time,
+/// from a DSR 6n reply. None when the terminal doesn't answer within
+/// [`PROBE_TIMEOUT`]. Runs in raw mode before the input loop starts, so the
+/// reply can't land in the key stream.
+pub fn query_cursor_row(rows: u16) -> Option<u16> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(b"\x1b[6n");
+        let _ = std::io::stdout().flush();
+        let row = poll_stdin(parse_dsr_row)?;
+        Some(row.saturating_sub(1).min(rows.saturating_sub(1)))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = rows;
+        None
+    }
+}
+
+/// Poll-read stdin until `done` accepts the buffered bytes or the deadline
+/// passes; blocking flags are restored before returning.
+#[cfg(unix)]
+fn poll_stdin<T>(done: impl Fn(&[u8]) -> Option<T>) -> Option<T> {
+    let fd = libc::STDIN_FILENO;
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return None;
+    }
+    unsafe {
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let mut buf: Vec<u8> = Vec::new();
+    let result = 'probe: {
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                break 'probe None;
+            }
+            let timeout_ms = (deadline - now).as_millis() as libc::c_int;
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN as libc::c_short,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut pfd, 1 as libc::nfds_t, timeout_ms) } <= 0 {
+                break 'probe None;
+            }
+            let mut chunk = [0u8; 256];
+            let r = unsafe { libc::read(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
+            if r <= 0 {
+                break 'probe None;
+            }
+            buf.extend_from_slice(&chunk[..r as usize]);
+            if let Some(found) = done(&buf) {
+                break 'probe Some(found);
+            }
+            if buf.len() > 1024 {
+                break 'probe None;
+            }
+        }
+    };
+    unsafe {
+        libc::fcntl(fd, libc::F_SETFL, flags);
+    }
+    result
+}
+
 /// Query the terminal background color over OSC 11 and return it as RGB.
 /// Returns None if the terminal doesn't answer within [`PROBE_TIMEOUT`] or the
 /// reply isn't a recognizable color.
@@ -33,58 +110,40 @@ fn query_background_rgb() -> Option<(u8, u8, u8)> {
         // OSC 11 ; ?  — ask for the background color, terminated with ST.
         let _ = std::io::stdout().write_all(b"\x1b]11;?\x1b\\");
         let _ = std::io::stdout().flush();
-
-        let fd = libc::STDIN_FILENO;
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags < 0 {
-            return None;
-        }
-        unsafe {
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-
-        let deadline = Instant::now() + PROBE_TIMEOUT;
-        let mut buf: Vec<u8> = Vec::new();
-        let result = 'probe: {
-            loop {
-                let now = Instant::now();
-                if now >= deadline {
-                    break 'probe None;
-                }
-                let timeout_ms = (deadline - now).as_millis() as libc::c_int;
-                let mut pfd = libc::pollfd {
-                    fd,
-                    events: libc::POLLIN as libc::c_short,
-                    revents: 0,
-                };
-                if unsafe { libc::poll(&mut pfd, 1 as libc::nfds_t, timeout_ms) } <= 0 {
-                    break 'probe None;
-                }
-                let mut chunk = [0u8; 256];
-                let r =
-                    unsafe { libc::read(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
-                if r <= 0 {
-                    break 'probe None;
-                }
-                buf.extend_from_slice(&chunk[..r as usize]);
-                // A background query ends with BEL (0x07) or ST (ESC \).
-                if buf.ends_with(b"\x1b\\") || buf.ends_with(b"\x07") {
-                    break 'probe parse_osc11(&buf);
-                }
-                if buf.len() > 1024 {
-                    break 'probe None;
-                }
+        poll_stdin(|buf| {
+            // A background query ends with BEL (0x07) or ST (ESC \).
+            if buf.ends_with(b"\x1b\\") || buf.ends_with(b"\x07") {
+                parse_osc11(buf)
+            } else {
+                None
             }
-        };
-        unsafe {
-            libc::fcntl(fd, libc::F_SETFL, flags);
-        }
-        result
+        })
     }
     #[cfg(not(unix))]
     {
         None
     }
+}
+
+/// Parse a DSR cursor-position reply (`\x1b[{row};{col}R`) out of the
+/// buffered bytes — scanned anywhere in the buffer, so residue from an
+/// earlier probe that never completed can't derail it.
+fn parse_dsr_row(buf: &[u8]) -> Option<u16> {
+    let s = String::from_utf8_lossy(buf);
+    let start = s.find("\x1b[")? + 2;
+    let rest = &s[start..];
+    let semi = rest.find(';')?;
+    if !rest[..semi].chars().all(|c| c.is_ascii_digit()) || rest[..semi].is_empty() {
+        return None;
+    }
+    let end = rest[semi + 1..].find('R')?;
+    if !rest[semi + 1..semi + 1 + end]
+        .chars()
+        .all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    rest[..semi].parse().ok()
 }
 
 /// Parse an OSC 11 background reply (`…]11;[N;]color…`) into RGB.
@@ -180,7 +239,26 @@ pub fn stdout_is_tty() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_colorfgbg;
+    use super::{parse_colorfgbg, parse_dsr_row};
+
+    #[test]
+    fn dsr_reply_parses_the_cursor_row() {
+        // The plain reply a terminal sends for \x1b[6n.
+        assert_eq!(parse_dsr_row(b"\x1b[12;5R"), Some(12));
+        // Bottom row of a 30-row screen; the caller clamps to 0-based.
+        assert_eq!(parse_dsr_row(b"\x1b[30;1R"), Some(30));
+        // Residue from an unanswered earlier probe sits before the reply.
+        assert_eq!(
+            parse_dsr_row(b"\x1b]11;rgb:abab/cdcd/efef\x1b\\\x1b[7;1R"),
+            Some(7)
+        );
+        // Malformed or truncated replies are None, never a wrong row.
+        assert_eq!(parse_dsr_row(b"\x1b[;5R"), None);
+        assert_eq!(parse_dsr_row(b"\x1b[12;"), None);
+        assert_eq!(parse_dsr_row(b"\x1b[abc;1R"), None);
+        assert_eq!(parse_dsr_row(b"no reply"), None);
+        assert_eq!(parse_dsr_row(b""), None);
+    }
 
     #[test]
     fn light_and_dark_reports() {
