@@ -22,7 +22,7 @@ INSTALL:
 START:
  e
  e "why is this function 400 lines long"
- e --help
+ e help
 
 ///
 

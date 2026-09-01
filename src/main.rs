@@ -1,7 +1,7 @@
 //! The `e` binary: CLI subcommands and handoff to the interactive frame.
 //!
 //! Session UI lives in `tui::app` — this file owns flags, one-shot commands
-//! (`auth`, `rpc`, `docs`, `update`), then opens the frame loop.
+//! (`auth`, `rpc`, `docs`, `update`, `help`), then opens the frame loop.
 // Same contract as the library: no panic sites outside test builds.
 #![cfg_attr(
     not(test),
@@ -19,6 +19,49 @@ use e::core::agent::{Agent, AgentOptions, SessionEvent};
 use e::core::cli::{self, Options};
 use e::core::providers::catalog::{self as model, Model};
 use e::tui::app;
+
+/// Print the usage text shared by `e --help` and `e help`, including any
+/// flags and commands that extensions contribute.
+fn print_help(host: &e::core::api::ExtensionHost) {
+    println!(
+        "e — a coding agent for your terminal\n\n\
+usage:\n  e [message]           start a session (optionally with a first prompt;\n                        piped stdin counts as prompt text)\n  \
+e -c, --continue      continue this directory's most recent session\n  \
+e -r, --resume        pick a session to resume\n  \
+e rpc                 JSONL request/response protocol on stdin/stdout\n  \
+e docs [topic]        print a built-in format guide\n  \
+e update              update e to the latest release\n  \
+e auth                show sign-in status\n  \
+e doctor [--no-network]\n                      print paste-safe, local-only runtime diagnostics\n  \
+e providers           list provider support and sign-in state\n  \
+e help                print this help\n  \
+e -v, --version"
+    );
+    println!(
+        "\nrun options:\n  \
+--no-extensions, --ne  run without extensions\n  \
+--no-save, --ns        keep the conversation in memory only\n  \
+--no-tools, --nt       expose and run no tools\n  \
+--model, -m <model>    select a model for this process\n  \
+--effort, --ef <level> select reasoning effort for this process\n  \
+--image, -i <path>     attach an image to the first prompt (repeatable)\n  \
+--json, -j             machine output (doctor, providers)"
+    );
+    let flags = host.flags();
+    let commands = host.commands();
+    if !flags.is_empty() {
+        println!("\nextension flags:");
+        for (token, description) in flags {
+            println!("  e {token:<20} {description}");
+        }
+    }
+    if !commands.is_empty() {
+        println!("\nextension commands:");
+        for (name, description) in commands {
+            println!("  /{name:<17} {description}");
+        }
+    }
+}
 
 fn auth_status_requested(args: &[String]) -> Result<bool, &'static str> {
     if args.first().map(String::as_str) != Some("auth") {
@@ -49,9 +92,6 @@ fn unknown_command_hint(options: &Options) -> Option<String> {
         return None;
     }
     let word = options.positional[0].as_str();
-    if word == "help" {
-        return Some("help is not a command — did you mean `e --help`?".into());
-    }
     if word == "version" {
         return Some("version is not a command — did you mean `e --version`?".into());
     }
@@ -118,43 +158,7 @@ async fn main() -> std::io::Result<()> {
         e::core::api::ExtensionHost::start(jobs_tx.clone()).await
     };
     if cli::has_flag(&args, &["--help", "-h"]) {
-        println!(
-            "e — a coding agent for your terminal\n\n\
-usage:\n  e [message]           start a session (optionally with a first prompt;\n                        piped stdin counts as prompt text)\n  \
-e -c, --continue      continue this directory's most recent session\n  \
-e -r, --resume        pick a session to resume\n  \
-e rpc                 JSONL request/response protocol on stdin/stdout\n  \
-e docs [topic]        print a built-in format guide\n  \
-e update              update e to the latest release\n  \
-e auth                show sign-in status\n  \
-e doctor [--no-network]\n                      print paste-safe, local-only runtime diagnostics\n  \
-e providers           list provider support and sign-in state\n  \
-e -v, --version"
-        );
-        println!(
-            "\nrun options:\n  \
---no-extensions, --ne  run without extensions\n  \
---no-save, --ns        keep the conversation in memory only\n  \
---no-tools, --nt       expose and run no tools\n  \
---model, -m <model>    select a model for this process\n  \
---effort, --ef <level> select reasoning effort for this process\n  \
---image, -i <path>     attach an image to the first prompt (repeatable)\n  \
---json, -j             machine output (doctor, providers)"
-        );
-        let flags = host.flags();
-        let commands = host.commands();
-        if !flags.is_empty() {
-            println!("\nextension flags:");
-            for (token, description) in flags {
-                println!("  e {token:<20} {description}");
-            }
-        }
-        if !commands.is_empty() {
-            println!("\nextension commands:");
-            for (name, description) in commands {
-                println!("  /{name:<17} {description}");
-            }
-        }
+        print_help(&host);
         host.shutdown().await;
         return Ok(());
     }
@@ -253,6 +257,15 @@ e -v, --version"
         usage_error(&host, false, message).await;
     }
 
+    // `e help` is the subcommand form of `e --help`.
+    if args.first().map(String::as_str) == Some("help") {
+        if args.len() != 1 {
+            usage_error(&host, false, "usage: e help".to_string()).await;
+        }
+        print_help(&host);
+        host.shutdown().await;
+        return Ok(());
+    }
     match auth_status_requested(args) {
         Ok(true) => {
             if options.json {
@@ -821,16 +834,17 @@ mod tests {
         .contains("did you mean `e docs`?"));
         assert_eq!(
             super::unknown_command_hint(&super::Options {
-                positional: args(&["help"]),
+                positional: args(&["version"]),
                 ..Default::default()
             })
             .unwrap(),
-            "help is not a command — did you mean `e --help`?"
+            "version is not a command — did you mean `e --version`?"
         );
         // Real subcommands, ordinary words, multi-word prompts, and
         // `--`-escaped text all stay prompts.
         for positional in [
             vec!["rpc".to_string()],
+            vec!["help".to_string()],
             vec!["hello".to_string()],
             vec!["docss".to_string(), "world".to_string()],
         ] {
