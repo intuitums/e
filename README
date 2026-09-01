@@ -5,7 +5,7 @@ PROJECT: 𝑒
 
 CONTACT: SUPPORT@INTUITUM.SH
 LOCATION: USA
-STATUS: ONLINE
+STATUS: DEVELOPMENT
 
 ///
 
@@ -13,7 +13,6 @@ OVERVIEW:
  - Small, fast coding agent for the terminal.
  - One Rust binary with tools, commands, themes, prompts, and skills.
  - Executable JSONL extensions add tools, commands, hooks, and startup behavior.
- - Active pre-1.0 software with versioned persisted formats and extensions.
 
 ///
 
