@@ -22,9 +22,7 @@ INSTALL:
 START:
  e
  e "why is this function 400 lines long"
- e "it worked yesterday"
- e -c
- e doctor --no-network
+ e --help
 
 ///
 
