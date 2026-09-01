@@ -36,7 +36,7 @@ jobs:
             add_label area/core 1d76db 'Agent, providers, tools, storage, and extensions' || true
           echo "$files" | grep -q '^src/tui/' && \
             add_label area/tui 5319e7 'Terminal interface and rendering' || true
-          echo "$files" | grep -Eq '^(docs/|README$|SECURITY.md|CONTRIBUTING.md)' && \
+          echo "$files" | grep -Eq '^(docs/|README.md$|SECURITY.md|CONTRIBUTING.md)' && \
             add_label documentation 0075ca 'Documentation changes' || true
           echo "$files" | grep -Eq '^(\.github/|scripts/|x$|rust-toolchain.toml)' && \
             add_label area/infra 6f42c1 'Build, CI, release, or repository automation' || true
