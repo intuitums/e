@@ -5,6 +5,8 @@ out_path, cols, rows, wait_before, wait_after, *cmd = sys.argv[1:]
 cols, rows = int(cols), int(rows)
 wait_before, wait_after = float(wait_before), float(wait_after)
 prompt = os.environ.get("CAP_PROMPT", "")
+exit_keys = os.environ.get("CAP_EXIT", "")
+exit_wait = float(os.environ.get("CAP_EXIT_WAIT", "1"))
 
 pid, fd = pty.fork()
 if pid == 0:
@@ -30,10 +32,43 @@ while time.time() < end:
         os.write(fd, prompt.encode() + b"\r")
         typed = True
 
+# Optional graceful exit lets tests pin terminal cleanup bytes instead of
+# ending every capture with SIGTERM.
+if exit_keys:
+    try:
+        os.write(fd, exit_keys.encode())
+    except OSError:
+        pass
+    deadline = time.time() + exit_wait
+    while time.time() < deadline:
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if not r:
+            continue
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf += chunk
+
 open(out_path, "wb").write(bytes(buf))
-try:
-    os.kill(pid, signal.SIGTERM)
-except ProcessLookupError:
-    pass
-os.waitpid(pid, os.WNOHANG)
+waited, _ = os.waitpid(pid, os.WNOHANG)
+if not waited:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.time() + 1
+    while time.time() < deadline:
+        waited, _ = os.waitpid(pid, os.WNOHANG)
+        if waited:
+            break
+        time.sleep(0.05)
+if not waited:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    os.waitpid(pid, 0)
 print(f"captured {len(buf)} bytes -> {out_path}")

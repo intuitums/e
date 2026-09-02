@@ -7,6 +7,8 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Long streamed replies stay responsive: deltas append without cloning the
+  accumulated response, and live Markdown parsing follows a fixed work budget.
 - Turn and paint workers no longer fail silently. A supervised turn always
   emits one `TurnEnd`, painter write failures enter the transcript, and the
   activity row distinguishes provider waits, streamed output, tool work, and
