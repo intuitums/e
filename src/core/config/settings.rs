@@ -21,6 +21,16 @@ pub fn get_string(key: &str) -> Option<String> {
         .and_then(|v| v.as_str().map(String::from))
 }
 
+fn show_thinking_value(value: Option<&str>) -> bool {
+    value == Some("on")
+}
+
+/// Whether model-provided thinking should appear in the transcript. Keep the
+/// runtime default here in sync with the `/settings` declaration below.
+pub fn show_thinking() -> bool {
+    show_thinking_value(get_string("show_thinking").as_deref())
+}
+
 /// A number key: absent means "no value set" — callers apply their own
 /// built-in default.
 pub fn get_u64(key: &str) -> Option<u64> {
@@ -202,4 +212,23 @@ pub fn auto_update() -> bool {
 /// not bury the draft.
 pub fn paste_placeholder() -> u64 {
     get_u64("paste_placeholder").unwrap_or(1000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_is_hidden_until_explicitly_enabled() {
+        assert!(!show_thinking_value(None));
+        assert!(!show_thinking_value(Some("off")));
+        assert!(!show_thinking_value(Some("invalid")));
+        assert!(show_thinking_value(Some("on")));
+
+        let setting = all(Vec::new())
+            .into_iter()
+            .find(|setting| setting.key == "show_thinking")
+            .unwrap();
+        assert_eq!(setting.default, "off");
+    }
 }
