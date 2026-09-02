@@ -1235,10 +1235,22 @@ impl App {
 
         if let Some((path, prompt)) = leading_image_prompt(&trimmed) {
             if !self.agent.model.image_input {
-                self.notice(format!(
-                    "{} does not accept image input",
-                    model::slug(&self.agent.model)
-                ));
+                // The image cannot ride along, but the question after the
+                // path is still the user's prompt — discarding it and
+                // stopping the turn would swallow the typed message along
+                // with the attachment.
+                if prompt.is_empty() {
+                    self.notice(format!(
+                        "{} does not accept image input",
+                        model::slug(&self.agent.model)
+                    ));
+                } else {
+                    self.notice(format!(
+                        "{} does not accept image input — sending the text without the screenshot",
+                        model::slug(&self.agent.model)
+                    ));
+                    self.submit_direct(prompt.to_string());
+                }
                 return;
             }
             match crate::core::providers::ImageInput::from_path(std::path::Path::new(path)) {
@@ -2108,6 +2120,10 @@ fn key_of(event: &KeyEvent, keymap: &crate::core::config::keybindings::Keymap) -
         (KeyCode::Char('b'), true, _) => Key::Left,
         (KeyCode::Char('f'), true, _) => Key::Right,
         (KeyCode::Char('j'), true, _) => Key::Newline,
+        // ctrl+d with text deletes forward, completing the emacs chord
+        // family (a/e/k/u/w/b/f). On an empty composer the app-level
+        // handler above has already taken it as quit, like a shell EOF.
+        (KeyCode::Char('d'), true, _) => Key::Delete,
         (KeyCode::Char(c), false, false) => Key::Char(c),
         _ => return None,
     })
@@ -2568,6 +2584,14 @@ pub async fn run(
                                     && app
                                         .menu
                                         .as_ref()
+                                        .is_some_and(|menu| menu.has_tabs()))
+                                // Shift+tab belongs to the picker while it
+                                // is open: it steps the tabs backward. The
+                                // effort shortcut stays a bare-composer key.
+                                || (k.code == KeyCode::BackTab
+                                    && app
+                                        .menu
+                                        .as_ref()
                                         .is_some_and(|menu| menu.has_tabs())))
                             && !ctrl
                         {
@@ -2585,6 +2609,11 @@ pub async fn run(
                                 KeyCode::Tab => {
                                     if let Some(menu) = app.menu.as_mut() {
                                         menu.cycle_tab();
+                                    }
+                                }
+                                KeyCode::BackTab => {
+                                    if let Some(menu) = app.menu.as_mut() {
+                                        menu.cycle_tab_back();
                                     }
                                 }
                                 KeyCode::Enter => { app.select_menu(); }
@@ -2622,14 +2651,21 @@ pub async fn run(
                             app.cycle_model(!backward);
                         } else if ctrl && k.code == KeyCode::Char('d') && app.editor.is_empty() {
                             break;
-                        } else if k.code == KeyCode::BackTab
-                            || (k.code == KeyCode::Tab
-                                && !ctrl
-                                && k.modifiers.contains(KeyModifiers::SHIFT))
+                        } else if app.menu.is_none()
+                            && app.settings.is_none()
+                            && app.auth.is_none()
+                            && app.trust.is_none()
+                            && (k.code == KeyCode::BackTab
+                                || (k.code == KeyCode::Tab
+                                    && !ctrl
+                                    && k.modifiers.contains(KeyModifiers::SHIFT)))
                         {
-                            // Shift+tab cycles the model's declared levels.
-                            // Normal operation stays out of the transcript;
-                            // the persistent statusline is the confirmation.
+                            // Shift+tab cycles the model's declared levels —
+                            // a bare-composer shortcut. With a picker or
+                            // panel open the keys belong to that surface;
+                            // the effort setting must not mutate unseen
+                            // beneath it. The statusline confirms the
+                            // change; nothing lands in the transcript.
                             match app.agent.cycle_effort() {
                                 Ok(Some(_)) => app.refresh_status_cache(),
                                 Ok(None) => {}
@@ -3076,6 +3112,10 @@ mod tests {
         assert!(matches!(key_of(&ctrl_w, &keymap), Some(Key::KillWord)));
         let plain_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
         assert!(matches!(key_of(&plain_x, &keymap), Some(Key::Char('x'))));
+        // On a non-empty composer ctrl+d is forward delete (the empty
+        // composer's quit is the app-level handler's job, before key_of).
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(matches!(key_of(&ctrl_d, &keymap), Some(Key::Delete)));
     }
 
     #[test]
@@ -3255,6 +3295,74 @@ mod tests {
         assert!(is_literal_slash_prompt(&input));
         assert!(is_literal_slash_prompt("/ explain this"));
         assert!(!is_literal_slash_prompt("/modles please"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A screenshot paste onto a model that cannot take images must not
+    /// swallow the user's typed question: the text survives as a normal
+    /// prompt, with a notice saying the image was dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn image_paste_text_survives_a_model_without_image_input() {
+        let dir = std::env::temp_dir().join(format!("e-shot-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.png");
+        std::fs::write(&path, b"png").unwrap();
+
+        let mut app = session_app();
+        // A dead port: the turn task must never reach a server.
+        app.agent.model.base_url = "http://127.0.0.1:1".into();
+        assert!(!app.agent.model.image_input);
+
+        app.submit(format!("{} what is wrong here?", path.display()));
+
+        let texts: Vec<&str> = app
+            .transcript
+            .blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("does not accept image input")),
+            "the drop must be announced: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("what is wrong here?")),
+            "the question must still reach the model: {texts:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A bare image path with no question has nothing left to submit after
+    /// the image is dropped, so only the notice appears.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bare_image_path_on_a_text_only_model_only_notices() {
+        let dir = std::env::temp_dir().join(format!("e-shot-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.png");
+        std::fs::write(&path, b"png").unwrap();
+
+        let mut app = session_app();
+        app.agent.model.base_url = "http://127.0.0.1:1".into();
+
+        app.submit(path.display().to_string());
+
+        let texts: Vec<&str> = app
+            .transcript
+            .blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect();
+        assert_eq!(
+            texts.len(),
+            1,
+            "only the notice, no phantom prompt: {texts:?}"
+        );
+        assert!(
+            texts[0].contains("does not accept image input"),
+            "{texts:?}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
