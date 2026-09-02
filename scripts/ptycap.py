@@ -56,22 +56,38 @@ if exit_keys:
         buf += chunk
 
 open(out_path, "wb").write(bytes(buf))
-waited, _ = os.waitpid(pid, os.WNOHANG)
-if not waited:
+try:
+    os.close(fd)
+except OSError:
+    pass
+
+
+def reap():
     try:
-        os.kill(pid, signal.SIGTERM)
+        waited, _ = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return True
+    return bool(waited)
+
+
+def stop_group(sig):
+    try:
+        os.killpg(pid, sig)
     except ProcessLookupError:
         pass
-    deadline = time.time() + 1
-    while time.time() < deadline:
-        waited, _ = os.waitpid(pid, os.WNOHANG)
-        if waited:
+
+
+waited = reap()
+for sig in (signal.SIGTERM, signal.SIGKILL):
+    if waited:
+        break
+    stop_group(sig)
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        if reap():
+            waited = True
             break
         time.sleep(0.05)
 if not waited:
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    os.waitpid(pid, 0)
+    raise RuntimeError("pty child survived SIGKILL")
 print(f"captured {len(buf)} bytes -> {out_path}")
