@@ -2608,8 +2608,6 @@ pub async fn run(
                             let backward = k.code == KeyCode::Char('P')
                                 || k.modifiers.contains(KeyModifiers::SHIFT);
                             app.cycle_model(!backward);
-                        } else if ctrl && k.code == KeyCode::Char('d') && app.editor.is_empty() {
-                            break;
                         } else if k.code == KeyCode::BackTab
                             || (k.code == KeyCode::Tab
                                 && !ctrl
