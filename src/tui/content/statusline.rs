@@ -12,7 +12,12 @@ pub const RECOVERED_VISIBLE_MS: u64 = 1500;
 /// Which transient progress surface owns the current turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnPhase {
+    /// A request is in flight but has not produced a stream event yet.
+    Waiting,
+    /// The provider is streaming hidden or visible reasoning.
     Thinking,
+    /// The provider is assembling a tool call before execution.
+    ToolCall,
     /// Backing off after a retryable failure before another attempt.
     Retrying,
     Tool,
@@ -83,7 +88,7 @@ impl Turn {
         Turn {
             input: 0,
             output: 0,
-            phase: TurnPhase::Thinking,
+            phase: TurnPhase::Waiting,
             retry: None,
             recovered: None,
         }
@@ -111,16 +116,13 @@ impl Turn {
         }
     }
 
-    /// The `Thinking (Ns) (↑… ↓…)` activity label. The clock keeps ticking
-    /// through tool and assistant-text phases alike, so the row never
-    /// vanishes mid-turn while a tree grows or a reply streams.
-    fn thinking_label(&self, elapsed_secs: u64) -> Option<String> {
-        if self.recovered.is_some()
-            || !matches!(
-                self.phase,
-                TurnPhase::Thinking | TurnPhase::Tool | TurnPhase::AssistantText
-            )
-        {
+    /// The `Thinking (Ns) (↑… ↓…)` activity label, the reference's one
+    /// word for a turn in progress. The phase still steers the dot and the
+    /// supervisor, but the row reads the same through provider waits,
+    /// reasoning, tool calls, and reply streaming: the clock and token tail
+    /// carry the progress, so the row never vanishes or flickers mid-turn.
+    fn activity_label(&self, elapsed_secs: u64) -> Option<String> {
+        if self.recovered.is_some() || self.phase == TurnPhase::Retrying {
             return None;
         }
         let tokens = self.tokens();
@@ -141,9 +143,11 @@ impl Turn {
             return Some(format!("Recovered · attempt {}/{}", r.attempt, r.limit));
         }
         match self.phase {
-            TurnPhase::Thinking | TurnPhase::Tool | TurnPhase::AssistantText => {
-                self.thinking_label(elapsed_secs)
-            }
+            TurnPhase::Waiting
+            | TurnPhase::Thinking
+            | TurnPhase::ToolCall
+            | TurnPhase::Tool
+            | TurnPhase::AssistantText => self.activity_label(elapsed_secs),
             TurnPhase::Retrying => {
                 let r = self.retry.as_ref()?;
                 let waited = r.since.elapsed().as_secs();
@@ -279,20 +283,22 @@ mod tests {
         let mut turn = Turn::new();
         assert_eq!(turn.label(0).as_deref(), Some("Thinking (0s)"));
 
+        // One word for every in-progress phase: the reference keeps the
+        // Thinking clock ticking below the transient tool row …
         turn.phase = TurnPhase::Tool;
-        // The reference keeps the Thinking clock ticking below the
-        // transient tool row.
         assert_eq!(turn.label(1).as_deref(), Some("Thinking (1s)"));
 
+        // … and through reply streaming, so the row never vanishes mid-turn.
         turn.input = 1_000;
         turn.output = 20;
-        // The row persists through reply streaming too — it never vanishes
-        // mid-turn.
         turn.phase = TurnPhase::AssistantText;
         assert_eq!(turn.label(2).as_deref(), Some("Thinking (2s) (↑1k ↓20)"));
 
         turn.phase = TurnPhase::Thinking;
         assert_eq!(turn.label(3).as_deref(), Some("Thinking (3s) (↑1k ↓20)"));
+
+        turn.phase = TurnPhase::ToolCall;
+        assert_eq!(turn.label(4).as_deref(), Some("Thinking (4s) (↑1k ↓20)"));
     }
 
     #[test]

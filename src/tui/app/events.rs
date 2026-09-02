@@ -11,9 +11,7 @@ impl App {
             SessionEvent::TurnStart => {
                 self.active = Some(ActiveTurn {
                     block: None,
-                    text: String::new(),
                     thinking_block: None,
-                    thinking: String::new(),
                     turn: Turn::new(),
                     started: Instant::now(),
                     error: None,
@@ -26,13 +24,13 @@ impl App {
             SessionEvent::Steered(text) => {
                 // A mid-turn message: show it as a user turn where it landed.
                 self.transcript.push(Block::new(Kind::User, text));
+                if let Some(s) = &mut self.active {
+                    s.turn.phase = TurnPhase::Waiting;
+                }
                 // The next assistant text opens a fresh block; the burst
                 // that was live collapses where it sat.
                 self.end_thinking_burst();
-                if let Some(s) = &mut self.active {
-                    s.block = None;
-                    s.text.clear();
-                }
+                self.end_assistant_burst();
             }
             SessionEvent::TextDelta(delta) => {
                 // Reply text starting ends the live thinking burst — the
@@ -44,13 +42,9 @@ impl App {
                     // Model output is untrusted: strip control sequences
                     // before it can reach the paint stream. (The raw text
                     // still goes to the model's own history in core.)
-                    s.text
-                        .push_str(&crate::core::tools::sanitize_display(&delta));
                     let idx = open_block(&mut self.transcript, &mut s.block, Kind::Assistant);
-                    let text = s.text.clone();
-                    if let Some(b) = self.transcript.blocks.get_mut(idx) {
-                        b.text = text;
-                        b.touch();
+                    if let Some(block) = self.transcript.blocks.get_mut(idx) {
+                        block.append_streaming(&delta);
                     }
                 }
             }
@@ -61,35 +55,30 @@ impl App {
             // assistant text.
             SessionEvent::ReasoningDelta(delta) => {
                 if let Some(s) = &mut self.active {
+                    s.turn.phase = TurnPhase::Thinking;
                     if self.show_thinking {
-                        s.thinking
-                            .push_str(&crate::core::tools::sanitize_display(&delta));
                         let idx =
                             open_block(&mut self.transcript, &mut s.thinking_block, Kind::Thinking);
-                        let text = s.thinking.clone();
-                        if let Some(b) = self.transcript.blocks.get_mut(idx) {
-                            b.text = text;
-                            b.touch();
+                        if let Some(block) = self.transcript.blocks.get_mut(idx) {
+                            block.append_streaming(&delta);
                         }
                     }
                 }
             }
             SessionEvent::ToolCallAssembly { bytes: _ } => {
-                // The model is streaming tool-call arguments. No phase of
-                // its own — the footer stays on Thinking (the model is
-                // still generating), and the tool row appears in the tree
-                // when the call actually starts. Argument bytes are real
-                // output but are never estimated into the token display:
-                // usage frames own the numbers.
+                // The model is streaming tool-call arguments. The tool row
+                // appears only when the complete call starts executing.
+                if let Some(s) = &mut self.active {
+                    s.turn.phase = TurnPhase::ToolCall;
+                }
             }
             SessionEvent::ToolBatchStart { calls } => {
                 // The pre-batch reasoning burst ends where it sits; the tree
                 // then continues if the agent has not spoken since the last
                 // batch — one tree per working stretch, not one per batch.
                 self.end_thinking_burst();
+                self.end_assistant_burst();
                 if let Some(s) = &mut self.active {
-                    s.block = None;
-                    s.text.clear();
                     s.turn.phase = TurnPhase::Tool;
                     s.pending_tools += calls.len();
                     let children = calls
@@ -158,7 +147,7 @@ impl App {
                     }
                     s.pending_tools = s.pending_tools.saturating_sub(1);
                     s.turn.phase = if s.pending_tools == 0 {
-                        TurnPhase::Thinking
+                        TurnPhase::Waiting
                     } else {
                         TurnPhase::Tool
                     };
@@ -216,7 +205,7 @@ impl App {
                 cause,
                 reason,
             } => {
-                // Replaces the Thinking row in place — a live status, not a
+                // Replaces the activity row in place — a live status, not a
                 // scrollback notice: it's transient by nature and would
                 // otherwise leave one permanent line per attempt behind.
                 if let Some(s) = &mut self.active {
@@ -237,7 +226,7 @@ impl App {
             }
             SessionEvent::Recovered { attempt, limit } => {
                 if let Some(s) = &mut self.active {
-                    s.turn.phase = TurnPhase::Thinking;
+                    s.turn.phase = TurnPhase::Waiting;
                     s.turn.retry = None;
                     s.turn.recovered = Some(RecoveredStatus {
                         attempt,
@@ -303,6 +292,7 @@ impl App {
                 // steer) ended where it happened; this catches the one that
                 // ran to the turn's end.
                 self.end_thinking_burst();
+                self.end_assistant_burst();
                 let Some(s) = self.active.take() else { return };
                 // The reference grammar: a completed turn ends with a dim
                 // duration-and-tokens row; a cancelled one says so instead —
@@ -391,8 +381,25 @@ fn open_block(transcript: &mut Transcript, index: &mut Option<usize>, kind: Kind
 /// in particular when `show_thinking` is off, which never opens one.
 impl App {
     pub(super) fn end_thinking_burst(&mut self) {
-        let Some(s) = &mut self.active else { return };
-        s.thinking_block = None;
-        s.thinking.clear();
+        let Some(index) = self
+            .active
+            .as_mut()
+            .and_then(|turn| turn.thinking_block.take())
+        else {
+            return;
+        };
+        if let Some(block) = self.transcript.blocks.get_mut(index) {
+            block.finish_streaming();
+        }
+    }
+
+    /// Seal the current reply segment so its final delta renders immediately.
+    fn end_assistant_burst(&mut self) {
+        let Some(index) = self.active.as_mut().and_then(|turn| turn.block.take()) else {
+            return;
+        };
+        if let Some(block) = self.transcript.blocks.get_mut(index) {
+            block.finish_streaming();
+        }
     }
 }

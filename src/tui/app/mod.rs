@@ -38,13 +38,11 @@ mod menus;
 struct ActiveTurn {
     /// The current assistant text block, if one is streaming.
     block: Option<usize>,
-    text: String,
     /// The live thinking block for the current burst, if reasoning has
     /// streamed. Ending a burst detaches this so the next reasoning opens a
     /// fresh block; the finished thought stays expanded in place — this index
     /// is only the open segment.
     thinking_block: Option<usize>,
-    thinking: String,
     turn: Turn,
     started: Instant,
     error: Option<String>,
@@ -284,6 +282,11 @@ struct App {
     update_installed: Option<String>,
     /// Exit the loop and exec the (updated) binary with -c.
     relaunch: bool,
+    /// The latest frame has waited on the paint thread long enough to make
+    /// terminal output, rather than provider work, the current bottleneck.
+    rendering_delayed: bool,
+    /// Dedupe one paint-failure episode while retries keep posting frames.
+    last_paint_failure: Option<String>,
     /// OSC-11 background detection, probed once at startup before the
     /// event stream owns stdin. Re-probing mid-session would block the
     /// loop and swallow keystrokes, so a changed terminal background
@@ -473,29 +476,36 @@ impl App {
             }
         }
         if let Some(s) = &self.active {
-            if let Some(label) = s.turn.label(s.started.elapsed().as_secs()) {
+            if self.rendering_delayed {
+                lines.push(String::new());
+                let dot = if blink_on { "•" } else { " " };
+                lines.push(
+                    self.theme
+                        .fg("warning", &format!("{dot} Rendering delayed")),
+                );
+            } else if let Some(label) = s.turn.label(s.started.elapsed().as_secs()) {
                 lines.push(String::new());
                 if s.turn.recovered.is_some() {
                     // A brief, non-blinking confirmation — not an ongoing
                     // wait, so no dot animation.
                     lines.push(self.theme.fg("success", &format!("✓ {label}")));
                 } else if s.turn.phase == TurnPhase::Retrying {
-                    // Same blinking dot as Thinking — still an in-progress
-                    // wait — toned as a warning so a struggling provider
+                    // Keep the activity row's blinking dot, toned as a
+                    // warning so a struggling provider
                     // reads distinctly from ordinary thinking.
                     let dot = if blink_on { "•" } else { " " };
                     lines.push(self.theme.fg("warning", &format!("{dot} {label}")));
                 } else if matches!(
                     s.turn.phase,
-                    TurnPhase::Thinking | TurnPhase::Tool | TurnPhase::AssistantText
+                    TurnPhase::Waiting
+                        | TurnPhase::Thinking
+                        | TurnPhase::ToolCall
+                        | TurnPhase::Tool
+                        | TurnPhase::AssistantText
                 ) {
                     // The activity dot runs on the same column as the user
-                    // rail — flush left, no indent. The dot keeps its accent
-                    // presence-blink (shows and hides, no half-state); the
-                    // label — verb, elapsed, and token tail — reads in one
-                    // dim tone beside it. Once the reply text is streaming,
-                    // the answer itself carries the turn: the dot drops and
-                    // the label sits flush-left where the dot was.
+                    // rail. Once reply text is visible, the answer itself
+                    // carries the turn and the label sits where the dot was.
                     if s.turn.phase == TurnPhase::AssistantText {
                         lines.push(self.theme.fg("dim", &label));
                     } else {
@@ -1225,10 +1235,22 @@ impl App {
 
         if let Some((path, prompt)) = leading_image_prompt(&trimmed) {
             if !self.agent.model.image_input {
-                self.notice(format!(
-                    "{} does not accept image input",
-                    model::slug(&self.agent.model)
-                ));
+                // The image cannot ride along, but the question after the
+                // path is still the user's prompt — discarding it and
+                // stopping the turn would swallow the typed message along
+                // with the attachment.
+                if prompt.is_empty() {
+                    self.notice(format!(
+                        "{} does not accept image input",
+                        model::slug(&self.agent.model)
+                    ));
+                } else {
+                    self.notice(format!(
+                        "{} does not accept image input — sending the text without the screenshot",
+                        model::slug(&self.agent.model)
+                    ));
+                    self.submit_direct(prompt.to_string());
+                }
                 return;
             }
             match crate::core::providers::ImageInput::from_path(std::path::Path::new(path)) {
@@ -2098,6 +2120,10 @@ fn key_of(event: &KeyEvent, keymap: &crate::core::config::keybindings::Keymap) -
         (KeyCode::Char('b'), true, _) => Key::Left,
         (KeyCode::Char('f'), true, _) => Key::Right,
         (KeyCode::Char('j'), true, _) => Key::Newline,
+        // ctrl+d with text deletes forward, completing the emacs chord
+        // family (a/e/k/u/w/b/f). On an empty composer the app-level
+        // handler above has already taken it as quit, like a shell EOF.
+        (KeyCode::Char('d'), true, _) => Key::Delete,
         (KeyCode::Char(c), false, false) => Key::Char(c),
         _ => return None,
     })
@@ -2218,6 +2244,8 @@ pub async fn run(
         session_epoch: 0,
         update_installed: None,
         relaunch: false,
+        rendering_delayed: false,
+        last_paint_failure: None,
         light_background: detected,
         signed_in: false,
         status_effort: None,
@@ -2556,6 +2584,14 @@ pub async fn run(
                                     && app
                                         .menu
                                         .as_ref()
+                                        .is_some_and(|menu| menu.has_tabs()))
+                                // Shift+tab belongs to the picker while it
+                                // is open: it steps the tabs backward. The
+                                // effort shortcut stays a bare-composer key.
+                                || (k.code == KeyCode::BackTab
+                                    && app
+                                        .menu
+                                        .as_ref()
                                         .is_some_and(|menu| menu.has_tabs())))
                             && !ctrl
                         {
@@ -2573,6 +2609,11 @@ pub async fn run(
                                 KeyCode::Tab => {
                                     if let Some(menu) = app.menu.as_mut() {
                                         menu.cycle_tab();
+                                    }
+                                }
+                                KeyCode::BackTab => {
+                                    if let Some(menu) = app.menu.as_mut() {
+                                        menu.cycle_tab_back();
                                     }
                                 }
                                 KeyCode::Enter => { app.select_menu(); }
@@ -2608,14 +2649,21 @@ pub async fn run(
                             let backward = k.code == KeyCode::Char('P')
                                 || k.modifiers.contains(KeyModifiers::SHIFT);
                             app.cycle_model(!backward);
-                        } else if k.code == KeyCode::BackTab
-                            || (k.code == KeyCode::Tab
-                                && !ctrl
-                                && k.modifiers.contains(KeyModifiers::SHIFT))
+                        } else if app.menu.is_none()
+                            && app.settings.is_none()
+                            && app.auth.is_none()
+                            && app.trust.is_none()
+                            && (k.code == KeyCode::BackTab
+                                || (k.code == KeyCode::Tab
+                                    && !ctrl
+                                    && k.modifiers.contains(KeyModifiers::SHIFT)))
                         {
-                            // Shift+tab cycles the model's declared levels.
-                            // Normal operation stays out of the transcript;
-                            // the persistent statusline is the confirmation.
+                            // Shift+tab cycles the model's declared levels —
+                            // a bare-composer shortcut. With a picker or
+                            // panel open the keys belong to that surface;
+                            // the effort setting must not mutate unseen
+                            // beneath it. The statusline confirms the
+                            // change; nothing lands in the transcript.
                             match app.agent.cycle_effort() {
                                 Ok(Some(_)) => app.refresh_status_cache(),
                                 Ok(None) => {}
@@ -2866,6 +2914,17 @@ pub async fn run(
                 }
             }
         }
+        let paint_status = painter.status();
+        app.rendering_delayed = paint_status.delayed(Duration::from_millis(500));
+        match paint_status.failure.as_ref().map(|(_, error)| error) {
+            Some(error) if app.last_paint_failure.as_ref() != Some(error) => {
+                app.notice(format!("render failed: {error}"));
+                app.last_paint_failure = Some(error.clone());
+            }
+            None => app.last_paint_failure = None,
+            Some(_) => {}
+        }
+
         let now = tokio::time::Instant::now();
         if now >= next_paint || app.should_quit {
             let frame = if app.viewer.is_some() {
@@ -3051,6 +3110,10 @@ mod tests {
         assert!(matches!(key_of(&ctrl_w, &keymap), Some(Key::KillWord)));
         let plain_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
         assert!(matches!(key_of(&plain_x, &keymap), Some(Key::Char('x'))));
+        // On a non-empty composer ctrl+d is forward delete (the empty
+        // composer's quit is the app-level handler's job, before key_of).
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(matches!(key_of(&ctrl_d, &keymap), Some(Key::Delete)));
     }
 
     #[test]
@@ -3233,6 +3296,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A screenshot paste onto a model that cannot take images must not
+    /// swallow the user's typed question: the text survives as a normal
+    /// prompt, with a notice saying the image was dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn image_paste_text_survives_a_model_without_image_input() {
+        let dir = std::env::temp_dir().join(format!("e-shot-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.png");
+        std::fs::write(&path, b"png").unwrap();
+
+        let mut app = session_app();
+        // A dead port: the turn task must never reach a server.
+        app.agent.model.base_url = "http://127.0.0.1:1".into();
+        assert!(!app.agent.model.image_input);
+
+        app.submit(format!("{} what is wrong here?", path.display()));
+
+        let texts: Vec<&str> = app
+            .transcript
+            .blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("does not accept image input")),
+            "the drop must be announced: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("what is wrong here?")),
+            "the question must still reach the model: {texts:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A bare image path with no question has nothing left to submit after
+    /// the image is dropped, so only the notice appears.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bare_image_path_on_a_text_only_model_only_notices() {
+        let dir = std::env::temp_dir().join(format!("e-shot-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.png");
+        std::fs::write(&path, b"png").unwrap();
+
+        let mut app = session_app();
+        app.agent.model.base_url = "http://127.0.0.1:1".into();
+
+        app.submit(path.display().to_string());
+
+        let texts: Vec<&str> = app
+            .transcript
+            .blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect();
+        assert_eq!(
+            texts.len(),
+            1,
+            "only the notice, no phantom prompt: {texts:?}"
+        );
+        assert!(
+            texts[0].contains("does not accept image input"),
+            "{texts:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn active_login_guard_cancels_on_drop() {
         let cancellation = crate::core::auth::login::LoginCancellation::default();
@@ -3312,6 +3443,8 @@ mod tests {
             session_epoch: 0,
             update_installed: None,
             relaunch: false,
+            rendering_delayed: false,
+            last_paint_failure: None,
             light_background: false,
             signed_in: false,
             status_effort: None,
@@ -3490,6 +3623,23 @@ mod tests {
 
         assert!(app.queue_review.is_none());
         assert!(app.editor.is_empty());
+    }
+
+    #[test]
+    fn streamed_deltas_append_to_the_active_transcript_block() {
+        let mut app = session_app();
+        app.on_session_event(SessionEvent::TurnStart);
+        app.on_session_event(SessionEvent::TextDelta("first ".into()));
+        app.on_session_event(SessionEvent::TextDelta("second".into()));
+
+        let replies: Vec<_> = app
+            .transcript
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Assistant)
+            .collect();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].text, "first second");
     }
 
     fn thinking_flags(app: &App) -> Vec<(String, bool)> {

@@ -220,6 +220,28 @@ async fn sleep_cancellable(delay: Duration, cancel: &AtomicBool) -> bool {
     }
 }
 
+/// Await one turn worker and own its terminal event. Tokio reports panics and
+/// cancellation through the join result, so neither can leave the UI running.
+async fn supervise_turn(
+    worker: tokio::task::JoinHandle<bool>,
+    events: mpsc::Sender<SessionEvent>,
+) -> bool {
+    let aborted = match worker.await {
+        Ok(aborted) => aborted,
+        Err(error) => {
+            let failure = if error.is_panic() {
+                format!("turn worker panicked: {error}")
+            } else {
+                format!("turn worker stopped unexpectedly: {error}")
+            };
+            let _ = events.send(SessionEvent::Error(failure)).await;
+            false
+        }
+    };
+    let _ = events.send(SessionEvent::TurnEnd { aborted }).await;
+    aborted
+}
+
 /// Presentation contract for one call in a provider-issued tool batch.
 #[derive(Clone, Debug)]
 pub struct ToolCallPresentation {
@@ -371,6 +393,9 @@ pub struct Agent {
     pending: Arc<Mutex<PendingQueue>>,
     cancel: Arc<AtomicBool>,
     running: bool,
+    /// The supervisor owns the worker's terminal event. Keeping its handle
+    /// prevents the turn from becoming unobserved background work.
+    turn_task: Option<tokio::task::JoinHandle<()>>,
     /// The session log; every committed message is appended.
     session: Arc<Mutex<Option<Session>>>,
     /// An extension-set display name, applied when the log exists or when it
@@ -408,6 +433,7 @@ impl Agent {
             pending: Arc::new(Mutex::new(PendingQueue::default())),
             cancel: Arc::new(AtomicBool::new(false)),
             running: false,
+            turn_task: None,
             session: Arc::new(Mutex::new(None)),
             session_name: Arc::new(Mutex::new(None)),
             persist_warned: Arc::new(AtomicBool::new(false)),
@@ -735,16 +761,17 @@ impl Agent {
             (ToolMode::All, None) => system,
         };
 
-        tokio::spawn(async move {
-            // Sleep/wake detection: a one-second heartbeat records wall-vs-
-            // monotonic divergence; the stream-error path consults it to
-            // attribute a loss to a suspension and pick resume vs stop.
-            let heartbeat_stop = Arc::new(AtomicBool::new(false));
-            tokio::spawn(wake::heartbeat(
-                wake.clone(),
-                heartbeat_stop.clone(),
-                Duration::from_secs(1),
-            ));
+        // The heartbeat belongs to the supervisor too. If the turn worker
+        // panics, it is stopped instead of leaking into later turns.
+        let heartbeat_stop = Arc::new(AtomicBool::new(false));
+        let heartbeat = tokio::spawn(wake::heartbeat(
+            wake.clone(),
+            heartbeat_stop.clone(),
+            Duration::from_secs(1),
+        ));
+        let lifecycle_events = events.clone();
+        let lifecycle_host = host.clone();
+        let worker = tokio::spawn(async move {
             let window_secs = wake::policy::window_secs();
             let max_continuations = wake::policy::max_continuations();
             let mut sleep_continuations = 0u32;
@@ -1426,13 +1453,19 @@ impl Agent {
                     break 'turn false;
                 }
             };
-            let _ = events.send(SessionEvent::TurnEnd { aborted }).await;
+            aborted
+        });
+        let turn_task = tokio::spawn(async move {
+            let aborted = supervise_turn(worker, lifecycle_events).await;
             heartbeat_stop.store(true, Ordering::SeqCst);
-            if let Some(h) = &host {
+            heartbeat.abort();
+            let _ = heartbeat.await;
+            if let Some(h) = &lifecycle_host {
                 h.event("turn_end", serde_json::json!({"aborted": aborted}))
                     .await;
             }
         });
+        self.turn_task = Some(turn_task);
     }
 
     /// Called by the frontend after each TurnEnd so a new turn may start.
@@ -1634,6 +1667,26 @@ mod option_tests {
 
         assert_eq!(agent.history_snapshot().len(), 1);
         assert!(agent.session.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_panicking_turn_still_reports_one_terminal_event() {
+        let (events, mut rx) = mpsc::channel(8);
+        let worker = tokio::spawn(async {
+            panic!("test turn panic");
+        });
+        let aborted = supervise_turn(worker, events).await;
+
+        assert!(!aborted);
+        let error = rx.recv().await.expect("panic must be reported");
+        assert!(
+            matches!(error, SessionEvent::Error(message) if message.contains("test turn panic"))
+        );
+        assert!(matches!(
+            rx.recv().await,
+            Some(SessionEvent::TurnEnd { aborted: false })
+        ));
+        assert!(rx.try_recv().is_err(), "TurnEnd must be emitted once");
     }
 
     #[tokio::test]

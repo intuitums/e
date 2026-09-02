@@ -200,6 +200,15 @@ impl Menu {
         self.refilter();
     }
 
+    /// Cycle to the previous tab, wrapping. A no-op for tab-less pickers.
+    pub fn cycle_tab_back(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+        self.refilter();
+    }
+
     fn tab_admits(&self, item: &MenuItem) -> bool {
         self.tabs.is_empty()
             || Some(self.active_tab) == self.all_tab
@@ -785,7 +794,7 @@ pub fn degrade_hint(hint: &'static str, width: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::fuzzy_score;
+    use super::*;
 
     #[test]
     fn fuzzy_prefers_tight_early_matches() {
@@ -799,5 +808,42 @@ mod tests {
         assert!(fuzzy_score("LOG", "/login").is_some());
         // Empty query keeps everything, original order.
         assert_eq!(fuzzy_score("", "anything"), Some(usize::MAX / 2));
+    }
+
+    /// Shift+tab walks the tabs backward, wrapping at the first tab — the
+    /// forward cycle reversed, so Tab/Shift+Tab bracket the picker's tabs.
+    #[test]
+    fn tabs_cycle_backward_and_wrap() {
+        fn row(tab: usize) -> MenuItem {
+            MenuItem {
+                label: "item".into(),
+                description: String::new(),
+                meta: String::new(),
+                value: "item".into(),
+                tab: Some(tab),
+            }
+        }
+        let mut menu = Menu::new(
+            MenuKind::Models,
+            "Models",
+            HINT_MODELS,
+            vec![row(0), row(1), row(2)],
+        )
+        .with_tabs(
+            vec!["All".into(), "One".into(), "Two".into()],
+            Some(0),
+            0,
+            "",
+        );
+        assert_eq!(menu.active_tab, 0);
+        menu.cycle_tab_back();
+        assert_eq!(
+            menu.active_tab, 2,
+            "back from the first tab wraps to the last"
+        );
+        menu.cycle_tab_back();
+        assert_eq!(menu.active_tab, 1);
+        menu.cycle_tab();
+        assert_eq!(menu.active_tab, 2, "forward and backward round-trip");
     }
 }
