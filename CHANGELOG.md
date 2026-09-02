@@ -15,6 +15,9 @@ the pipeline publishes.
   sessions, skills); the reasoning-effort shortcut only fires on the bare
   composer, so a picker or panel can no longer hide an effort change it
   didn't ask for.
+- Explicit model `context_window` values in `~/.e/models.json` now remain
+  authoritative across live catalog refreshes and e updates. Provider-reported
+  windows still replace built-in seed values when no user override exists.
 - `e help` is a subcommand now, printing the same usage as `e --help`; a bare
   `help` no longer answers "help is not a command".
 - The base system prompt now uses the reference design's two guidelines: "Be

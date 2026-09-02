@@ -1,9 +1,9 @@
 //! The live half of the catalog: every signed-in provider's own
 //! `GET /models` is fetched in the background, cached in
-//! `~/.e/models-store.json`, and merged over the declared tables — new ids
-//! appear with no e release, and the provider's reported context window
-//! wins over any seed value. Silent on failure: an offline launch must not
-//! care.
+//! `~/.e/models-store.json`, and merged with the declared tables. New ids
+//! appear with no e release, and provider-reported context windows replace
+//! built-in seeds but not explicit user overrides. Failures stay silent so an
+//! offline launch does not care.
 
 use super::{catalog, Model, Thinking};
 
@@ -17,7 +17,10 @@ fn store_path() -> std::path::PathBuf {
 
 /// Model ids each provider reported, from the cache. A new model a gateway
 /// ships appears here on the next refresh — no e release involved.
-pub(super) fn remote_overlay(models: &mut Vec<Model>) {
+pub(super) fn remote_overlay(
+    models: &mut Vec<Model>,
+    context_overrides: &std::collections::HashSet<(String, String)>,
+) {
     let object = crate::core::config::store::read_object(&store_path()).unwrap_or_default();
     for (provider, entry) in object {
         // Transport from an existing model of the provider (models.json
@@ -71,16 +74,20 @@ pub(super) fn remote_overlay(models: &mut Vec<Model>) {
             let Some(id) = item["id"].as_str() else {
                 continue;
             };
-            // The gateway's own report wins for the window — the model
-            // chooses its context window, not our tables. Everything else
-            // about a claimed id stays as declared.
+            // A gateway report corrects a built-in seed. An explicit user
+            // value remains final because it may describe a deployment limit
+            // the provider's generic catalog cannot express.
+            let user_overrode_window =
+                context_overrides.contains(&(provider.clone(), id.to_string()));
             match models
                 .iter_mut()
                 .find(|m| m.provider == provider && m.id == id)
             {
                 Some(existing) => {
-                    if let Some(w) = item["context_window"].as_u64() {
-                        existing.context_window = w;
+                    if !user_overrode_window {
+                        if let Some(w) = item["context_window"].as_u64() {
+                            existing.context_window = w;
+                        }
                     }
                 }
                 None => models.push(Model {
@@ -392,7 +399,7 @@ mod tests {
             .unwrap();
 
             let mut models = vec![seeded_model("acme", CatalogStrategy::None)];
-            remote_overlay(&mut models);
+            remote_overlay(&mut models, &Default::default());
             assert_eq!(
                 models.len(),
                 1,
@@ -411,7 +418,7 @@ mod tests {
             .unwrap();
 
             let mut models = vec![seeded_model("acme", CatalogStrategy::Openai)];
-            remote_overlay(&mut models);
+            remote_overlay(&mut models, &Default::default());
             assert!(
                 models.iter().any(|m| m.id == "discovered-model"),
                 "a provider without catalog: none should still pick up cached models"

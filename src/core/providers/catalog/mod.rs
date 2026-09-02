@@ -1,7 +1,7 @@
 //! The model catalog: which models exist, what they speak, and resolving a
 //! pick to a Model. Built-ins come from the provider registry (data),
-//! `~/.e/models.json` overrides them, and the live remote sync
-//! (`remote.rs`) adds ids and refreshes context windows. The active model
+//! live remote sync (`remote.rs`) adds ids and refreshes seed context windows,
+//! and explicit `~/.e/models.json` values win over both. The active model
 //! comes from `~/.e/settings.json` `{"model": "provider/id"}` or a `/model`
 //! switch at runtime.
 
@@ -122,8 +122,8 @@ pub struct Model {
     pub effort: Vec<String>,
     /// Which thinking wire shape the backend accepts for this model.
     pub thinking: Thinking,
-    /// Context window in tokens. The seed value is a fallback: the
-    /// provider's own reported window wins once a refresh has seen it.
+    /// Context window in tokens. A provider report replaces the built-in
+    /// seed, while an explicit models.json value replaces both.
     pub context_window: u64,
     /// Output ceiling in tokens, when the model's own limit is below the
     /// dialect's default. `None` leaves the dialect's own constant in force.
@@ -281,6 +281,9 @@ pub fn config_warnings() -> Vec<String> {
 /// the same rule as themes: never override what the user declared.
 pub fn catalog() -> Vec<Model> {
     let mut models = builtin_catalog();
+    // Keep the source of a resolved window long enough for the remote overlay
+    // to distinguish a built-in fallback from the user's final value.
+    let mut context_overrides = std::collections::HashSet::new();
     if let Ok(json) = std::fs::read_to_string(home::home().join("models.json")) {
         if let Ok(file) = serde_json::from_str::<ModelsFile>(&json) {
             for (provider, entry) in file.providers {
@@ -375,6 +378,7 @@ pub fn catalog() -> Vec<Model> {
                         ),
                     };
                     let declared = builtin.and_then(|p| p.models.iter().find(|decl| decl.id == id));
+                    let has_context_override = window.is_some() || entry.context_window.is_some();
                     let resolved = Model {
                         provider: provider.clone(),
                         id,
@@ -429,17 +433,18 @@ pub fn catalog() -> Vec<Model> {
                             .or_else(|| declared.and_then(|d| d.pricing.clone())),
                     };
                     models.retain(|m| !(m.provider == resolved.provider && m.id == resolved.id));
+                    if has_context_override {
+                        context_overrides.insert((resolved.provider.clone(), resolved.id.clone()));
+                    }
                     models.push(resolved);
                 }
             }
         }
     }
-    // The overlay runs last so it can attach to user-declared providers
-    // too. It adds ids nothing else claimed, and refreshes context windows
-    // from the live report — the one field the model owns. Which models
-    // exist, their dialects, and their effort stay with the built-ins and
-    // the user's file.
-    remote_overlay(&mut models);
+    // The overlay runs last so it can attach to user-declared providers too.
+    // It adds unclaimed ids and replaces seed windows with live reports, but
+    // never replaces a context window the user explicitly declared.
+    remote_overlay(&mut models, &context_overrides);
     models
 }
 

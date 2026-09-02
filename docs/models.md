@@ -95,5 +95,6 @@ appear as soon as the local server answers `/models`.
 Signed-in providers are asked for their model list (`GET {base}/models`)
 in the background — at launch, after a sign-in, and when `/models` opens —
 so a model a gateway ships today appears today, no e release involved.
-Windows the gateway reports win; otherwise new models default to 200k,
-correctable here in `models.json` (which always wins a name clash).
+Windows the gateway reports replace built-in seed values. New models default
+to 200k when the gateway omits a window. An explicit `models.json` window
+wins over both and survives catalog refreshes and e updates.
