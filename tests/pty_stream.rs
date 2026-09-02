@@ -4,7 +4,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 struct Fixture {
@@ -61,6 +61,9 @@ fn streaming_server() -> (u16, std::thread::JoinHandle<()>) {
         };
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let mut request = vec![0; 256 * 1024];
         let _ = socket.read(&mut request);
@@ -121,7 +124,7 @@ fn sustained_stream_finishes_and_restores_the_terminal() {
 
     let capture = fixture.root.join("stream.raw");
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/ptycap.py");
-    let output = Command::new("python3")
+    let mut child = Command::new("python3")
         .arg(script)
         .arg(&capture)
         .args(["100", "30", "0.5", "4"])
@@ -138,8 +141,25 @@ fn sustained_stream_finishes_and_restores_the_terminal() {
         .env("CAP_PROMPT", "stream")
         .env("CAP_EXIT", "\u{3}\u{3}")
         .env("CAP_EXIT_WAIT", "1")
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let timed_out = loop {
+        if child.try_wait().unwrap().is_some() {
+            break false;
+        }
+        if std::time::Instant::now() >= deadline {
+            break true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    if timed_out {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(!timed_out, "PTY capture exceeded its hard deadline");
     let served = server.join();
     let raw = std::fs::read(&capture).unwrap();
     assert!(
