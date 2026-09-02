@@ -7,6 +7,9 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Explicit model `context_window` values in `~/.e/models.json` now remain
+  authoritative across live catalog refreshes and e updates. Provider-reported
+  windows still replace built-in seed values when no user override exists.
 - `e help` is a subcommand now, printing the same usage as `e --help`; a bare
   `help` no longer answers "help is not a command".
 - The base system prompt now uses the reference design's two guidelines: "Be

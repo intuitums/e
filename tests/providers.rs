@@ -1564,6 +1564,26 @@ fn models_json_windows_and_overrides() {
 }
 
 #[test]
+fn models_json_context_window_wins_over_the_remote_cache() {
+    let _lock = env_lock();
+    let home = Home::new("model-window-precedence");
+    home.write(
+        "models.json",
+        r#"{"providers":{"openai-codex":{"models":[{"id":"gpt-5.6-sol","context_window":1050000}]}}}"#,
+    );
+    home.write(
+        "models-store.json",
+        r#"{"openai-codex":{"models":[{"id":"gpt-5.6-sol","context_window":272000}]}}"#,
+    );
+
+    let model = catalog::catalog()
+        .into_iter()
+        .find(|model| model.provider == "openai-codex" && model.id == "gpt-5.6-sol")
+        .unwrap();
+    assert_eq!(model.context_window, 1_050_000);
+}
+
+#[test]
 fn partial_override_inherits_the_builtin() {
     let _lock = env_lock();
     // One field corrected; transport, window, effort, and thinking stay
