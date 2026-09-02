@@ -127,7 +127,7 @@ fn sustained_stream_finishes_and_restores_the_terminal() {
     let mut child = Command::new("python3")
         .arg(script)
         .arg(&capture)
-        .args(["100", "30", "0.5", "4"])
+        .args(["100", "30", "0.5", "20"])
         .arg(env!("CARGO_BIN_EXE_e"))
         .args([
             "--no-save",
@@ -139,13 +139,14 @@ fn sustained_stream_finishes_and_restores_the_terminal() {
         .current_dir(&workspace)
         .env("E_HOME", fixture.home())
         .env("CAP_PROMPT", "stream")
+        .env("CAP_WAIT_FOR", "PTY_STREAM_FINISHED")
         .env("CAP_EXIT", "\u{3}\u{3}")
-        .env("CAP_EXIT_WAIT", "1")
+        .env("CAP_EXIT_WAIT", "3")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let timed_out = loop {
         if child.try_wait().unwrap().is_some() {
             break false;

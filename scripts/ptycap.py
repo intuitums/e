@@ -5,6 +5,7 @@ out_path, cols, rows, wait_before, wait_after, *cmd = sys.argv[1:]
 cols, rows = int(cols), int(rows)
 wait_before, wait_after = float(wait_before), float(wait_after)
 prompt = os.environ.get("CAP_PROMPT", "")
+wait_for = os.environ.get("CAP_WAIT_FOR", "").encode()
 exit_keys = os.environ.get("CAP_EXIT", "")
 exit_wait = float(os.environ.get("CAP_EXIT_WAIT", "1"))
 
@@ -31,6 +32,8 @@ while time.time() < end:
     if not typed and time.time() >= deadline and prompt:
         os.write(fd, prompt.encode() + b"\r")
         typed = True
+    if typed and wait_for and wait_for in buf:
+        break
 
 # Optional graceful exit lets tests pin terminal cleanup bytes instead of
 # ending every capture with SIGTERM.
