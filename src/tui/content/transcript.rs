@@ -357,16 +357,16 @@ impl Block {
             .rposition(|child| child.state == ToolState::Running)
     }
 
-    /// The transient rows for the focused running child: its status row,
-    /// `└` continuing a tree or `●` for a lone call, all in the tree's muted
-    /// gray, with its live output beneath.
+    /// The transient rows for the focused running child. Every call remains
+    /// attached to its tree. A command keeps the branch open while its `│`
+    /// output streams beneath it, then completion closes the branch with `└`.
     pub fn overlay_rows(&self, theme: &Theme, width: usize) -> Vec<String> {
         let Some(index) = self.focused_running() else {
             return Vec::new();
         };
         let child = &self.tool_children[index];
-        let marker = if self.tool_children.len() == 1 {
-            "●"
+        let marker = if child.category == "command" {
+            "├"
         } else {
             "└"
         };
@@ -1116,12 +1116,11 @@ mod tests {
         assert!(block.lines(&theme, 80, true).join("\n").contains("second"));
     }
 
-    /// The focused running call leaves the tree for the transient overlay,
-    /// whose marker holds steady (the activity dot below is the one
-    /// blinker); the block itself stays phase-stable, so blink ticks never
-    /// invalidate its cache.
+    /// The focused running call uses a transient overlay but remains visually
+    /// attached to the tree. The block stays phase-stable, so blink ticks do
+    /// not invalidate its cache.
     #[test]
-    fn running_tool_paints_as_a_steady_overlay_row() {
+    fn running_tool_paints_as_an_attached_steady_row() {
         let theme = theme();
         let mut block = Block::tool_group(vec![ToolChild::pending(
             1,
@@ -1136,7 +1135,10 @@ mod tests {
         assert_eq!(tree.len(), 1, "the focused call has no tree row");
         let overlay = block.overlay_rows(&theme, 80);
         assert!(overlay[0].contains("Running true"), "{:?}", overlay[0]);
-        assert!(overlay[0].contains('●'), "a lone call wears the ● marker");
+        assert!(
+            overlay[0].contains('├'),
+            "a running command keeps its branch open"
+        );
         // The block's own cache is phase-stable.
         block.lines(&theme, 80, true);
         let cached = block.cache.as_ref().unwrap().lines.as_ptr();

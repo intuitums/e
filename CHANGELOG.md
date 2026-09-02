@@ -7,6 +7,9 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Running tools stay connected to their tool tree. Command branches remain
+  open while output streams beneath them, then close on completion. OpenAI
+  reasoning summaries also preserve the paragraph breaks between parts.
 - Long streamed replies stay responsive: deltas append without cloning the
   accumulated response, and live Markdown parsing follows a fixed work budget.
 - Turn and paint workers no longer fail silently. A supervised turn always

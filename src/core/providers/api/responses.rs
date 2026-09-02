@@ -162,6 +162,9 @@ pub async fn run(
                         let _ = tx.send(Event::ReasoningDelta(text.into())).await;
                     }
                 }
+                "response.reasoning_summary_part.done" => {
+                    let _ = tx.send(Event::ReasoningDelta("\n\n".into())).await;
+                }
                 "response.output_item.added" => {
                     let item = &value["item"];
                     if item["type"].as_str() == Some("function_call") {
