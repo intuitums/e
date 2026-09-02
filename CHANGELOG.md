@@ -7,6 +7,10 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Turn and paint workers no longer fail silently. A supervised turn always
+  emits one `TurnEnd`, painter write failures enter the transcript, and the
+  activity row distinguishes provider waits, streamed output, tool work, and
+  a delayed renderer.
 - Explicit model `context_window` values in `~/.e/models.json` now remain
   authoritative across live catalog refreshes and e updates. Provider-reported
   windows still replace built-in seed values when no user override exists.

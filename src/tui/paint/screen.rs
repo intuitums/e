@@ -358,17 +358,93 @@ impl Screen {
     }
 }
 
+/// One sequenced frame in the paint thread's single-slot mailbox.
+struct PendingFrame {
+    sequence: u64,
+    posted_at: std::time::Instant,
+    lines: Vec<String>,
+}
+
+/// Paint progress as observed by the app loop. "Completed" means stdout
+/// accepted and flushed the write; terminals do not acknowledge display.
+#[derive(Clone, Debug)]
+pub struct PaintStatus {
+    pub posted: u64,
+    pub completed: u64,
+    pub pending_since: Option<std::time::Instant>,
+    pub failure: Option<(u64, String)>,
+    pub stopped: bool,
+}
+
+impl PaintStatus {
+    pub fn delayed(&self, threshold: std::time::Duration) -> bool {
+        self.pending_since
+            .is_some_and(|since| since.elapsed() >= threshold)
+    }
+}
+
 /// The paint thread's single-slot mailbox: a newer frame replaces the
 /// undelivered one, so a terminal blocked mid-write bounds the backlog to
 /// exactly one pending frame — an unbounded queue would grow by a full
 /// transcript copy per tick for as long as the write stalls.
 #[derive(Default)]
 struct PaintMailbox {
-    frame: Option<Vec<String>>,
+    frame: Option<PendingFrame>,
     /// Latest wins here too; the resize replays, so painting the
     /// pre-resize frame once at the new size is a one-frame blip at most.
     resize: Option<(u16, u16)>,
+    posted: u64,
+    completed: u64,
+    pending_since: Option<std::time::Instant>,
+    failure: Option<(u64, String)>,
+    stopped: bool,
     shutdown: bool,
+}
+
+impl PaintMailbox {
+    fn status(&self) -> PaintStatus {
+        PaintStatus {
+            posted: self.posted,
+            completed: self.completed,
+            pending_since: self.pending_since,
+            failure: self.failure.clone(),
+            stopped: self.stopped,
+        }
+    }
+
+    fn complete(&mut self, sequence: u64) {
+        self.completed = self.completed.max(sequence);
+        self.failure = None;
+        self.pending_since = if self.completed >= self.posted {
+            None
+        } else {
+            self.frame.as_ref().map(|frame| frame.posted_at)
+        };
+    }
+
+    fn fail(&mut self, sequence: u64, error: String) {
+        self.failure = Some((sequence, error));
+        self.pending_since
+            .get_or_insert_with(std::time::Instant::now);
+    }
+}
+
+/// Marks an unexpected painter exit even when it unwinds outside `paint()`.
+struct PaintThreadGuard {
+    mailbox: std::sync::Arc<(std::sync::Mutex<PaintMailbox>, std::sync::Condvar)>,
+}
+
+impl Drop for PaintThreadGuard {
+    fn drop(&mut self) {
+        let (lock, wake) = &*self.mailbox;
+        let mut mailbox = lock.lock().unwrap_or_else(|e| e.into_inner());
+        mailbox.stopped = true;
+        if !mailbox.shutdown && mailbox.failure.is_none() {
+            let sequence = mailbox.posted;
+            mailbox.fail(sequence, "paint worker stopped unexpectedly".into());
+        }
+        wake.notify_all();
+    }
 }
 
 /// The paint thread: owns the `Screen` and its blocking stdout writes so a
@@ -377,6 +453,7 @@ struct PaintMailbox {
 pub struct Painter {
     mailbox: std::sync::Arc<(std::sync::Mutex<PaintMailbox>, std::sync::Condvar)>,
     thread: Option<std::thread::JoinHandle<()>>,
+    next_sequence: u64,
 }
 
 impl Painter {
@@ -387,6 +464,9 @@ impl Painter {
         ));
         let shared = mailbox.clone();
         let thread = std::thread::spawn(move || {
+            let _guard = PaintThreadGuard {
+                mailbox: shared.clone(),
+            };
             let mut screen = Screen::new(cols, rows, anchor);
             let (lock, wake) = &*shared;
             loop {
@@ -404,13 +484,23 @@ impl Painter {
                 // not the session. The screen is marked unknown so the next
                 // frame repaints everything over whatever the panicking
                 // write left behind.
-                let painted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if let Some(frame) = frame {
-                        let _ = screen.paint(&frame);
+                if let Some(frame) = frame {
+                    let sequence = frame.sequence;
+                    let painted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        screen.paint(&frame.lines)
+                    }));
+                    let mut mailbox = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    match painted {
+                        Ok(Ok(())) => mailbox.complete(sequence),
+                        Ok(Err(error)) => {
+                            screen.resize(screen.cols, screen.rows);
+                            mailbox.fail(sequence, format!("terminal write failed: {error}"));
+                        }
+                        Err(_) => {
+                            screen.resize(screen.cols, screen.rows);
+                            mailbox.fail(sequence, "paint worker panicked".into());
+                        }
                     }
-                }));
-                if painted.is_err() {
-                    screen.resize(screen.cols, screen.rows);
                 }
                 if shutdown {
                     // The final frame (taken above) has landed; done.
@@ -421,6 +511,7 @@ impl Painter {
         Painter {
             mailbox,
             thread: Some(thread),
+            next_sequence: 0,
         }
     }
 
@@ -430,8 +521,24 @@ impl Painter {
         wake.notify_one();
     }
 
-    pub fn frame(&self, lines: Vec<String>) {
-        self.post(|mailbox| mailbox.frame = Some(lines));
+    pub fn frame(&mut self, lines: Vec<String>) {
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        let sequence = self.next_sequence;
+        let posted_at = std::time::Instant::now();
+        self.post(|mailbox| {
+            mailbox.posted = sequence;
+            mailbox.pending_since.get_or_insert(posted_at);
+            mailbox.frame = Some(PendingFrame {
+                sequence,
+                posted_at,
+                lines,
+            });
+        });
+    }
+
+    pub fn status(&self) -> PaintStatus {
+        let (lock, _) = &*self.mailbox;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).status()
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
@@ -540,6 +647,32 @@ mod tests {
             self[row] = Some(content.to_string());
             self
         }
+    }
+
+    #[test]
+    fn paint_progress_distinguishes_posted_completed_and_failed_frames() {
+        let mut mailbox = PaintMailbox::default();
+        let posted_at = std::time::Instant::now();
+        mailbox.posted = 2;
+        mailbox.pending_since = Some(posted_at);
+        mailbox.frame = Some(PendingFrame {
+            sequence: 2,
+            posted_at,
+            lines: vec!["new".into()],
+        });
+
+        mailbox.complete(1);
+        let pending = mailbox.status();
+        assert_eq!((pending.posted, pending.completed), (2, 1));
+        assert_eq!(pending.pending_since, Some(posted_at));
+
+        mailbox.fail(2, "broken pipe".into());
+        assert_eq!(mailbox.status().failure.unwrap().0, 2);
+        mailbox.complete(2);
+        let recovered = mailbox.status();
+        assert_eq!(recovered.completed, 2);
+        assert!(recovered.pending_since.is_none());
+        assert!(recovered.failure.is_none());
     }
 
     #[test]

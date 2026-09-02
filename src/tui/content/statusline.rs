@@ -12,7 +12,12 @@ pub const RECOVERED_VISIBLE_MS: u64 = 1500;
 /// Which transient progress surface owns the current turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnPhase {
+    /// A request is in flight but has not produced a stream event yet.
+    Waiting,
+    /// The provider is streaming hidden or visible reasoning.
     Thinking,
+    /// The provider is assembling a tool call before execution.
+    ToolCall,
     /// Backing off after a retryable failure before another attempt.
     Retrying,
     Tool,
@@ -83,7 +88,7 @@ impl Turn {
         Turn {
             input: 0,
             output: 0,
-            phase: TurnPhase::Thinking,
+            phase: TurnPhase::Waiting,
             retry: None,
             recovered: None,
         }
@@ -111,16 +116,11 @@ impl Turn {
         }
     }
 
-    /// The `Thinking (Ns) (↑… ↓…)` activity label. The clock keeps ticking
-    /// through tool and assistant-text phases alike, so the row never
-    /// vanishes mid-turn while a tree grows or a reply streams.
-    fn thinking_label(&self, elapsed_secs: u64) -> Option<String> {
-        if self.recovered.is_some()
-            || !matches!(
-                self.phase,
-                TurnPhase::Thinking | TurnPhase::Tool | TurnPhase::AssistantText
-            )
-        {
+    /// Label the work the event stream can prove is happening. The clock and
+    /// token tail persist while the phase changes, but an idle provider no
+    /// longer looks the same as a reply that is reaching the app.
+    fn activity_label(&self, elapsed_secs: u64) -> Option<String> {
+        if self.recovered.is_some() || self.phase == TurnPhase::Retrying {
             return None;
         }
         let tokens = self.tokens();
@@ -129,8 +129,16 @@ impl Turn {
         } else {
             format!(" {tokens}")
         };
+        let activity = match self.phase {
+            TurnPhase::Waiting => "Waiting for provider",
+            TurnPhase::Thinking => "Streaming reasoning",
+            TurnPhase::ToolCall => "Streaming tool call",
+            TurnPhase::Tool => "Running tools",
+            TurnPhase::AssistantText => "Streaming reply",
+            TurnPhase::Retrying => return None,
+        };
         Some(format!(
-            "Thinking ({}){suffix}",
+            "{activity} ({}){suffix}",
             format_elapsed(elapsed_secs)
         ))
     }
@@ -141,9 +149,11 @@ impl Turn {
             return Some(format!("Recovered · attempt {}/{}", r.attempt, r.limit));
         }
         match self.phase {
-            TurnPhase::Thinking | TurnPhase::Tool | TurnPhase::AssistantText => {
-                self.thinking_label(elapsed_secs)
-            }
+            TurnPhase::Waiting
+            | TurnPhase::Thinking
+            | TurnPhase::ToolCall
+            | TurnPhase::Tool
+            | TurnPhase::AssistantText => self.activity_label(elapsed_secs),
             TurnPhase::Retrying => {
                 let r = self.retry.as_ref()?;
                 let waited = r.since.elapsed().as_secs();
@@ -277,22 +287,24 @@ mod tests {
     #[test]
     fn activity_has_one_owner_per_phase() {
         let mut turn = Turn::new();
-        assert_eq!(turn.label(0).as_deref(), Some("Thinking (0s)"));
+        assert_eq!(turn.label(0).as_deref(), Some("Waiting for provider (0s)"));
 
         turn.phase = TurnPhase::Tool;
-        // The reference keeps the Thinking clock ticking below the
-        // transient tool row.
-        assert_eq!(turn.label(1).as_deref(), Some("Thinking (1s)"));
+        assert_eq!(turn.label(1).as_deref(), Some("Running tools (1s)"));
 
         turn.input = 1_000;
         turn.output = 20;
-        // The row persists through reply streaming too — it never vanishes
-        // mid-turn.
         turn.phase = TurnPhase::AssistantText;
-        assert_eq!(turn.label(2).as_deref(), Some("Thinking (2s) (↑1k ↓20)"));
+        assert_eq!(
+            turn.label(2).as_deref(),
+            Some("Streaming reply (2s) (↑1k ↓20)")
+        );
 
         turn.phase = TurnPhase::Thinking;
-        assert_eq!(turn.label(3).as_deref(), Some("Thinking (3s) (↑1k ↓20)"));
+        assert_eq!(
+            turn.label(3).as_deref(),
+            Some("Streaming reasoning (3s) (↑1k ↓20)")
+        );
     }
 
     #[test]
@@ -306,15 +318,13 @@ mod tests {
     }
 
     #[test]
-    fn thinking_label_shows_minutes_past_a_minute() {
+    fn waiting_label_shows_minutes_past_a_minute() {
         let mut turn = Turn::new();
         turn.input = 39_000;
         turn.output = 20_000;
-        // The reference compacts counts past a thousand — `↓9.6k` on the
-        // live client — while small counts stay raw.
         assert_eq!(
             turn.label(636).as_deref(),
-            Some("Thinking (10m36s) (↑39k ↓20k)")
+            Some("Waiting for provider (10m36s) (↑39k ↓20k)")
         );
     }
 
