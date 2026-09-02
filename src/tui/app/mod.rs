@@ -24,8 +24,7 @@ use crate::tui::menu::{
 };
 use crate::tui::screen::Painter;
 use crate::tui::statusline::{
-    format_elapsed, statusline, RecoveredStatus, RetryStatus, StatusData, Turn, TurnPhase,
-    RECOVERED_VISIBLE_MS,
+    statusline, RecoveredStatus, RetryStatus, StatusData, Turn, TurnPhase, RECOVERED_VISIBLE_MS,
 };
 use crate::tui::theme::Theme;
 use crate::tui::transcript::{Block, Kind, Transcript};
@@ -41,12 +40,11 @@ struct ActiveTurn {
     block: Option<usize>,
     text: String,
     /// The live thinking block for the current burst, if reasoning has
-    /// streamed. Earlier bursts from this turn collapsed where they ended —
-    /// this index is only the open segment.
+    /// streamed. Ending a burst detaches this so the next reasoning opens a
+    /// fresh block; the finished thought stays expanded in place — this index
+    /// is only the open segment.
     thinking_block: Option<usize>,
     thinking: String,
-    /// When the open burst started, for the collapsed row's duration.
-    thinking_started: Option<Instant>,
     turn: Turn,
     started: Instant,
     error: Option<String>,
@@ -583,6 +581,11 @@ impl App {
         // placeholder, not something the user chose, so don't show it.
         let data = StatusData {
             model: self.signed_in.then(|| self.agent.model_slug()),
+            effort: if self.signed_in {
+                self.status_effort.clone()
+            } else {
+                None
+            },
             context_used: self.context_tokens,
             context_total: Some(window),
         };
@@ -1126,7 +1129,7 @@ impl App {
     fn open_settings(&mut self) {
         self.menu = None;
         self.settings = Some(crate::tui::settingspanel::SettingsPanel::new(
-            self.agent.efforts(),
+            self.agent.effort_levels(),
         ));
     }
 
@@ -1220,6 +1223,28 @@ impl App {
         }
         self.editor.push_history(text);
 
+        if let Some((path, prompt)) = leading_image_prompt(&trimmed) {
+            if !self.agent.model.image_input {
+                self.notice(format!(
+                    "{} does not accept image input",
+                    model::slug(&self.agent.model)
+                ));
+                return;
+            }
+            match crate::core::providers::ImageInput::from_path(std::path::Path::new(path)) {
+                Ok(image) => {
+                    let prompt = if prompt.is_empty() {
+                        "Describe this image.".to_string()
+                    } else {
+                        prompt.to_string()
+                    };
+                    self.submit_initial_with_images(prompt, vec![image]);
+                }
+                Err(error) => self.notice(format!("could not attach image: {error}")),
+            }
+            return;
+        }
+
         // `!cmd` runs in the shell directly; the output lands in the
         // transcript and in history, so the model sees what the user did.
         if let Some(cmd) = trimmed.strip_prefix('!').map(str::trim) {
@@ -1241,6 +1266,34 @@ impl App {
 
         if trimmed == "/scoped-models" {
             self.open_scoped_menu();
+            return;
+        }
+        if let Some(rest) = command_arg(&trimmed, "/effort") {
+            let requested = rest.trim();
+            let levels = self.agent.effort_levels();
+            if levels.is_empty() {
+                self.notice("this model has no reasoning effort control".into());
+            } else if requested.is_empty() {
+                let current = self.agent.effort().unwrap_or_else(|| levels[0].clone());
+                self.notice(format!(
+                    "reasoning effort is {current} · available: {} · use /effort <level>",
+                    levels.join(", ")
+                ));
+            } else if !levels.iter().any(|level| level == requested) {
+                self.notice(format!(
+                    "unsupported reasoning effort {requested:?} · available: {}",
+                    levels.join(", ")
+                ));
+            } else {
+                match self.agent.set_effort(requested) {
+                    Ok(true) => {
+                        self.refresh_status_cache();
+                        self.notice(format!("reasoning effort set to {requested}"));
+                    }
+                    Ok(false) => self.notice("this model has no reasoning effort control".into()),
+                    Err(error) => self.notice(format!("could not save reasoning effort: {error}")),
+                }
+            }
             return;
         }
         let model_rest =
@@ -1352,6 +1405,11 @@ impl App {
                             let _ = results.send(AppJob::Rename { name, epoch }).await;
                         }
                     });
+                } else if is_literal_slash_prompt(&trimmed) {
+                    // Absolute paths and a literal leading slash are prompt
+                    // text, not misspelled commands. This is how screenshot
+                    // clipboard tools hand e `/var/.../capture.png question`.
+                    self.prompt(trimmed);
                 } else {
                     self.notice(format!("unknown command {trimmed}"));
                 }
@@ -1794,6 +1852,35 @@ fn command_arg<'a>(input: &'a str, command: &str) -> Option<&'a str> {
         .filter(|rest| rest.is_empty() || rest.starts_with(' '))
 }
 
+/// A screenshot tool commonly pastes an absolute temporary path followed by
+/// the user's prompt. Return the existing image prefix and the text after it.
+/// Checking extension boundaries from left to right also handles spaces in the
+/// filename without requiring shell quoting.
+fn leading_image_prompt(input: &str) -> Option<(&str, &str)> {
+    let lower = input.to_ascii_lowercase();
+    for extension in [".png", ".jpg", ".jpeg", ".gif", ".webp"] {
+        let mut from = 0;
+        while let Some(relative) = lower[from..].find(extension) {
+            let end = from + relative + extension.len();
+            let boundary = input[end..].chars().next().is_none_or(char::is_whitespace);
+            if boundary && std::path::Path::new(&input[..end]).is_file() {
+                return Some((&input[..end], input[end..].trim_start()));
+            }
+            from = end;
+        }
+    }
+    None
+}
+
+fn is_literal_slash_prompt(input: &str) -> bool {
+    input == "/"
+        || input.starts_with("/ ")
+        || input
+            .split_whitespace()
+            .next()
+            .is_some_and(|token| token[1..].contains('/'))
+}
+
 /// Decide whether a command-line prompt may start now or must wait for the
 /// first-visit trust panel. Kept separate so launch ordering stays testable
 /// without constructing a terminal frame.
@@ -1805,6 +1892,7 @@ fn is_builtin_command(name: &str) -> bool {
         "login"
             | "models"
             | "model"
+            | "effort"
             | "scoped-models"
             | "reload"
             | "resume"
@@ -1827,7 +1915,7 @@ fn is_builtin_command(name: &str) -> bool {
 fn builtin_category(value: &str) -> &'static str {
     match value {
         "/login" => "Account",
-        "/models" | "/scoped-models" => "Model",
+        "/models" | "/effort" | "/scoped-models" => "Model",
         "/resume" | "/new" | "/tree" | "/compact" => "Session",
         "/trust" => "Workspace",
         _ => "General",
@@ -2311,6 +2399,8 @@ pub async fn run(
                             }
                         } else if let Some(panel) = &mut app.settings {
                             let mut setting_error = None;
+                            let changing_effort = panel.selected_key() == Some("effort")
+                                && matches!(k.code, KeyCode::Left | KeyCode::Right);
                             match k.code {
                                 KeyCode::Up => panel.step(-1),
                                 KeyCode::Down => panel.step(1),
@@ -2324,6 +2414,8 @@ pub async fn run(
                             }
                             if let Some(error) = setting_error {
                                 app.notice(format!("could not save setting: {error}"));
+                            } else if changing_effort {
+                                app.agent.use_saved_effort();
                             }
                             // A theme change applies immediately; settings can
                             // also change what the statusline derives from disk.
@@ -2523,13 +2615,12 @@ pub async fn run(
                                 && !ctrl
                                 && k.modifiers.contains(KeyModifiers::SHIFT))
                         {
-                            // Shift+tab cycles the reasoning effort through
-                            // whatever levels this model declares. The
-                            // statusline already shows the new level; only a
-                            // model without a reasoning knob gets a notice.
+                            // Shift+tab cycles the model's declared levels.
+                            // Normal operation stays out of the transcript;
+                            // the persistent statusline is the confirmation.
                             match app.agent.cycle_effort() {
                                 Ok(Some(_)) => app.refresh_status_cache(),
-                                Ok(None) => app.notice("this model has no reasoning effort control".into()),
+                                Ok(None) => {}
                                 Err(error) => app.notice(format!("could not save reasoning effort: {error}")),
                             }
                         } else if !ctrl && app.queue_review_key(k.code) {
@@ -3128,6 +3219,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn screenshot_paths_at_the_start_of_a_prompt_are_split_from_the_question() {
+        let dir = std::env::temp_dir().join(format!("e-shot-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Shotbase Capture.png");
+        std::fs::write(&path, b"png").unwrap();
+        let input = format!("{} what is wrong here?", path.display());
+        let (found, prompt) = leading_image_prompt(&input).expect("image prefix is recognized");
+        assert_eq!(std::path::Path::new(found), path);
+        assert_eq!(prompt, "what is wrong here?");
+        assert!(is_literal_slash_prompt(&input));
+        assert!(is_literal_slash_prompt("/ explain this"));
+        assert!(!is_literal_slash_prompt("/modles please"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn active_login_guard_cancels_on_drop() {
         let cancellation = crate::core::auth::login::LoginCancellation::default();
@@ -3155,7 +3262,7 @@ mod tests {
             responses_mount: crate::core::providers::registry::ResponsesMount::Platform,
             provider_supports_tools: true,
             provider_image_input: false,
-            efforts: Vec::new(),
+            effort: Vec::new(),
             thinking: crate::core::providers::catalog::Thinking::Manual,
             context_window: 200_000,
             max_output: None,
@@ -3455,10 +3562,12 @@ mod tests {
     }
 
     /// A typical think-then-tools turn opens a second thinking burst below
-    /// the tools; each burst collapses to one row where it ends, and TurnEnd
-    /// collapses the final one.
+    /// the tools. Ending a burst — tools taking over, or TurnEnd — detaches it
+    /// but leaves the thought expanded where it sits: no collapse to a
+    /// `Thought for Ns` row, and never marked done (which would shrink the
+    /// frame and jump the screen).
     #[test]
-    fn thinking_bursts_collapse_at_each_handoff() {
+    fn thinking_bursts_stay_expanded_at_each_handoff() {
         let mut app = session_app();
         app.on_session_event(SessionEvent::TurnStart);
         app.on_session_event(SessionEvent::ReasoningDelta("before tools".into()));
@@ -3467,33 +3576,35 @@ mod tests {
         app.on_session_event(tool_batch());
         assert_eq!(
             thinking_flags(&app),
-            vec![("Thought for 0s".into(), true)],
-            "the pre-tool burst collapses when tools take over"
+            vec![("before tools".into(), false)],
+            "the pre-tool burst stays expanded when tools take over"
         );
 
         app.on_session_event(SessionEvent::ReasoningDelta("after tools".into()));
         assert_eq!(
             thinking_flags(&app),
             vec![
-                ("Thought for 0s".into(), true),
+                ("before tools".into(), false),
                 ("after tools".into(), false)
-            ]
+            ],
+            "a fresh burst opens its own block below the tools"
         );
 
         app.on_session_event(SessionEvent::TurnEnd { aborted: false });
         assert_eq!(
             thinking_flags(&app),
             vec![
-                ("Thought for 0s".into(), true),
-                ("Thought for 0s".into(), true)
-            ]
+                ("before tools".into(), false),
+                ("after tools".into(), false)
+            ],
+            "TurnEnd leaves both thoughts expanded, unchanged"
         );
     }
 
-    /// Retries and steered messages also end the live burst; each collapsed
-    /// row keeps its place in the transcript.
+    /// Retries and steered messages also end the live burst; each thought
+    /// keeps its expanded place, and the next burst opens a new block.
     #[test]
-    fn thinking_collapses_at_retry_and_steer() {
+    fn thinking_stays_expanded_at_retry_and_steer() {
         let mut app = session_app();
         app.on_session_event(SessionEvent::TurnStart);
         app.on_session_event(SessionEvent::ReasoningDelta("attempt one".into()));
@@ -3506,8 +3617,8 @@ mod tests {
         });
         assert_eq!(
             thinking_flags(&app),
-            vec![("Thought for 0s".into(), true)],
-            "the abandoned attempt's burst collapses at the retry"
+            vec![("attempt one".into(), false)],
+            "the abandoned attempt's thought stays put at the retry"
         );
 
         app.on_session_event(SessionEvent::ReasoningDelta("attempt two".into()));
@@ -3516,8 +3627,8 @@ mod tests {
         assert_eq!(
             thinking_flags(&app),
             vec![
-                ("Thought for 0s".into(), true),
-                ("Thought for 0s".into(), true),
+                ("attempt one".into(), false),
+                ("attempt two".into(), false),
                 ("after steer".into(), false)
             ]
         );
@@ -3526,9 +3637,9 @@ mod tests {
         assert_eq!(
             thinking_flags(&app),
             vec![
-                ("Thought for 0s".into(), true),
-                ("Thought for 0s".into(), true),
-                ("Thought for 0s".into(), true)
+                ("attempt one".into(), false),
+                ("attempt two".into(), false),
+                ("after steer".into(), false)
             ]
         );
     }

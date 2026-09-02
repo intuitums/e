@@ -106,7 +106,7 @@ pub fn test_model(provider: &str, port: u16, api: Api) -> Model {
         responses_mount: e::core::providers::registry::ResponsesMount::Platform,
         provider_supports_tools: true,
         provider_image_input: false,
-        efforts: vec!["low".into(), "medium".into(), "high".into()],
+        effort: vec!["low".into(), "medium".into(), "high".into()],
         thinking: Thinking::Manual,
         context_window: 200_000,
         max_output: None,

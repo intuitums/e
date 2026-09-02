@@ -174,14 +174,18 @@ pub struct StatusData {
     /// `None` when no provider is signed in — nothing to show as "the"
     /// model, since none was actually chosen by the user.
     pub model: Option<String>,
+    /// The current model's selected reasoning effort. Models without an
+    /// effort control leave this absent.
+    pub effort: Option<String>,
     /// Estimated tokens of the current context and the model's window,
     /// for the trailing `N%` segment.
     pub context_used: u64,
     pub context_total: Option<u64>,
 }
 
-/// The bottom row: just the model (accent-bright) and the context percent
-/// (muted) — everything else lives in the transcript or the activity row.
+/// The bottom row: the model and selected effort (accent-bright), then the
+/// context percent (muted). Everything else lives in the transcript or the
+/// activity row.
 /// With no panel open a blank spacer rides above; an open panel's own
 /// divider sits directly above the row instead. A transient overlay
 /// (armed-exit) rides right-aligned; a menu hint replaces the row in dim.
@@ -201,7 +205,12 @@ pub fn statusline(
     }
     let mut segments = Vec::new();
     if let Some(model) = &data.model {
-        segments.push(compact_model_label(model));
+        let mut identity = compact_model_label(model);
+        if let Some(effort) = &data.effort {
+            identity.push_str(" / ");
+            identity.push_str(effort);
+        }
+        segments.push(identity);
     }
     if let Some(total) = data.context_total.filter(|t| *t > 0) {
         let percent = (data.context_used * 100) / total;
@@ -239,24 +248,24 @@ mod tests {
     };
 
     #[test]
-    fn statusline_is_just_the_model_and_percent() {
+    fn statusline_keeps_model_and_effort_visible() {
         let theme = crate::tui::theme::resolve("dark", false);
         let data = StatusData {
             model: Some("zai/glm-5.3-flash".into()),
+            effort: Some("high".into()),
             context_used: 6_000,
             context_total: Some(200_000),
         };
         let rows = statusline(&theme, &data, None, None, false, 120);
         let line = rows.last().unwrap();
-        // The model leads in the accent; the percent trails muted; nothing
-        // else rides the row.
-        assert!(line.contains("glm-5.3-flash"), "{line:?}");
+        // Model and effort form one persistent identity; percent trails muted.
+        assert!(line.contains("glm-5.3-flash / high"), "{line:?}");
         assert!(line.contains("3%"), "{line:?}");
         assert!(
             line.starts_with(&theme.fg_prefix("accent").to_string()),
             "{line:?}"
         );
-        for gone in ["Context:", "enter queue", "queued", "/", "("] {
+        for gone in ["Context:", "enter queue", "queued", "("] {
             assert!(
                 !line.contains(gone),
                 "segment {gone:?} should be gone: {line:?}"

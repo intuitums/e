@@ -1196,7 +1196,7 @@ mod tests {
             responses_mount: crate::core::providers::registry::ResponsesMount::Platform,
             provider_supports_tools: true,
             provider_image_input: false,
-            efforts: Vec::new(),
+            effort: Vec::new(),
             thinking: crate::core::providers::catalog::Thinking::Manual,
             context_window: 200_000,
             max_output: None,

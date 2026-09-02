@@ -119,7 +119,7 @@ pub struct Model {
     pub provider_supports_tools: bool,
     pub provider_image_input: bool,
     /// Effort values the backend accepts for its reasoning knob, if any.
-    pub efforts: Vec<String>,
+    pub effort: Vec<String>,
     /// Which thinking wire shape the backend accepts for this model.
     pub thinking: Thinking,
     /// Context window in tokens. The seed value is a fallback: the
@@ -155,7 +155,7 @@ pub fn builtin_catalog() -> Vec<Model> {
                 responses_mount: provider.responses_mount,
                 provider_supports_tools: provider.supports_tools,
                 provider_image_input: provider.image_input,
-                efforts: decl.efforts.clone(),
+                effort: decl.effort.clone(),
                 thinking: Thinking::from_decl(decl.thinking.as_deref()),
                 context_window: decl.context_window,
                 max_output: decl.max_output,
@@ -183,7 +183,7 @@ struct ProviderEntry {
     #[serde(default)]
     responses_mount: Option<crate::core::providers::registry::ResponsesMount>,
     #[serde(default)]
-    efforts: Option<Vec<String>>,
+    effort: Option<Vec<String>>,
     /// Default window for this provider's models; each model may override.
     #[serde(default)]
     context_window: Option<u64>,
@@ -214,7 +214,7 @@ enum ModelEntry {
         #[serde(default)]
         context_window: Option<u64>,
         #[serde(default)]
-        efforts: Vec<String>,
+        effort: Vec<String>,
         #[serde(default)]
         thinking: Option<String>,
         #[serde(default)]
@@ -346,7 +346,7 @@ pub fn catalog() -> Vec<Model> {
                     let (
                         id,
                         window,
-                        efforts,
+                        effort,
                         thinking,
                         max_output,
                         supports_tools,
@@ -357,7 +357,7 @@ pub fn catalog() -> Vec<Model> {
                         ModelEntry::Detailed {
                             id,
                             context_window,
-                            efforts,
+                            effort,
                             thinking,
                             max_output,
                             supports_tools,
@@ -366,7 +366,7 @@ pub fn catalog() -> Vec<Model> {
                         } => (
                             id,
                             context_window,
-                            efforts,
+                            effort,
                             thinking,
                             max_output,
                             supports_tools,
@@ -384,13 +384,13 @@ pub fn catalog() -> Vec<Model> {
                         responses_mount,
                         provider_supports_tools,
                         provider_image_input,
-                        efforts: match (&entry.efforts, &efforts) {
+                        effort: match (&entry.effort, &effort) {
                             // Per-model declaration wins…
-                            (None, e) if !e.is_empty() => e.clone(),
+                            (_, e) if !e.is_empty() => e.clone(),
                             // …then the per-provider default from the file…
                             (Some(e), _) if !e.is_empty() => e.clone(),
-                            // …then the built-in's own efforts.
-                            _ => declared.map(|d| d.efforts.clone()).unwrap_or_default(),
+                            // …then the built-in's own effort.
+                            _ => declared.map(|d| d.effort.clone()).unwrap_or_default(),
                         },
                         thinking: match (&thinking, &entry.thinking) {
                             (Some(t), _) | (_, Some(t)) => match Thinking::parse(t) {
@@ -437,7 +437,7 @@ pub fn catalog() -> Vec<Model> {
     // The overlay runs last so it can attach to user-declared providers
     // too. It adds ids nothing else claimed, and refreshes context windows
     // from the live report — the one field the model owns. Which models
-    // exist, their dialects, and their efforts stay with the built-ins and
+    // exist, their dialects, and their effort stay with the built-ins and
     // the user's file.
     remote_overlay(&mut models);
     models

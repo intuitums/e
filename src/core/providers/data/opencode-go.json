@@ -31,11 +31,18 @@
 		},
 		{
 			"id": "glm-5.2",
-			"context_window": 1000000
+			"context_window": 1000000,
+			"effort": ["low", "medium", "high", "max"]
 		},
 		{
 			"id": "glm-5.3",
-			"context_window": 1000000
+			"context_window": 1000000,
+			"effort": ["low", "medium", "high", "max"]
+		},
+		{
+			"id": "glm-5.3-flash",
+			"context_window": 1000000,
+			"effort": ["low", "high", "max"]
 		},
 		{
 			"id": "kimi-k3",

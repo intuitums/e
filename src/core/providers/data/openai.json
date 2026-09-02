@@ -14,7 +14,7 @@
 		{
 			"id": "gpt-5.5",
 			"context_window": 1050000,
-			"efforts": [
+			"effort": [
 				"low",
 				"medium",
 				"high"
@@ -23,7 +23,7 @@
 		{
 			"id": "gpt-5.5-pro",
 			"context_window": 1050000,
-			"efforts": [
+			"effort": [
 				"low",
 				"medium",
 				"high"
@@ -32,7 +32,7 @@
 		{
 			"id": "gpt-5.4",
 			"context_window": 1050000,
-			"efforts": [
+			"effort": [
 				"low",
 				"medium",
 				"high"
@@ -41,7 +41,7 @@
 		{
 			"id": "gpt-5.3-codex",
 			"context_window": 400000,
-			"efforts": [
+			"effort": [
 				"low",
 				"medium",
 				"high"
@@ -50,7 +50,7 @@
 		{
 			"id": "gpt-5.2",
 			"context_window": 400000,
-			"efforts": [
+			"effort": [
 				"low",
 				"medium",
 				"high"

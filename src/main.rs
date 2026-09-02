@@ -399,11 +399,11 @@ fn resolve_model(options: &Options) -> Result<Model, String> {
         None => model::default_model(),
     };
     if let Some(effort) = options.effort.as_deref() {
-        if !selected.efforts.iter().any(|level| level == effort) {
-            let supported = if selected.efforts.is_empty() {
+        if !selected.effort.iter().any(|level| level == effort) {
+            let supported = if selected.effort.is_empty() {
                 "none".to_string()
             } else {
-                selected.efforts.join(", ")
+                selected.effort.join(", ")
             };
             return Err(format!(
                 "model `{}` does not support effort `{effort}` (supported: {supported})",

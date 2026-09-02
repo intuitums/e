@@ -27,6 +27,12 @@ impl SettingsPanel {
         }
     }
 
+    pub fn selected_key(&self) -> Option<&str> {
+        self.settings
+            .get(self.selected)
+            .map(|setting| setting.key.as_str())
+    }
+
     pub fn step(&mut self, delta: isize) {
         let n = self.settings.len() as isize;
         if n == 0 {

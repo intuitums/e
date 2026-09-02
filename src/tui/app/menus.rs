@@ -12,6 +12,7 @@ impl App {
                 "/login",
             ),
             MenuItem::new("/models", "switch the model", "/models"),
+            MenuItem::new("/effort", "show or set reasoning effort", "/effort"),
             MenuItem::new(
                 "/scoped-models",
                 "choose which models ctrl+p cycles",

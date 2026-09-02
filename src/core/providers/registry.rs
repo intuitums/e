@@ -125,7 +125,7 @@ pub struct ModelDecl {
     #[serde(default = "default_window")]
     pub context_window: u64,
     #[serde(default)]
-    pub efforts: Vec<String>,
+    pub effort: Vec<String>,
     /// Which thinking wire shape this model speaks (Anthropic dialect).
     #[serde(default)]
     pub thinking: Option<String>,

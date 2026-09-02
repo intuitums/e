@@ -53,10 +53,15 @@ built-in's provider and id replaces it — the file wins, like themes.
   reply-token ceiling for models whose real limit is below the dialect's own
   default (e.g. a small Anthropic model). Only the Anthropic dialect reads
   it today. Default: the dialect's own constant.
-- `efforts` on a model object declares its reasoning levels, in cycle order —
+- `effort` on a model object declares its reasoning levels, in cycle order —
   shift+tab walks exactly this list (e.g. `["low", "medium", "high",
-  "xhigh"]`). Built-ins carry their own; a file entry without `efforts` has
-  no reasoning knob.
+  "xhigh"]`). A model entry without `effort` inherits its provider default,
+  then its built-in declaration; otherwise it has no reasoning knob. Levels
+  are the exact strings sent as `reasoning_effort` (or the dialect's equivalent), so they
+  must match what the backend accepts —
+  e.g. opencode-go's `glm-5.3-flash` takes `["low", "high", "max"]` (no
+  `medium`), a set the gateway does not advertise and e cannot infer, so it is
+  declared here.
 - `supports_tools` (default `true`) and `image_input` (default `false`) are
   capabilities, set at provider or model level. A model declared without tool
   support is sent no schemas and cannot execute a tool even if it emits one.

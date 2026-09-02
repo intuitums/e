@@ -14,7 +14,6 @@ impl App {
                     text: String::new(),
                     thinking_block: None,
                     thinking: String::new(),
-                    thinking_started: None,
                     turn: Turn::new(),
                     started: Instant::now(),
                     error: None,
@@ -36,8 +35,9 @@ impl App {
                 }
             }
             SessionEvent::TextDelta(delta) => {
-                // Reply text starting ends the live thinking burst — it
-                // collapses to its one-line summary above the reply.
+                // Reply text starting ends the live thinking burst — the
+                // thought stays expanded above the reply; the next burst,
+                // if any, opens its own block.
                 self.end_thinking_burst();
                 if let Some(s) = &mut self.active {
                     s.turn.phase = TurnPhase::AssistantText;
@@ -62,9 +62,6 @@ impl App {
             SessionEvent::ReasoningDelta(delta) => {
                 if let Some(s) = &mut self.active {
                     if self.show_thinking {
-                        if s.thinking_block.is_none() {
-                            s.thinking_started = Some(Instant::now());
-                        }
                         s.thinking
                             .push_str(&crate::core::tools::sanitize_display(&delta));
                         let idx =
@@ -86,7 +83,7 @@ impl App {
                 // usage frames own the numbers.
             }
             SessionEvent::ToolBatchStart { calls } => {
-                // The pre-batch reasoning collapses where it sits; the tree
+                // The pre-batch reasoning burst ends where it sits; the tree
                 // then continues if the agent has not spoken since the last
                 // batch — one tree per working stretch, not one per batch.
                 self.end_thinking_burst();
@@ -234,8 +231,8 @@ impl App {
                     });
                     s.turn.recovered = None;
                 }
-                // The abandoned attempt's thinking collapses with its
-                // duration; the retry streams a fresh burst.
+                // The abandoned attempt's thinking burst ends where it sits;
+                // the retry streams a fresh burst.
                 self.end_thinking_burst();
             }
             SessionEvent::Recovered { attempt, limit } => {
@@ -301,10 +298,10 @@ impl App {
                         }
                     }
                 }
-                // The turn's final burst collapses with it — same moment,
-                // not early. Every other burst end (reply text, tools,
-                // retry, steer) collapsed where it happened; this catches
-                // the one that ran to the turn's end.
+                // The turn's final burst ends with it — same moment, not
+                // early. Every other burst end (reply text, tools, retry,
+                // steer) ended where it happened; this catches the one that
+                // ran to the turn's end.
                 self.end_thinking_burst();
                 let Some(s) = self.active.take() else { return };
                 // The reference grammar: a completed turn ends with a dim
@@ -385,30 +382,17 @@ fn open_block(transcript: &mut Transcript, index: &mut Option<usize>, kind: Kind
     }
 }
 
-/// End the live thinking burst: collapse its block (or blocks — the walk
-/// covers everything still live, not just the open index) to a single dim
-/// `Thought for Ns` row, using when the burst started. A no-op with no
-/// burst open — in particular when `show_thinking` is off, which never
-/// opens one.
+/// End the live thinking burst: detach it so the next reasoning opens a
+/// fresh block. The streamed thought stays where it sits, expanded, in
+/// `thinkingText` — there is no collapse to a dim `Thought for Ns` summary.
+/// That collapse shrank the frame mid-turn, and because the paint window
+/// tracks the transcript's tail, a shrink after the burst had scrolled into
+/// scrollback read as the whole screen jumping. A no-op with no burst open —
+/// in particular when `show_thinking` is off, which never opens one.
 impl App {
     pub(super) fn end_thinking_burst(&mut self) {
         let Some(s) = &mut self.active else { return };
-        if s.thinking_block.is_none() {
-            return;
-        }
-        let secs = s
-            .thinking_started
-            .map(|started| started.elapsed().as_secs())
-            .unwrap_or(0);
-        for block in &mut self.transcript.blocks {
-            if block.kind == Kind::Thinking && !block.done {
-                block.text = format!("Thought for {}", format_elapsed(secs));
-                block.done = true;
-                block.touch();
-            }
-        }
         s.thinking_block = None;
         s.thinking.clear();
-        s.thinking_started = None;
     }
 }

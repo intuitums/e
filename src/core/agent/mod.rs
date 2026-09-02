@@ -442,8 +442,8 @@ impl Agent {
     }
     /// The model's declared effort levels, in order; empty when it has no
     /// reasoning knob.
-    pub fn efforts(&self) -> Vec<String> {
-        self.model.efforts.clone()
+    pub fn effort_levels(&self) -> Vec<String> {
+        self.model.effort.clone()
     }
     /// The effort for the next request: the saved setting when this model
     /// supports it, else the model's strong default (`high` when declared,
@@ -454,15 +454,32 @@ impl Agent {
             .effort_override
             .clone()
             .or_else(|| crate::core::config::settings::get_string("effort"));
-        effort(&self.model.efforts, saved.as_deref())
+        effort(&self.model.effort, saved.as_deref())
     }
+    /// Select one of the current model's declared effort levels and persist it.
+    /// Returns false when this model does not accept the requested value.
+    pub fn set_effort(&mut self, effort: &str) -> Result<bool, std::io::Error> {
+        if !self.model.effort.iter().any(|level| level == effort) {
+            return Ok(false);
+        }
+        crate::core::config::settings::set_string("effort", effort)?;
+        // Keep the running agent in sync too. In particular, this replaces a
+        // launch-time override so /effort and shift+tab take effect now rather
+        // than only after e restarts.
+        self.options.effort_override = Some(effort.to_string());
+        Ok(true)
+    }
+
+    /// The settings panel wrote the persisted effort directly. Stop applying
+    /// an older launch/runtime override so the new value takes effect now.
+    pub fn use_saved_effort(&mut self) {
+        self.options.effort_override = None;
+    }
+
     /// Advance to the model's next effort level and persist it. None when
     /// the model has no reasoning knob.
-    pub fn cycle_effort(&self) -> Result<Option<String>, std::io::Error> {
-        if self.options.effort_override.is_some() {
-            return Ok(self.effort());
-        }
-        let levels = self.efforts();
+    pub fn cycle_effort(&mut self) -> Result<Option<String>, std::io::Error> {
+        let levels = self.effort_levels();
         if levels.is_empty() {
             return Ok(None);
         }
@@ -470,7 +487,9 @@ impl Agent {
             return Ok(None);
         };
         let next = next_effort(&levels, current.as_str());
-        crate::core::config::settings::set_string("effort", &next)?;
+        if !self.set_effort(&next)? {
+            return Ok(None);
+        }
         Ok(Some(next))
     }
     pub fn history_snapshot(&self) -> Vec<ChatMessage> {

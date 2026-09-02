@@ -477,10 +477,9 @@ fn wrap_code_line(line: &str, width: usize, indent: &str) -> Vec<String> {
     rows
 }
 
-/// The reference code block: a dim `─ label ─…` rule above, flush-left code,
-/// a dim solid rule below — no side rails, no padding. Below six columns the
-/// rules disappear entirely and the code wraps bare. Geometry byte-pinned by
-/// the parity tests against the reference's own literals.
+/// A compact boxed code block with the language in its top border. Code stays
+/// flush-left inside dim side rails; below six columns the border disappears
+/// and code wraps bare.
 pub fn code_panel(theme: &Theme, code: &str, language: &str, cols: usize) -> Vec<String> {
     let source = code.trim_end_matches('\n');
     // An unlabeled fence renders raw — the highlighter colors nothing it
@@ -503,20 +502,20 @@ pub fn code_panel(theme: &Theme, code: &str, language: &str, cols: usize) -> Vec
         .chars()
         .map(|c| c.width().unwrap_or(0))
         .sum::<usize>();
-    let panel_width = max_code_width
-        .max(if label_width > 0 { label_width + 4 } else { 0 })
+    let panel_width = (max_code_width + 2)
+        .max(if label_width > 0 { label_width + 6 } else { 0 })
         .max(6)
         .min(cols);
+    let inner_width = panel_width - 2;
 
     let mut out = Vec::new();
     if label_width > 0 {
-        // Label truncated by display width to panel_width - 4; a label the
-        // frame can't carry at all becomes `?`.
+        // Label truncated by display width to the top border's inner width.
         let mut shown = String::new();
         let mut used = 0usize;
         for c in language.chars() {
             let w = c.width().unwrap_or(0);
-            if used + w > panel_width - 4 {
+            if used + w > inner_width.saturating_sub(3) {
                 break;
             }
             shown.push(c);
@@ -526,16 +525,21 @@ pub fn code_panel(theme: &Theme, code: &str, language: &str, cols: usize) -> Vec
             shown.push('?');
             used = 1;
         }
-        let tail = "─".repeat(panel_width.saturating_sub(3 + used));
-        out.push(format!("{DIM_ON}─ {shown} {tail}{WEIGHT_OFF}"));
+        let tail = "─".repeat(inner_width.saturating_sub(3 + used));
+        out.push(format!("{DIM_ON}┌─ {shown} {tail}┐{WEIGHT_OFF}"));
     } else {
-        out.push(format!("{DIM_ON}{}{WEIGHT_OFF}", "─".repeat(panel_width)));
+        out.push(format!("{DIM_ON}┌{}┐{WEIGHT_OFF}", "─".repeat(inner_width)));
     }
     for line in &lines {
         let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-        out.extend(wrap_code_line(line, panel_width, &indent));
+        for wrapped in wrap_code_line(line, inner_width, &indent) {
+            let padding = " ".repeat(inner_width.saturating_sub(visible_width(&wrapped)));
+            out.push(format!(
+                "{DIM_ON}│{WEIGHT_OFF}{wrapped}{padding}{DIM_ON}│{WEIGHT_OFF}"
+            ));
+        }
     }
-    out.push(format!("{DIM_ON}{}{WEIGHT_OFF}", "─".repeat(panel_width)));
+    out.push(format!("{DIM_ON}└{}┘{WEIGHT_OFF}", "─".repeat(inner_width)));
     out
 }
 

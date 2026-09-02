@@ -15,12 +15,12 @@
 		{
 			"id": "gemini-3-pro",
 			"context_window": 1048576,
-			"efforts": ["low", "high"]
+			"effort": ["low", "high"]
 		},
 		{
 			"id": "gemini-3-flash",
 			"context_window": 1048576,
-			"efforts": ["low", "high"]
+			"effort": ["low", "high"]
 		}
 	]
 }

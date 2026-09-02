@@ -159,10 +159,11 @@ pub fn all(effort_levels: Vec<String>) -> Vec<Setting> {
             label: "Show thinking".into(),
             category: "Interface",
             options: vec!["on".into(), "off".into()],
-            // On by default: with it off, a reasoning model's long silent
-            // thinking phases look exactly like a hung stream. Set `off` to
-            // get the old quiet behavior back.
-            default: "on".into(),
+            // Off by default: e shows only the reply deltas, and the activity
+            // row's blinking dot and elapsed clock already say a silent
+            // reasoning phase is working, not hung. Readers who want the
+            // model's thinking in the transcript turn it `on`.
+            default: "off".into(),
         },
         Setting {
             key: "auto_update".into(),

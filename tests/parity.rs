@@ -117,38 +117,50 @@ fn dark() -> Theme {
 }
 
 #[test]
-fn code_panel_geometry_matches_the_reference() {
+fn code_panel_geometry_is_boxed_on_all_sides() {
     let t = dark();
-    // The reference's own literals: a dim `─ label ─…` rule, flush-left
-    // code, a dim solid rule below — no side rails, no padding.
     assert_eq!(
         code_panel(&t, "x", "zig", 80),
-        vec!["\x1b[2m─ zig ─\x1b[22m", "x", "\x1b[2m───────\x1b[22m"]
+        vec![
+            "\x1b[2m┌─ zig ─┐\x1b[22m",
+            "\x1b[2m│\x1b[22mx      \x1b[2m│\x1b[22m",
+            "\x1b[2m└───────┘\x1b[22m"
+        ]
     );
     assert_eq!(
         code_panel(&t, "x", "", 80),
-        vec!["\x1b[2m──────\x1b[22m", "x", "\x1b[2m──────\x1b[22m"]
+        vec![
+            "\x1b[2m┌────┐\x1b[22m",
+            "\x1b[2m│\x1b[22mx   \x1b[2m│\x1b[22m",
+            "\x1b[2m└────┘\x1b[22m"
+        ]
     );
-    // Label truncated by display width to panel_width - 4 when narrow.
+    // Narrow labels truncate by display width; a wide rune that cannot fit
+    // the available label cells becomes `?`.
     assert_eq!(
         code_panel(&t, "x", "typescript", 8),
-        vec!["\x1b[2m─ type ─\x1b[22m", "x", "\x1b[2m────────\x1b[22m"]
+        vec![
+            "\x1b[2m┌─ typ ┐\x1b[22m",
+            "\x1b[2m│\x1b[22mx     \x1b[2m│\x1b[22m",
+            "\x1b[2m└──────┘\x1b[22m"
+        ]
     );
-    // A wide rune measures two cells, so the frame stays square.
     assert_eq!(
         code_panel(&t, "x", "漢", 6),
-        vec!["\x1b[2m─ 漢 ─\x1b[22m", "x", "\x1b[2m──────\x1b[22m"]
+        vec![
+            "\x1b[2m┌─ ? ┐\x1b[22m",
+            "\x1b[2m│\x1b[22mx   \x1b[2m│\x1b[22m",
+            "\x1b[2m└────┘\x1b[22m"
+        ]
     );
-    // A retired reference behavior, deliberately not ported back: nothing
-    // infers a language an unlabeled fence didn't declare. The fence
-    // renders bare — no label in the rule, the content unhighlighted.
+    // Nothing infers a language an unlabeled fence did not declare.
     let bare = code_panel(&t, "{\"a\": 1}", "", 80);
     assert_eq!(
         bare,
         vec![
-            "\x1b[2m────────\x1b[22m",
-            "{\"a\": 1}",
-            "\x1b[2m────────\x1b[22m"
+            "\x1b[2m┌────────┐\x1b[22m",
+            "\x1b[2m│\x1b[22m{\"a\": 1}\x1b[2m│\x1b[22m",
+            "\x1b[2m└────────┘\x1b[22m"
         ]
     );
 }
