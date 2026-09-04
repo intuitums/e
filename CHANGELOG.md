@@ -7,6 +7,10 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Session resume opens across all workspaces. Choosing a session from another
+  directory restarts e in that session's recorded workspace and reopens the
+  exact selected log, so tools, trust, extensions, and project instructions use
+  the directory where the conversation began.
 - Running tools stay connected to their tool tree. Command branches remain
   open while output streams beneath them, then close on completion. OpenAI
   reasoning summaries preserve paragraph breaks and stay hidden unless Show

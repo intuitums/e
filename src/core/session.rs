@@ -176,6 +176,40 @@ pub fn normalized_cwd(cwd: &Path) -> PathBuf {
     cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf())
 }
 
+/// The workspace recorded in a session header. Cross-workspace resume reads
+/// this before attaching the log so it can restart e in the directory whose
+/// tools, instructions, trust, and extensions belong to the conversation.
+pub fn cwd_of(path: &Path) -> std::io::Result<PathBuf> {
+    let reader = BufReader::new(File::open(path)?);
+    for (index, line) in reader.lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Entry>(&line) {
+            Ok(Entry::Header {
+                format_version,
+                cwd,
+                ..
+            }) => {
+                validate_format(format_version)?;
+                if cwd.is_empty() {
+                    return Err(std::io::Error::other("session workspace is missing"));
+                }
+                return Ok(normalized_cwd(Path::new(&cwd)));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return Err(std::io::Error::other(format!(
+                    "corrupt session record at line {}: {error}",
+                    index + 1
+                )))
+            }
+        }
+    }
+    Err(std::io::Error::other("session header is missing"))
+}
+
 /// A collision-resistant workspace key. The previous slash-to-hyphen scheme
 /// mapped distinct paths such as `a/b-c` and `a-b/c` to the same directory.
 fn cwd_slug(cwd: &Path) -> String {

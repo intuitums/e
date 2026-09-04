@@ -35,7 +35,15 @@ impl ToolMode {
 }
 
 /// Built-in flags that consume the following token when one is present.
-const VALUE_FLAGS: &[&str] = &["--model", "-m", "--effort", "--ef", "--image", "-i"];
+const VALUE_FLAGS: &[&str] = &[
+    "--model",
+    "-m",
+    "--effort",
+    "--ef",
+    "--image",
+    "-i",
+    "--resume-file",
+];
 
 /// Every built-in flag name, canonical and alias: suggestion candidates and
 /// the bool/value split for raw-argv scans.
@@ -59,6 +67,9 @@ const ALL_FLAGS: &[&str] = &[
     "-c",
     "--resume",
     "-r",
+    // Internal handoff used after the session picker chooses another
+    // workspace. It is parsed like a normal value flag but omitted from help.
+    "--resume-file",
     "--help",
     "-h",
     "--version",
@@ -174,6 +185,9 @@ pub struct Options {
     pub images: Vec<String>,
     pub continue_session: bool,
     pub resume_session: bool,
+    /// Exact session selected before a same-binary cross-workspace handoff.
+    /// Internal: users choose through --resume rather than passing log paths.
+    pub resume_file: Option<String>,
     /// Accepted for compatibility; diagnostics are always local-only.
     pub no_network: bool,
     pub positional: Vec<String>,
@@ -256,6 +270,9 @@ pub fn parse(args: Vec<String>, extension_flags: &[String]) -> Result<Options, S
                 .push(take_value(&args, &mut index, inline, "--image")?),
             "--continue" | "-c" => out.continue_session = true,
             "--resume" | "-r" => out.resume_session = true,
+            "--resume-file" => {
+                out.resume_file = Some(take_value(&args, &mut index, inline, "--resume-file")?)
+            }
             "--no-network" => out.no_network = true,
             // Extensions have already had their chance to consume their
             // declared flags, so a leftover flag is a typo: fail with a
@@ -330,6 +347,21 @@ mod tests {
         assert_eq!(ToolMode::None.restrict(ToolMode::All), ToolMode::None);
         assert_eq!(ToolMode::All.restrict(ToolMode::None), ToolMode::None);
         assert_eq!(ToolMode::All.restrict(ToolMode::All), ToolMode::All);
+    }
+
+    #[test]
+    fn exact_resume_file_survives_the_internal_workspace_handoff() {
+        let options = parsed(&[
+            "--resume",
+            "--resume-file",
+            "/tmp/session.jsonl",
+            "--",
+            "finish",
+            "this",
+        ]);
+        assert!(options.resume_session);
+        assert_eq!(options.resume_file.as_deref(), Some("/tmp/session.jsonl"));
+        assert_eq!(options.positional, vec!["finish", "this"]);
     }
 
     #[test]

@@ -250,6 +250,40 @@ async fn main() -> std::io::Result<()> {
             usage_error(&host, json_requested, with_subcommand_usage(message, &args)).await;
         }
     };
+    // Normalize the options a cross-workspace picker must carry into its
+    // same-binary handoff. Prompt and image args stay separate: a /resume
+    // opened later in the session must not submit the launch prompt again.
+    let mut resume_args = Vec::new();
+    if options.no_extensions {
+        resume_args.push("--no-extensions".into());
+    }
+    if options.no_save {
+        resume_args.push("--no-save".into());
+    }
+    if options.tool_mode == cli::ToolMode::None {
+        resume_args.push("--no-tools".into());
+    }
+    if let Some(model) = &options.model {
+        resume_args.extend(["--model".into(), model.clone()]);
+    }
+    if let Some(effort) = &options.effort {
+        resume_args.extend(["--effort".into(), effort.clone()]);
+    }
+    let mut resume_initial_args = Vec::new();
+    let launch_cwd = std::env::current_dir().unwrap_or_default();
+    for image in &options.images {
+        let path = std::path::PathBuf::from(image);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            launch_cwd.join(path)
+        };
+        resume_initial_args.extend(["--image".into(), path.display().to_string()]);
+    }
+    if !options.positional.is_empty() {
+        resume_initial_args.push("--".into());
+        resume_initial_args.extend(options.positional.clone());
+    }
     let args = &options.positional;
 
     // One isolated near-miss word is a mistyped command, not a prompt.
@@ -378,6 +412,9 @@ async fn main() -> std::io::Result<()> {
             initial,
             continue_session: options.continue_session,
             resume_session: options.resume_session,
+            resume_file: options.resume_file.clone().map(std::path::PathBuf::from),
+            resume_args,
+            resume_initial_args,
             model: selected,
             agent: agent_options(&options),
             images,

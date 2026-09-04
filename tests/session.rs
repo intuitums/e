@@ -72,6 +72,10 @@ fn session_round_trips_and_lists() {
     let path = s.path().to_path_buf();
     drop(s);
 
+    assert_eq!(
+        session::cwd_of(&path).unwrap(),
+        session::normalized_cwd(&cwd)
+    );
     let loaded = Session::load(&path).unwrap();
     assert_eq!(loaded.len(), 3);
     assert_eq!(loaded[0].role, "user");

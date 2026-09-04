@@ -196,6 +196,12 @@ impl Drop for ActiveLogin {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RelaunchRequest {
+    cwd: String,
+    args: Vec<String>,
+}
+
 struct App {
     theme: Theme,
     /// The composer's chord overrides from `~/.e/keybindings.json`. Reread
@@ -280,8 +286,15 @@ struct App {
     session_epoch: u64,
     /// A new version is installed on disk; /reload switches to it.
     update_installed: Option<String>,
-    /// Exit the loop and exec the (updated) binary with -c.
-    relaunch: bool,
+    /// Exit through terminal and extension cleanup, then replace this process.
+    /// Updates continue the current workspace; a cross-workspace resume names
+    /// the exact selected log so a newer sibling cannot win during handoff.
+    relaunch: Option<RelaunchRequest>,
+    /// Process-level flags retained if a session selection moves to another
+    /// workspace. Initial prompt/image args are separate so a later /resume
+    /// cannot submit the process's old launch prompt a second time.
+    resume_args: Vec<String>,
+    resume_initial_args: Vec<String>,
     /// The latest frame has waited on the paint thread long enough to make
     /// terminal output, rather than provider work, the current bottleneck.
     rendering_delayed: bool,
@@ -834,8 +847,10 @@ impl App {
         }
         let cwd = crate::core::session::normalized_cwd(&self.agent.cwd());
         // Every workspace's sessions, with a Tab-cycled scope filter that
-        // opens on the current workspace. Each row carries the reference's
-        // dim right cluster: `workspace · age · N turns`. A workspace's own
+        // opens on all workspaces. `--resume` must find a conversation from
+        // any launch directory; Current workspace stays one Tab away. Each
+        // row carries the reference's dim right cluster:
+        // `workspace · age · N turns`. A workspace's own
         // directory name stands in for it when unique across the list; two
         // `proj` directories fall back to the full `~`-collapsed path so
         // the rows stay distinguishable.
@@ -900,7 +915,7 @@ impl App {
             Menu::new(MenuKind::Sessions, "Sessions", HINT_SESSIONS, items).with_tabs(
                 vec!["Current workspace".into(), "All workspaces".into()],
                 Some(1),
-                0,
+                1,
                 "",
             ),
         );
@@ -1050,6 +1065,28 @@ impl App {
         // gap between a submit and its TurnStart event.
         if self.active.is_some() || self.agent.is_streaming() {
             self.notice("a turn is running — press Esc to stop it, then resume".into());
+            return;
+        }
+        let session_cwd = match crate::core::session::cwd_of(&path) {
+            Ok(cwd) => cwd,
+            Err(e) => {
+                self.notice(format!("could not open session: {e}"));
+                self.release_initial_prompt();
+                return;
+            }
+        };
+        if crate::core::session::normalized_cwd(&self.agent.cwd()) != session_cwd {
+            let mut args = self.resume_args.clone();
+            args.push("--resume-file".into());
+            args.push(path.display().to_string());
+            if self.pending_initial.is_some() {
+                args.extend(self.resume_initial_args.clone());
+            }
+            self.relaunch = Some(RelaunchRequest {
+                cwd: session_cwd.display().to_string(),
+                args,
+            });
+            self.should_quit = true;
             return;
         }
         let messages = match crate::core::session::Session::load(&path) {
@@ -1712,7 +1749,10 @@ impl App {
         // switch: exit through the normal cleanup and exec the new binary
         // with -c, which resumes this session.
         if self.update_installed.is_some() {
-            self.relaunch = true;
+            self.relaunch = Some(RelaunchRequest {
+                cwd: self.agent.cwd().display().to_string(),
+                args: vec!["-c".into()],
+            });
             self.should_quit = true;
             return;
         }
@@ -2178,6 +2218,9 @@ pub struct RunOptions {
     pub initial: String,
     pub continue_session: bool,
     pub resume_session: bool,
+    pub resume_file: Option<std::path::PathBuf>,
+    pub resume_args: Vec<String>,
+    pub resume_initial_args: Vec<String>,
     pub model: Model,
     pub agent: AgentOptions,
     pub images: Vec<crate::core::providers::ImageInput>,
@@ -2193,6 +2236,9 @@ pub async fn run(
         initial,
         continue_session,
         resume_session,
+        resume_file,
+        resume_args,
+        resume_initial_args,
         model,
         agent: agent_options,
         images,
@@ -2285,7 +2331,9 @@ pub async fn run(
         queue_review: None,
         session_epoch: 0,
         update_installed: None,
-        relaunch: false,
+        relaunch: None,
+        resume_args,
+        resume_initial_args,
         rendering_delayed: false,
         last_paint_failure: None,
         light_background: detected,
@@ -2341,8 +2389,12 @@ pub async fn run(
             ));
         }
     }
-    if resume_session {
-        // The reference behavior: launch straight into the session picker.
+    if let Some(path) = resume_file {
+        // An exact target arrives only from a cross-workspace picker handoff.
+        // The process is now rooted in the session's own workspace, so attach
+        // it before an optional launch prompt is released below.
+        app.resume_path(path);
+    } else if resume_session {
         app.open_resume_menu();
     } else if continue_session {
         app.resume_recent();
@@ -2949,22 +3001,23 @@ pub async fn run(
     // Let the final frame land before the terminal is restored. Shells use
     // detached process groups, so stop them explicitly before this process
     // gives extensions their shutdown notification.
+    let relaunch = app.relaunch.take();
     painter.shutdown();
     crate::core::tools::kill_tracked_processes();
     app.host.shutdown().await;
+    // Release the current session lock before exec. The replacement keeps the
+    // same PID, so leaving the guard alive would make its own lock look busy.
+    drop(app);
     drop(_guard);
     // The tab title we set at launch (or from a session name) is ours to
     // clear — the reference leaves the terminal pristine on exit.
     set_tab_title("");
-    if app.relaunch {
-        // The terminal is restored and the host is down: replace this
-        // process with the updated binary, continuing the same session.
-        let cwd = std::env::current_dir()
-            .unwrap_or_default()
-            .display()
-            .to_string();
-        let args = vec!["-c".to_string()];
-        if let Err(error) = relaunch_self(&cwd, &args, &std::collections::BTreeMap::new()) {
+    if let Some(relaunch) = relaunch {
+        if let Err(error) = relaunch_self(
+            &relaunch.cwd,
+            &relaunch.args,
+            &std::collections::BTreeMap::new(),
+        ) {
             eprintln!("relaunch failed: {error} — start e again by hand");
         }
     }
@@ -3445,13 +3498,54 @@ mod tests {
             queue_review: None,
             session_epoch: 0,
             update_installed: None,
-            relaunch: false,
+            relaunch: None,
+            resume_args: Vec::new(),
+            resume_initial_args: Vec::new(),
             rendering_delayed: false,
             last_paint_failure: None,
             light_background: false,
             signed_in: false,
             status_effort: None,
         }
+    }
+
+    #[test]
+    fn cross_workspace_resume_relaunches_to_the_exact_selected_session() {
+        let target = std::env::temp_dir().join(format!("e-resume-target-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&target).unwrap();
+        let path = target.join("picked.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session\",\"format_version\":1,\"id\":\"picked\",\"cwd\":{},\"created\":1,\"model\":\"mock/m\"}}\n",
+                serde_json::to_string(&target.to_string_lossy()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let mut app = session_app();
+        app.resume_args = vec!["--no-tools".into()];
+        app.resume_initial_args = vec!["--".into(), "finish this".into()];
+        app.pending_initial = Some("finish this".into());
+        app.resume_path(path.clone());
+
+        assert!(app.should_quit);
+        assert_eq!(
+            app.relaunch,
+            Some(RelaunchRequest {
+                cwd: crate::core::session::normalized_cwd(&target)
+                    .display()
+                    .to_string(),
+                args: vec![
+                    "--no-tools".into(),
+                    "--resume-file".into(),
+                    path.display().to_string(),
+                    "--".into(),
+                    "finish this".into(),
+                ],
+            })
+        );
+        let _ = std::fs::remove_dir_all(target);
     }
 
     #[test]
