@@ -532,7 +532,10 @@ fn live_tool_group_replaces_running_state_and_streams_output() {
     assert!(!streaming.iter().any(|line| line.contains("cargo test")));
     let overlay = group.overlay_rows(&theme, 80);
     assert!(overlay[0].contains("Running cargo test"));
-    assert!(overlay[0].contains('└'), "a tree's focused call wears └");
+    assert!(
+        overlay[0].contains('├'),
+        "a running command keeps its output branch open"
+    );
     assert!(overlay.iter().any(|line| line.contains("one")));
     // The reference pluralizes the elision row: one hidden line is a "line".
     assert!(overlay
@@ -586,12 +589,14 @@ fn running_write_and_edit_rows_stay_lean() {
     )]);
     group.start_tool(1);
     // A write streams no inline content: the overlay says "Writing
-    // src/lib.rs" and nothing more — no file dump. (Full content still
-    // lands behind ctrl+o.)
+    // src/lib.rs" and nothing more. Full content still lands behind ctrl+o.
     group.append_tool_output(1, "hello\nworld\n");
     let overlay = group.overlay_rows(&theme, 80);
     assert!(overlay[0].contains("Writing src/lib.rs"), "{overlay:?}");
-    assert!(overlay[0].contains('●'), "a lone call wears the ● marker");
+    assert!(
+        overlay[0].contains('└'),
+        "a lone running write stays attached to its tree"
+    );
     assert!(!overlay.iter().any(|line| line.contains('│')));
     let rows = group.lines_for_test(&theme, 80);
     assert!(!rows.iter().any(|line| line.contains('│')));

@@ -190,12 +190,14 @@ fn dialects() -> Vec<DialectCase> {
             history: History::UserOnly,
             sse: concat!(
                 "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
-                "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"hmm\"}\n\n",
+                "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"planning\"}\n\n",
+                "data: {\"type\":\"response.reasoning_summary_part.done\"}\n\n",
+                "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"testing\"}\n\n",
                 "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"c1\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}\n\n",
                 "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n",
             ),
             text: "hi",
-            reasoning: "hmm",
+            reasoning: "planning\n\ntesting",
             usage: Some((10, 2, 0)),
             tool: ToolExpect::Exact {
                 id: "c1",
