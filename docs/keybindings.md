@@ -19,7 +19,7 @@ falls back to e's built-in bindings untouched.
   `kill_to_end`, `kill_to_start`, `kill_word` — or `"none"` to unbind a
   built-in chord (the key is swallowed, not typed as a literal character).
 - Only chords not already claimed by e's application-level shortcuts
-  (ctrl+c, ctrl+p, ctrl+d, tab, shift+tab, menu navigation) reach this
+  (ctrl+c, ctrl+p, tab, shift+tab, menu navigation) reach this
   keymap — binding one of those here has no effect, since the app-level
   handler runs first.
 
