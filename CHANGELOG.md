@@ -7,6 +7,14 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Composer papercuts: `ctrl+d` deletes forward when the composer has text
+  (the empty-composer quit is unchanged), and a screenshot paste onto a
+  model that cannot take images keeps your question — the image is dropped
+  with a notice instead of the whole message vanishing.
+- `shift+tab` steps a picker's tabs backward while one is open (models,
+  sessions, skills); the reasoning-effort shortcut only fires on the bare
+  composer, so a picker or panel can no longer hide an effort change it
+  didn't ask for.
 - Explicit model `context_window` values in `~/.e/models.json` now remain
   authoritative across live catalog refreshes and e updates. Provider-reported
   windows still replace built-in seed values when no user override exists.
