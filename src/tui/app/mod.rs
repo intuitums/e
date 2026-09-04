@@ -38,13 +38,11 @@ mod menus;
 struct ActiveTurn {
     /// The current assistant text block, if one is streaming.
     block: Option<usize>,
-    text: String,
     /// The live thinking block for the current burst, if reasoning has
     /// streamed. Ending a burst detaches this so the next reasoning opens a
     /// fresh block; the finished thought stays expanded in place — this index
     /// is only the open segment.
     thinking_block: Option<usize>,
-    thinking: String,
     turn: Turn,
     started: Instant,
     error: Option<String>,
@@ -3627,6 +3625,23 @@ mod tests {
 
         assert!(app.queue_review.is_none());
         assert!(app.editor.is_empty());
+    }
+
+    #[test]
+    fn streamed_deltas_append_to_the_active_transcript_block() {
+        let mut app = session_app();
+        app.on_session_event(SessionEvent::TurnStart);
+        app.on_session_event(SessionEvent::TextDelta("first ".into()));
+        app.on_session_event(SessionEvent::TextDelta("second".into()));
+
+        let replies: Vec<_> = app
+            .transcript
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Assistant)
+            .collect();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].text, "first second");
     }
 
     fn thinking_flags(app: &App) -> Vec<(String, bool)> {

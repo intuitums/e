@@ -81,6 +81,30 @@ pub enum Kind {
     System,
 }
 
+/// One rendered block version. Streaming blocks may briefly retain a stale
+/// version so full-document Markdown parsing stays within a fixed work rate.
+struct RenderCache {
+    width: usize,
+    phase: bool,
+    generation: u64,
+    rendered_at: std::time::Instant,
+    lines: Vec<String>,
+}
+
+/// Pace complete-source rendering to at most 4 MiB of source per second.
+/// Small replies retain the 33 ms frame cadence; larger ones update less
+/// often instead of consuming progressively more work on every frame.
+fn stream_render_interval(source_bytes: usize) -> std::time::Duration {
+    const BYTES_PER_SECOND: u128 = 4 * 1024 * 1024;
+    const FRAME_NANOS: u128 = 33_000_000;
+    let nanos = (source_bytes as u128)
+        .saturating_mul(1_000_000_000)
+        .div_ceil(BYTES_PER_SECOND)
+        .max(FRAME_NANOS)
+        .min(u64::MAX as u128);
+    std::time::Duration::from_nanos(nanos as u64)
+}
+
 pub struct Block {
     pub kind: Kind,
     pub text: String,
@@ -101,7 +125,9 @@ pub struct Block {
     pub preview: Vec<String>,
     /// More output rows than the preview shows (drives the elision row).
     pub more: usize,
-    cache: Option<(usize, bool, Vec<String>)>,
+    cache: Option<RenderCache>,
+    /// True while provider deltas are appending to this text block.
+    streaming: bool,
     /// Bumped on every touch — the review screen's cache key folds these
     /// into one fingerprint so its projection rebuilds only when a block
     /// actually changed.
@@ -126,6 +152,7 @@ impl Block {
             preview: Vec::new(),
             more: 0,
             cache: None,
+            streaming: false,
             generation: 0,
         }
     }
@@ -133,6 +160,24 @@ impl Block {
     pub fn touch(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.cache = None;
+    }
+
+    /// Append one untrusted provider delta without copying the accumulated
+    /// response. Rendering is paced separately from event ingestion.
+    pub fn append_streaming(&mut self, delta: &str) {
+        self.text
+            .push_str(&crate::core::tools::sanitize_display(delta));
+        self.generation = self.generation.wrapping_add(1);
+        self.streaming = true;
+    }
+
+    /// End a streamed segment and force its complete source through the next
+    /// render, regardless of the live parsing budget.
+    pub fn finish_streaming(&mut self) {
+        if self.streaming {
+            self.streaming = false;
+            self.cache = None;
+        }
     }
 
     /// Build a live group whose header and child order are known up front.
@@ -269,13 +314,31 @@ impl Block {
         // Pin every other block to one phase so the blink tick can't
         // invalidate the whole transcript's caches during a turn.
         let phase = blink_on && self.animates();
-        let valid = matches!(&self.cache, Some((w, p, _)) if *w == width && *p == phase);
-        if !valid {
+        let geometry_matches = self
+            .cache
+            .as_ref()
+            .is_some_and(|cache| cache.width == width && cache.phase == phase);
+        let current = self
+            .cache
+            .as_ref()
+            .is_some_and(|cache| cache.generation == self.generation);
+        let within_stream_budget = self.streaming
+            && geometry_matches
+            && self.cache.as_ref().is_some_and(|cache| {
+                cache.rendered_at.elapsed() < stream_render_interval(self.text.len())
+            });
+        if !geometry_matches || (!current && !within_stream_budget) {
             let lines = self.render(theme, width, phase);
-            self.cache = Some((width, phase, lines));
+            self.cache = Some(RenderCache {
+                width,
+                phase,
+                generation: self.generation,
+                rendered_at: std::time::Instant::now(),
+                lines,
+            });
         }
         match &self.cache {
-            Some((_, _, lines)) => lines,
+            Some(cache) => &cache.lines,
             // Unreachable: the cache was just filled above. An empty slice
             // renders as nothing rather than panicking if that ever breaks.
             None => &[],
@@ -1011,13 +1074,46 @@ mod tests {
         let theme = theme();
         let mut block = Block::new(Kind::Assistant, "some **finished** reply");
         block.lines(&theme, 80, true);
-        let cached = block.cache.as_ref().unwrap().2.as_ptr();
+        let cached = block.cache.as_ref().unwrap().lines.as_ptr();
         block.lines(&theme, 80, false);
         assert_eq!(
-            block.cache.as_ref().unwrap().2.as_ptr(),
+            block.cache.as_ref().unwrap().lines.as_ptr(),
             cached,
             "a blink flip re-rendered a block with no running tool"
         );
+    }
+
+    #[test]
+    fn streaming_render_work_has_a_fixed_source_byte_budget() {
+        assert_eq!(
+            stream_render_interval(1),
+            std::time::Duration::from_millis(33)
+        );
+        assert_eq!(
+            stream_render_interval(4 * 1024 * 1024),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            stream_render_interval(8 * 1024 * 1024),
+            std::time::Duration::from_secs(2)
+        );
+    }
+
+    #[test]
+    fn a_stream_keeps_its_cache_until_the_segment_is_finished() {
+        let theme = theme();
+        let mut block = Block::new(Kind::Assistant, "");
+        block.append_streaming("first");
+        block.lines(&theme, 80, true);
+        let rendered_generation = block.cache.as_ref().unwrap().generation;
+
+        block.append_streaming(" second");
+        assert!(block.cache.is_some(), "a delta discarded the paced cache");
+        assert_ne!(rendered_generation, block.generation);
+
+        block.finish_streaming();
+        assert!(block.cache.is_none(), "the final render was not forced");
+        assert!(block.lines(&theme, 80, true).join("\n").contains("second"));
     }
 
     /// The focused running call leaves the tree for the transient overlay,
@@ -1043,9 +1139,9 @@ mod tests {
         assert!(overlay[0].contains('●'), "a lone call wears the ● marker");
         // The block's own cache is phase-stable.
         block.lines(&theme, 80, true);
-        let cached = block.cache.as_ref().unwrap().2.as_ptr();
+        let cached = block.cache.as_ref().unwrap().lines.as_ptr();
         block.lines(&theme, 80, false);
-        assert_eq!(block.cache.as_ref().unwrap().2.as_ptr(), cached);
+        assert_eq!(block.cache.as_ref().unwrap().lines.as_ptr(), cached);
 
         block.finish_tool(1, ToolOutcome::Completed, "done".into(), "");
         assert_eq!(block.focused_running(), None);
