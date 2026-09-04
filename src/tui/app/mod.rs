@@ -284,6 +284,11 @@ struct App {
     update_installed: Option<String>,
     /// Exit the loop and exec the (updated) binary with -c.
     relaunch: bool,
+    /// The latest frame has waited on the paint thread long enough to make
+    /// terminal output, rather than provider work, the current bottleneck.
+    rendering_delayed: bool,
+    /// Dedupe one paint-failure episode while retries keep posting frames.
+    last_paint_failure: Option<String>,
     /// OSC-11 background detection, probed once at startup before the
     /// event stream owns stdin. Re-probing mid-session would block the
     /// loop and swallow keystrokes, so a changed terminal background
@@ -473,29 +478,36 @@ impl App {
             }
         }
         if let Some(s) = &self.active {
-            if let Some(label) = s.turn.label(s.started.elapsed().as_secs()) {
+            if self.rendering_delayed {
+                lines.push(String::new());
+                let dot = if blink_on { "•" } else { " " };
+                lines.push(
+                    self.theme
+                        .fg("warning", &format!("{dot} Rendering delayed")),
+                );
+            } else if let Some(label) = s.turn.label(s.started.elapsed().as_secs()) {
                 lines.push(String::new());
                 if s.turn.recovered.is_some() {
                     // A brief, non-blinking confirmation — not an ongoing
                     // wait, so no dot animation.
                     lines.push(self.theme.fg("success", &format!("✓ {label}")));
                 } else if s.turn.phase == TurnPhase::Retrying {
-                    // Same blinking dot as Thinking — still an in-progress
-                    // wait — toned as a warning so a struggling provider
+                    // Keep the activity row's blinking dot, toned as a
+                    // warning so a struggling provider
                     // reads distinctly from ordinary thinking.
                     let dot = if blink_on { "•" } else { " " };
                     lines.push(self.theme.fg("warning", &format!("{dot} {label}")));
                 } else if matches!(
                     s.turn.phase,
-                    TurnPhase::Thinking | TurnPhase::Tool | TurnPhase::AssistantText
+                    TurnPhase::Waiting
+                        | TurnPhase::Thinking
+                        | TurnPhase::ToolCall
+                        | TurnPhase::Tool
+                        | TurnPhase::AssistantText
                 ) {
                     // The activity dot runs on the same column as the user
-                    // rail — flush left, no indent. The dot keeps its accent
-                    // presence-blink (shows and hides, no half-state); the
-                    // label — verb, elapsed, and token tail — reads in one
-                    // dim tone beside it. Once the reply text is streaming,
-                    // the answer itself carries the turn: the dot drops and
-                    // the label sits flush-left where the dot was.
+                    // rail. Once reply text is visible, the answer itself
+                    // carries the turn and the label sits where the dot was.
                     if s.turn.phase == TurnPhase::AssistantText {
                         lines.push(self.theme.fg("dim", &label));
                     } else {
@@ -2234,6 +2246,8 @@ pub async fn run(
         session_epoch: 0,
         update_installed: None,
         relaunch: false,
+        rendering_delayed: false,
+        last_paint_failure: None,
         light_background: detected,
         signed_in: false,
         status_effort: None,
@@ -2904,6 +2918,17 @@ pub async fn run(
                 }
             }
         }
+        let paint_status = painter.status();
+        app.rendering_delayed = paint_status.delayed(Duration::from_millis(500));
+        match paint_status.failure.as_ref().map(|(_, error)| error) {
+            Some(error) if app.last_paint_failure.as_ref() != Some(error) => {
+                app.notice(format!("render failed: {error}"));
+                app.last_paint_failure = Some(error.clone());
+            }
+            None => app.last_paint_failure = None,
+            Some(_) => {}
+        }
+
         let now = tokio::time::Instant::now();
         if now >= next_paint || app.should_quit {
             let frame = if app.viewer.is_some() {
@@ -3422,6 +3447,8 @@ mod tests {
             session_epoch: 0,
             update_installed: None,
             relaunch: false,
+            rendering_delayed: false,
+            last_paint_failure: None,
             light_background: false,
             signed_in: false,
             status_effort: None,

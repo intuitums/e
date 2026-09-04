@@ -7,6 +7,10 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Turn and paint workers no longer fail silently. A supervised turn always
+  emits one `TurnEnd`, painter write failures enter the transcript, and the
+  activity row flags a delayed renderer. The row itself still reads
+  `Thinking` through every phase of a turn.
 - Composer papercuts: `ctrl+d` deletes forward when the composer has text
   (the empty-composer quit is unchanged), and a screenshot paste onto a
   model that cannot take images keeps your question — the image is dropped
