@@ -140,8 +140,13 @@ fn sustained_stream_finishes_and_restores_the_terminal() {
         .env("E_HOME", fixture.home())
         .env("CAP_PROMPT", "stream")
         .env("CAP_WAIT_FOR", "PTY_STREAM_FINISHED")
-        .env("CAP_EXIT", "\u{3}\u{3}")
+        // Open review after the long frame has pushed the main viewport deep
+        // into the transcript. Wait for that frame, close it, then exit.
+        .env("CAP_EXIT", "\u{f}")
+        .env("CAP_EXIT_WAIT_FOR", "Review")
         .env("CAP_EXIT_WAIT", "3")
+        .env("CAP_FINAL_EXIT", "\u{f}\u{3}\u{3}")
+        .env("CAP_FINAL_EXIT_WAIT", "3")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -174,10 +179,18 @@ fn sustained_stream_finishes_and_restores_the_terminal() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let position = |needle: &[u8]| {
+        raw.windows(needle.len())
+            .position(|window| window == needle)
+    };
+    let tail =
+        position(b"PTY_STREAM_FINISHED").expect("the terminal never received the stream tail");
+    let enter = position(b"\x1b[?1049h").expect("review did not enter the alternate screen");
+    let review = position(b"Review").expect("the long review frame never painted");
+    let leave = position(b"\x1b[?1049l").expect("review did not restore the main screen");
     assert!(
-        raw.windows(b"PTY_STREAM_FINISHED".len())
-            .any(|window| window == b"PTY_STREAM_FINISHED"),
-        "the terminal never received the stream tail"
+        tail < enter && enter < review && review < leave,
+        "review must paint after the stream and restore the main screen"
     );
     assert!(
         raw.windows(b"\x1b[?2004l".len())

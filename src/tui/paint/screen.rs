@@ -10,7 +10,9 @@
 //! exactly like a plain program appending below its prompt (pi's
 //! regular-mode renderer, which this model mirrors). Once the frame
 //! overflows, the display scrolls and the transcript flows into the
-//! terminal's scrollback above the dock.
+//! terminal's scrollback above the dock. The ctrl+o review uses an alternate
+//! screen with its own zero-anchored `Screen`; a fixed-height viewer cannot
+//! rewind the main screen's monotonic viewport without painting blank rows.
 //!
 //! Three paint routes:
 //!
@@ -363,6 +365,7 @@ struct PendingFrame {
     sequence: u64,
     posted_at: std::time::Instant,
     lines: Vec<String>,
+    viewer: bool,
 }
 
 /// Paint progress as observed by the app loop. "Completed" means stdout
@@ -447,6 +450,20 @@ impl Drop for PaintThreadGuard {
     }
 }
 
+fn set_alternate_screen(enabled: bool) -> io::Result<()> {
+    let mut out = io::stdout().lock();
+    write!(
+        out,
+        "{}",
+        if enabled {
+            "\x1b[?1049h"
+        } else {
+            "\x1b[?1049l"
+        }
+    )?;
+    out.flush()
+}
+
 /// The paint thread: owns the `Screen` and its blocking stdout writes so a
 /// slow terminal can never stall the event loop. `anchor` is the launch
 /// cursor row — the frame paints below it, never over what came before.
@@ -468,6 +485,7 @@ impl Painter {
                 mailbox: shared.clone(),
             };
             let mut screen = Screen::new(cols, rows, anchor);
+            let mut viewer_screen: Option<Screen> = None;
             let (lock, wake) = &*shared;
             loop {
                 let (frame, resize, shutdown) = {
@@ -479,31 +497,59 @@ impl Painter {
                 };
                 if let Some((cols, rows)) = resize {
                     screen.resize(cols, rows);
+                    if let Some(viewer) = &mut viewer_screen {
+                        viewer.resize(cols, rows);
+                    }
                 }
-                // A panic in the paint path must cost one garbled frame —
-                // not the session. The screen is marked unknown so the next
-                // frame repaints everything over whatever the panicking
-                // write left behind.
+                // The detail viewer owns the alternate screen. Returning to the
+                // transcript restores the exact anchored terminal and scrollback
+                // instead of asking its monotonic viewport to scroll backwards.
                 if let Some(frame) = frame {
                     let sequence = frame.sequence;
                     let painted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        screen.paint(&frame.lines)
+                        if frame.viewer {
+                            if viewer_screen.is_none() {
+                                set_alternate_screen(true)?;
+                                viewer_screen = Some(Screen::new(screen.cols, screen.rows, 0));
+                            }
+                            if let Some(viewer) = &mut viewer_screen {
+                                viewer.paint(&frame.lines)
+                            } else {
+                                Ok(())
+                            }
+                        } else {
+                            if viewer_screen.is_some() {
+                                set_alternate_screen(false)?;
+                                viewer_screen = None;
+                            }
+                            screen.paint(&frame.lines)
+                        }
                     }));
                     let mut mailbox = lock.lock().unwrap_or_else(|e| e.into_inner());
                     match painted {
                         Ok(Ok(())) => mailbox.complete(sequence),
                         Ok(Err(error)) => {
                             screen.resize(screen.cols, screen.rows);
+                            if let Some(viewer) = &mut viewer_screen {
+                                viewer.resize(viewer.cols, viewer.rows);
+                            }
                             mailbox.fail(sequence, format!("terminal write failed: {error}"));
                         }
                         Err(_) => {
                             screen.resize(screen.cols, screen.rows);
+                            if let Some(viewer) = &mut viewer_screen {
+                                viewer.resize(viewer.cols, viewer.rows);
+                            }
                             mailbox.fail(sequence, "paint worker panicked".into());
                         }
                     }
                 }
                 if shutdown {
-                    // The final frame (taken above) has landed; done.
+                    // The final frame (taken above) has landed; restore the main
+                    // screen before the terminal guard restores input modes.
+                    if viewer_screen.is_some() {
+                        let _ = set_alternate_screen(false);
+                    }
                     break;
                 }
             }
@@ -521,7 +567,7 @@ impl Painter {
         wake.notify_one();
     }
 
-    pub fn frame(&mut self, lines: Vec<String>) {
+    fn post_frame(&mut self, lines: Vec<String>, viewer: bool) {
         self.next_sequence = self.next_sequence.wrapping_add(1);
         let sequence = self.next_sequence;
         let posted_at = std::time::Instant::now();
@@ -532,8 +578,17 @@ impl Painter {
                 sequence,
                 posted_at,
                 lines,
+                viewer,
             });
         });
+    }
+
+    pub fn frame(&mut self, lines: Vec<String>) {
+        self.post_frame(lines, false);
+    }
+
+    pub fn viewer_frame(&mut self, lines: Vec<String>) {
+        self.post_frame(lines, true);
     }
 
     pub fn status(&self) -> PaintStatus {
@@ -659,6 +714,7 @@ mod tests {
             sequence: 2,
             posted_at,
             lines: vec!["new".into()],
+            viewer: false,
         });
 
         mailbox.complete(1);

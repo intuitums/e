@@ -771,14 +771,20 @@ fn diff_stat_suffix(theme: &Theme, result: &str) -> String {
             dels = Some(n);
         }
     }
-    let plain = match (adds, dels) {
-        (Some(a), Some(d)) if a > 0 && d > 0 => format!("+{a} / -{d}"),
-        (Some(a), _) if a > 0 => format!("+{a}"),
-        (_, Some(d)) if d > 0 => format!("-{d}"),
-        (Some(_), Some(_)) => return String::new(),
-        _ => result.to_string(),
-    };
-    format!(" {}", theme.fg("muted", &plain))
+    let add_token = Theme::diff_marker_token(true);
+    let del_token = Theme::diff_marker_token(false);
+    match (adds, dels) {
+        (Some(a), Some(d)) if a > 0 && d > 0 => format!(
+            " {} {} {}",
+            theme.fg(add_token, &format!("+{a}")),
+            theme.fg("dim", "/"),
+            theme.fg(del_token, &format!("-{d}"))
+        ),
+        (Some(a), _) if a > 0 => format!(" {}", theme.fg(add_token, &format!("+{a}"))),
+        (_, Some(d)) if d > 0 => format!(" {}", theme.fg(del_token, &format!("-{d}"))),
+        (Some(_), Some(_)) => String::new(),
+        _ => format!(" {}", theme.fg("muted", result)),
+    }
 }
 
 /// Visible width of a styled suffix (SGR stripped).
@@ -1151,9 +1157,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_tree_uses_one_muted_color_for_every_state() {
+    fn tool_tree_keeps_chrome_muted_and_colors_diff_stats() {
         let theme = Theme::from_json(
-            r#"{"vars":{"m":240,"a":250,"e":196,"d":34},"colors":{"muted":"m","dim":"m","accent":"a","error":"e","diffAdd":"d","diffRemove":"e"}}"#,
+            r##"{"vars":{"m":240,"a":250,"e":196,"g":"#30A46C","r":"#E5484D"},"colors":{"muted":"m","dim":"m","accent":"a","error":"e","toolDiffAddedMarker":"g","toolDiffAddedMarkerFallback":"g","toolDiffRemovedMarker":"r","toolDiffRemovedMarkerFallback":"r"}}"##,
         )
         .unwrap();
         let mut block = Block::tool_group(vec![
@@ -1181,7 +1187,7 @@ mod tests {
         block.finish_tool(2, ToolOutcome::Failed, "not found".into(), "");
         block.seal();
         let rows = block.lines_for_test(&theme, 80);
-        for token in ["accent", "error", "diffAdd", "diffRemove"] {
+        for token in ["accent", "error"] {
             assert!(
                 rows.iter().all(|row| !row.contains(theme.fg_prefix(token))),
                 "tool tree unexpectedly used {token}: {rows:?}"
@@ -1190,8 +1196,11 @@ mod tests {
         assert!(
             rows.iter()
                 .all(|row| row.contains(theme.fg_prefix("muted"))),
-            "every tool row stays muted"
+            "every tool row keeps muted chrome"
         );
+        let edited = rows.iter().find(|row| row.contains("Edited a.rs")).unwrap();
+        assert!(edited.contains(theme.fg_prefix("toolDiffAddedMarker")));
+        assert!(edited.contains(theme.fg_prefix("toolDiffRemovedMarker")));
     }
 
     /// Thinking renders its full streamed text in thinkingText, one wrapped

@@ -8,6 +8,9 @@ prompt = os.environ.get("CAP_PROMPT", "")
 wait_for = os.environ.get("CAP_WAIT_FOR", "").encode()
 exit_keys = os.environ.get("CAP_EXIT", "")
 exit_wait = float(os.environ.get("CAP_EXIT_WAIT", "1"))
+exit_wait_for = os.environ.get("CAP_EXIT_WAIT_FOR", "").encode()
+final_exit = os.environ.get("CAP_FINAL_EXIT", "")
+final_exit_wait = float(os.environ.get("CAP_FINAL_EXIT_WAIT", "1"))
 
 pid, fd = pty.fork()
 if pid == 0:
@@ -35,14 +38,34 @@ while time.time() < end:
     if typed and wait_for and wait_for in buf:
         break
 
-# Optional graceful exit lets tests pin terminal cleanup bytes instead of
-# ending every capture with SIGTERM.
+# Optional staged keys let tests inspect an intermediate frame, then exit
+# cleanly and pin the terminal cleanup bytes.
 if exit_keys:
+    action_start = len(buf)
     try:
         os.write(fd, exit_keys.encode())
     except OSError:
         pass
     deadline = time.time() + exit_wait
+    while time.time() < deadline:
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if r:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+        if exit_wait_for and exit_wait_for in buf[action_start:]:
+            break
+
+if final_exit:
+    try:
+        os.write(fd, final_exit.encode())
+    except OSError:
+        pass
+    deadline = time.time() + final_exit_wait
     while time.time() < deadline:
         r, _, _ = select.select([fd], [], [], 0.1)
         if not r:

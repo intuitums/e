@@ -421,6 +421,49 @@ impl App {
         rows
     }
 
+    /// Open, navigate, or close the review screen. While it is open every key
+    /// belongs to it, even keys that do not move the view.
+    fn viewer_key(&mut self, code: KeyCode, ctrl: bool, width: usize) -> bool {
+        if self.viewer.is_none() {
+            if ctrl && code == KeyCode::Char('o') {
+                self.viewer = Some(Viewer {
+                    full: false,
+                    scroll: 0,
+                });
+                return true;
+            }
+            return false;
+        }
+
+        if code == KeyCode::Esc || (ctrl && code == KeyCode::Char('o')) {
+            self.viewer = None;
+            return true;
+        }
+
+        let full = self
+            .viewer
+            .as_ref()
+            .map(|viewer| viewer.full)
+            .unwrap_or(false);
+        let total = self.viewer_rows(width, full).len();
+        if let Some(viewer) = &mut self.viewer {
+            match code {
+                KeyCode::Up => viewer.scroll = viewer.scroll.saturating_sub(1),
+                KeyCode::Down => viewer.scroll = (viewer.scroll + 1).min(total.saturating_sub(1)),
+                KeyCode::PageUp => viewer.scroll = viewer.scroll.saturating_sub(20),
+                KeyCode::PageDown => {
+                    viewer.scroll = (viewer.scroll + 20).min(total.saturating_sub(1))
+                }
+                // ←/→ switch between the two depths: Review folds details,
+                // Full expands everything.
+                KeyCode::Left => viewer.full = false,
+                KeyCode::Right => viewer.full = true,
+                _ => {}
+            }
+        }
+        true
+    }
+
     /// Color a detail-viewer row shaped like a diff row: the number-and-sign
     /// column takes the diff-marker hue (`+` green, `-` red), context and
     /// `⋯` elision rows dim, anything else passes through untouched — the
@@ -2161,7 +2204,7 @@ pub async fn run(
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = terminal::disable_raw_mode();
-            print!("\x1b[<u\x1b[?2004l\x1b[?25h\r\n");
+            print!("\x1b[?1049l\x1b[<u\x1b[?2004l\x1b[?25h\r\n");
             use std::io::Write as _;
             let _ = std::io::stdout().flush();
             default_hook(info);
@@ -2354,45 +2397,8 @@ pub async fn run(
                     }
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                        if app.viewer.is_some() {
-                            let close = k.code == KeyCode::Esc
-                                || (ctrl && k.code == KeyCode::Char('o'));
-                            if close {
-                                app.viewer = None;
-                            } else {
-                                let full =
-                                    app.viewer.as_ref().map(|v| v.full).unwrap_or(false);
-                                let total = app.viewer_rows(cols as usize, full).len();
-                                if let Some(viewer) = &mut app.viewer {
-                                    match k.code {
-                                        KeyCode::Up => {
-                                            viewer.scroll = viewer.scroll.saturating_sub(1)
-                                        }
-                                        KeyCode::Down => {
-                                            viewer.scroll =
-                                                (viewer.scroll + 1).min(total.saturating_sub(1))
-                                        }
-                                        KeyCode::PageUp => {
-                                            viewer.scroll = viewer.scroll.saturating_sub(20)
-                                        }
-                                        KeyCode::PageDown => {
-                                            viewer.scroll =
-                                                (viewer.scroll + 20).min(total.saturating_sub(1))
-                                        }
-                                        // ←/→ switch between the reference's
-                                        // two depths: Review folds details,
-                                        // Full expands everything.
-                                        KeyCode::Left => viewer.full = false,
-                                        KeyCode::Right => viewer.full = true,
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        } else if ctrl && k.code == KeyCode::Char('o') {
-                            app.viewer = Some(Viewer {
-                                full: false,
-                                scroll: 0,
-                            });
+                        if app.viewer_key(k.code, ctrl, cols as usize) {
+                            // The review screen consumes every key while open.
                         } else if let Some(stage) = &mut app.trust {
                             match k.code {
                                 KeyCode::Up => stage.step(-1),
@@ -2923,12 +2929,13 @@ pub async fn run(
 
         let now = tokio::time::Instant::now();
         if now >= next_paint || app.should_quit {
-            let frame = if app.viewer.is_some() {
-                app.viewer_frame(cols as usize, rows as usize)
+            if app.viewer.is_some() {
+                let frame = app.viewer_frame(cols as usize, rows as usize);
+                painter.viewer_frame(frame);
             } else {
-                app.frame(cols as usize, rows as usize)
-            };
-            painter.frame(frame);
+                let frame = app.frame(cols as usize, rows as usize);
+                painter.frame(frame);
+            }
             next_paint = now + FRAME_INTERVAL;
             paint_deferred = false;
         } else {
@@ -2969,10 +2976,10 @@ fn arm(app: &mut App) {
     app.overlay = Some("press ctrl+c again to exit".into());
 }
 
-/// Restores every terminal mode the TUI enables — keyboard enhancement
-/// flags, bracketed paste, raw mode, cursor visibility — on every exit
-/// path, `?` returns and unwinds included. Popping a mode that never got
-/// enabled is harmless; leaving one enabled corrupts the user's shell.
+/// Restores every terminal mode the TUI enables: keyboard enhancement flags,
+/// bracketed paste, raw mode, alternate screen, and cursor visibility. This
+/// runs on every exit path, including `?` returns and unwinds. Popping a mode
+/// that never got enabled is harmless; leaving one enabled corrupts the shell.
 struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
@@ -2984,7 +2991,7 @@ impl Drop for TerminalGuard {
         let _ = terminal::disable_raw_mode();
         use std::io::Write as _;
         let mut out = std::io::stdout();
-        let _ = write!(out, "\r\n\x1b[?25h");
+        let _ = write!(out, "\x1b[?1049l\r\n\x1b[?25h");
         let _ = out.flush();
     }
 }
@@ -3529,38 +3536,49 @@ mod tests {
     }
 
     #[test]
-    fn review_screen_rebuilds_when_a_tool_reports() {
+    fn ctrl_o_reviews_running_and_completed_tool_output_then_closes() {
         let mut app = session_app();
-        app.viewer = Some(Viewer {
-            full: false,
-            scroll: 0,
-        });
         let child = crate::tui::transcript::ToolChild::pending(
             7,
             "command".into(),
-            "Running true".into(),
-            "Ran true".into(),
+            "Running".into(),
+            "Ran".into(),
             "true".into(),
         );
         let block = app.transcript.push(Block::tool_group(vec![child]));
         app.on_session_event(SessionEvent::TurnStart);
-        app.on_session_event(SessionEvent::ToolStart { id: 7 });
-        let running = app.viewer_rows(80, false).to_vec();
-
         app.active.as_mut().unwrap().tool_blocks.insert(7, block);
+        app.on_session_event(SessionEvent::ToolStart { id: 7 });
+
+        assert!(app.viewer_key(KeyCode::Char('o'), true, 80));
+        assert!(app.viewer.is_some());
+        let running = app.viewer_frame(80, 24);
+        assert!(
+            running.iter().any(|row| row.contains("Running true")),
+            "a running tool remains visible in review: {running:?}"
+        );
+
         app.on_session_event(SessionEvent::ToolEnd {
             id: 7,
             outcome: crate::core::tools::ToolOutcome::Completed,
             summary: "done".into(),
             content: "full saved output".into(),
         });
-        let reported = app.viewer_rows(80, false).to_vec();
+        let reported = app.viewer_frame(80, 24);
 
         assert!(
             reported.iter().any(|row| row.contains("full saved output")),
             "the new detail must appear without a width or depth change"
         );
         assert_ne!(running, reported);
+
+        assert!(app.viewer_key(KeyCode::Esc, false, 80));
+        assert!(app.viewer.is_none());
+        let transcript = app.frame(80, 24);
+        assert!(
+            transcript.iter().any(|row| row.contains("Ran true")),
+            "closing review restores the transcript frame: {transcript:?}"
+        );
     }
 
     #[test]

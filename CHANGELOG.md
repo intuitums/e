@@ -11,6 +11,9 @@ the pipeline publishes.
   open while output streams beneath them, then close on completion. OpenAI
   reasoning summaries preserve paragraph breaks and stay hidden unless Show
   thinking is explicitly enabled.
+- `ctrl+o` review uses a temporary full-screen buffer, so long transcripts no
+  longer produce a blank review and closing it restores the anchored transcript.
+  Edit and write counts use green for additions and red for deletions again.
 - Long streamed replies stay responsive: deltas append without cloning the
   accumulated response, and live Markdown parsing follows a fixed work budget.
 - Turn and paint workers no longer fail silently. A supervised turn always

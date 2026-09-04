@@ -612,6 +612,8 @@ fn running_write_and_edit_rows_stay_lean() {
     // The reference stat suffix drops a zero side: `+2`, no ` -0`, with the
     // diff-marker hue on the count.
     assert!(rows[1].contains("Wrote src/lib.rs") && rows[1].contains("+2"));
+    let add_token = e::tui::theme::Theme::diff_marker_token(true);
+    assert!(rows[1].contains(theme.fg_prefix(add_token)));
     assert!(!rows[1].contains("-0"));
     assert!(!rows.iter().any(|line| line.contains('│')));
 }
