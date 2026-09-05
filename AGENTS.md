@@ -112,7 +112,3 @@ surface? Route it through `panel.rs` so it can't diverge.
   sovereign home, store-only config writes, where `unsafe` lives, SHA-pinned
   CI actions. If a change legitimately moves a boundary, update the guard in
   the same commit — never work around it.
-- Commit metadata (trailers, attribution) belongs to each agent's own global
-  config, not this repo. Don't add identity trailers here by default; write
-  clean, descriptive commit messages and leave attribution to personal
-  preference.

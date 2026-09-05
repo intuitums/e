@@ -301,6 +301,21 @@ impl Session {
         &self.path
     }
 
+    /// The stable per-conversation id — the UUID minted in `create` and
+    /// recovered from the log's filename (`<stamp>_<id>.jsonl`; the stamp is
+    /// digits and the id a UUID, so neither carries an underscore). Stable
+    /// across resume, since `reopen` keeps the same filename. e sends this as
+    /// the opaque session handle to gateways that ask for one; it encodes no
+    /// user identity. Empty only for an unexpected filename shape.
+    pub fn id(&self) -> &str {
+        self.path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.split_once('_'))
+            .map(|(_stamp, id)| id)
+            .unwrap_or("")
+    }
+
     /// Read all messages out of a session file. An interior malformed record
     /// is corruption, not noise — returning a shortened history would present
     /// lost messages as a valid conversation. The one exception is a torn
