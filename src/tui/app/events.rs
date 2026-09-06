@@ -27,6 +27,8 @@ impl App {
             } => {
                 self.compacting = false;
                 self.context_tokens = context_tokens;
+                // Compaction changes model context, not the user's scrollback.
+                // Keep prior tool details and their live block references valid.
                 self.transcript.push(Block::new(
                     Kind::Notice,
                     "compacted — recent messages kept, the full session is under /resume",
@@ -205,7 +207,7 @@ impl App {
                 // `input` is the inclusive prompt total per the Usage
                 // contract — adding the cached subset again would double
                 // count and trigger compaction early.
-                self.context_tokens = input + output;
+                self.context_tokens = input.saturating_add(output);
                 if let Some(s) = &mut self.active {
                     if let (Some(total), Some(pricing)) =
                         (&mut s.cost_usd, &self.agent.model.pricing)

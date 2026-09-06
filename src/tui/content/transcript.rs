@@ -226,10 +226,9 @@ impl Block {
                 ToolOutcome::Cancelled => ToolState::Cancelled,
             };
             child.result = Some(crate::core::tools::sanitize_display(&summary));
-            // Command output is the only thing the live preview draws; keep
-            // it captured for a bash tool still running when a late finish
-            // lands.
-            if child.output.is_empty() && child.category == "command" {
+            // Streaming chunks may be dropped under backpressure. The final
+            // retained result is authoritative once the command finishes.
+            if child.category == "command" {
                 child.output = crate::core::tools::sanitize_display(content);
             }
         }
@@ -1233,6 +1232,20 @@ mod tests {
             block.lines_for_test(&theme, 40).len() >= 3,
             "the thought stays expanded, not collapsed to one row"
         );
+    }
+
+    #[test]
+    fn final_command_output_replaces_a_partial_streaming_preview() {
+        let mut block = Block::tool_group(vec![ToolChild::pending(
+            1,
+            "command".into(),
+            "Running".into(),
+            "Ran".into(),
+            "command".into(),
+        )]);
+        block.tool_children[0].output = "first chunk\n".into();
+        block.finish_tool(1, ToolOutcome::Completed, "done".into(), "retained tail\n");
+        assert_eq!(block.tool_children[0].output, "retained tail\n");
     }
 
     #[test]

@@ -333,6 +333,7 @@ impl SessionLog {
     /// before branching existed (empty `id`) gets an id and parent
     /// synthesized from its position, chained onto whatever came before it,
     /// so an old session reads as the same straight line it always was.
+    /// Reject broken links and cycles on every branch before exposing nodes.
     pub fn nodes(path: &Path) -> std::io::Result<Vec<Node>> {
         let reader = BufReader::new(File::open(path)?);
         let lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>()?;
@@ -379,6 +380,35 @@ impl SessionLog {
         }
         if !saw_header {
             return Err(std::io::Error::other("session header is missing"));
+        }
+        let mut by_id = std::collections::HashMap::new();
+        for node in &out {
+            if by_id.insert(node.id.as_str(), node).is_some() {
+                return Err(std::io::Error::other(
+                    "corrupt session tree: duplicate message id",
+                ));
+            }
+        }
+        let mut validated = std::collections::HashSet::new();
+        for node in &out {
+            let mut path = std::collections::HashSet::new();
+            let mut cursor = Some(node.id.as_str());
+            while let Some(id) = cursor {
+                if validated.contains(id) {
+                    break;
+                }
+                if !path.insert(id) {
+                    return Err(std::io::Error::other("corrupt session tree: cycle"));
+                }
+                cursor = by_id
+                    .get(id)
+                    .ok_or_else(|| {
+                        std::io::Error::other("corrupt session tree: missing parent message")
+                    })?
+                    .parent
+                    .as_deref();
+            }
+            validated.extend(path);
         }
         Ok(out)
     }

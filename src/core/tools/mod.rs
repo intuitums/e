@@ -450,17 +450,16 @@ fn sanitize_inline(text: &str) -> String {
         .join(" ")
 }
 
-/// Replace a file only after all new bytes are written and synced. Resolve
-/// symlinks to preserve their targets and retain existing file permissions.
-/// A multiply linked file is refused because rename would split its aliases.
-fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
+/// Stage bytes before updating a file. Existing inodes retain metadata and
+/// aliases; a failure while copying staged bytes can leave a partial update.
+fn staged_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    atomic_replace(path, |file| file.write_all(content))
+    staged_replace(path, |file| file.write_all(content))
 }
 
 /// Stage a replacement before committing it. The writer seam lets tests
 /// inject a partial write failure without depending on disk exhaustion.
-fn atomic_replace(
+fn staged_replace(
     path: &Path,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
@@ -470,11 +469,12 @@ fn atomic_replace(
         path.canonicalize()?;
     }
     let target = stable_path_key(path);
-    let metadata = match std::fs::metadata(&target) {
-        Ok(metadata) => Some(metadata),
+    let mut existing = match std::fs::OpenOptions::new().write(true).open(&target) {
+        Ok(file) => Some(file),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
+    let metadata = existing.as_ref().map(std::fs::File::metadata).transpose()?;
     if metadata
         .as_ref()
         .is_some_and(|metadata| metadata.permissions().readonly())
@@ -484,21 +484,12 @@ fn atomic_replace(
             "file is read-only",
         ));
     }
-    #[cfg(unix)]
-    if let Some(metadata) = &metadata {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.nlink() > 1 {
-            return Err(std::io::Error::other(
-                "refusing to replace a file with multiple hard links",
-            ));
-        }
-    }
     let parent = target
         .parent()
         .ok_or_else(|| std::io::Error::other("file has no parent"))?;
     let temporary = parent.join(format!(".e-write-{}", uuid::Uuid::new_v4()));
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.read(true).write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -507,11 +498,21 @@ fn atomic_replace(
     let mut file = options.open(&temporary)?;
     let result = (|| {
         write(&mut file)?;
-        if let Some(metadata) = metadata {
-            file.set_permissions(metadata.permissions())?;
-        }
         file.sync_all()?;
-        std::fs::rename(&temporary, &target)
+        if let Some(existing) = existing.as_mut() {
+            use std::io::Seek;
+            file.rewind()?;
+            let length = std::io::copy(&mut file, existing)?;
+            existing.set_len(length)?;
+            existing.sync_all()?;
+        } else {
+            // Publish without overwriting a file created during staging.
+            std::fs::hard_link(&temporary, &target)?;
+        }
+        std::fs::remove_file(&temporary)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
@@ -586,7 +587,7 @@ fn freshness_key(path: &Path) -> PathBuf {
     stable_path_key(path)
 }
 
-fn stable_path_key(path: &Path) -> PathBuf {
+pub(crate) fn stable_path_key(path: &Path) -> PathBuf {
     let mut cursor = path;
     let mut tail = Vec::new();
     loop {
@@ -787,7 +788,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("file");
         std::fs::write(&path, "original").unwrap();
-        let result = super::atomic_replace(&path, |file| {
+        let result = super::staged_replace(&path, |file| {
             file.write_all(b"partial")?;
             Err(std::io::Error::other("injected disk failure"))
         });
@@ -799,7 +800,71 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn atomic_replacement_preserves_symlink_and_target_mode() {
+    fn staged_write_preserves_links_created_during_staging() {
+        use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("e-write-links-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        let alias = dir.join("alias");
+        std::fs::write(&path, "original content").unwrap();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        super::staged_replace(&path, |file| {
+            std::fs::hard_link(&path, &alias)?;
+            file.write_all(b"new")
+        })
+        .unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(std::fs::read(&alias).unwrap(), b"new");
+        super::staged_write(&path, b"again").unwrap();
+        assert_eq!(std::fs::read(&alias).unwrap(), b"again");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn staged_write_preserves_extended_attributes() {
+        let path = std::env::temp_dir().join(format!("e-write-xattr-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "old").unwrap();
+        assert!(std::process::Command::new("xattr")
+            .args(["-w", "user.e-test", "metadata"])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        super::staged_write(&path, b"new").unwrap();
+        let result = std::process::Command::new("xattr")
+            .args(["-p", "user.e-test"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), "metadata");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn staged_creation_does_not_overwrite_a_concurrently_created_file() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("e-write-create-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        let result = super::staged_replace(&path, |file| {
+            std::fs::write(&path, "other writer")?;
+            file.write_all(b"new")
+        });
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "other writer");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_replacement_preserves_symlink_and_target_mode() {
         use std::os::unix::fs::{symlink, PermissionsExt};
         let dir = std::env::temp_dir().join(format!("e-atomic-link-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -808,7 +873,7 @@ mod tests {
         std::fs::write(&target, "old").unwrap();
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o751)).unwrap();
         symlink("target", &alias).unwrap();
-        super::atomic_write(&alias, b"new").unwrap();
+        super::staged_write(&alias, b"new").unwrap();
         assert!(std::fs::symlink_metadata(&alias)
             .unwrap()
             .file_type()

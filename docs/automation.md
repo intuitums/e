@@ -13,6 +13,12 @@ If compaction cannot finish safely, the response contains an error and
 `final_output` is empty. Background tool handles belong to that request's
 agent and cannot be queried by a later request.
 
+Tool batches run in bounded waves. `tool_concurrency` in `~/.e/settings.json`
+defaults to 8 and accepts values from 1 to 64. Calls naming the same file run
+in provider order, including symlinks and Unix hard links. Bash and extension
+tools have opaque effects; dependent commands should be sent in separate
+batches or combined into one command.
+
 ```json
 {"id":"one","prompt":"summarize this repository","model":"openai/gpt-5.5","effort":"high","tool_mode":"none","save":false,"images":[]}
 ```

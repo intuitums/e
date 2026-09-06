@@ -123,20 +123,30 @@ impl TurnLog {
     /// resumes into the complete pre-compaction conversation instead of a
     /// new file holding only an unanchored tail. Blocking session I/O —
     /// callers run it off the async task (`Agent::load_compacted`).
-    fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) -> bool {
+    fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>, cancel: &AtomicBool) -> bool {
         crate::core::config::home::with_home(self.home.clone(), || {
-            self.install_compacted(summary, kept)
+            self.install_compacted(summary, kept, cancel)
         })
     }
 
-    fn install_compacted(&self, summary: &str, kept: Vec<ChatMessage>) -> bool {
+    /// Prepare the new log before checking cancellation at the commit boundary.
+    fn install_compacted(
+        &self,
+        summary: &str,
+        kept: Vec<ChatMessage>,
+        cancel: &AtomicBool,
+    ) -> bool {
         let seed_message = ChatMessage::user(crate::core::agent::compact::seed(summary));
         let mut fresh_history = Vec::with_capacity(kept.len() + 1);
         fresh_history.push(seed_message.clone());
         fresh_history.extend(kept);
 
         if !self.save_session {
-            *self.history.lock().unwrap_or_else(|e| e.into_inner()) = fresh_history;
+            let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+            if cancel.load(Ordering::SeqCst) {
+                return false;
+            }
+            *history = fresh_history;
             return true;
         }
 
@@ -164,6 +174,12 @@ impl TurnLog {
                         note_persist(&self.persist_warned, Err(error), &self.events);
                         return false;
                     }
+                }
+                if cancel.load(Ordering::SeqCst) {
+                    let path = created.path().to_path_buf();
+                    drop(created);
+                    let _ = std::fs::remove_file(path);
+                    return false;
                 }
                 *guard = Some(created);
                 *history_guard = fresh_history;
@@ -215,7 +231,11 @@ fn clone_request(r: &Request) -> Request {
 
 /// Build and install a checkpoint without exposing a partial history swap.
 /// Cancellation stops the provider request; failed summaries leave the log intact.
-async fn compact_log(log: &TurnLog, system: &str, cancel: &AtomicBool) -> Result<bool, String> {
+async fn compact_log(
+    log: &TurnLog,
+    system: &str,
+    cancel: &Arc<AtomicBool>,
+) -> Result<bool, String> {
     let history = log
         .history
         .lock()
@@ -250,10 +270,16 @@ async fn compact_log(log: &TurnLog, system: &str, cancel: &AtomicBool) -> Result
     }
     let writer = log.clone();
     let checkpoint = summary.clone();
-    let installed = tokio::task::spawn_blocking(move || writer.load_compacted(&checkpoint, kept))
-        .await
-        .map_err(|error| format!("compaction commit failed: {error}"))?;
+    let installation_cancel = cancel.clone();
+    let installed = tokio::task::spawn_blocking(move || {
+        writer.load_compacted(&checkpoint, kept, &installation_cancel)
+    })
+    .await
+    .map_err(|error| format!("compaction commit failed: {error}"))?;
     if !installed {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("compaction cancelled; history was preserved".into());
+        }
         return Err("compaction could not be saved; history was preserved".into());
     }
     let _ = log
@@ -712,9 +738,11 @@ impl Agent {
     pub async fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) -> bool {
         let log = self.log();
         let summary = summary.to_string();
-        tokio::task::spawn_blocking(move || log.load_compacted(&summary, kept))
-            .await
-            .unwrap_or(false)
+        tokio::task::spawn_blocking(move || {
+            log.load_compacted(&summary, kept, &AtomicBool::new(false))
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// Attach a session log; created lazily on the first message when None.
@@ -1184,6 +1212,59 @@ async fn forward_extension_update(
 #[cfg(test)]
 mod option_tests {
     use super::*;
+
+    #[test]
+    fn cancellation_during_checkpoint_preparation_keeps_the_original_session() {
+        let home = std::env::temp_dir().join(format!("e-compact-cancel-{}", uuid::Uuid::new_v4()));
+        let (agent, _events) = Agent::with_options(
+            crate::core::providers::catalog::builtin_catalog().remove(0),
+            AgentOptions {
+                home: Some(home.clone()),
+                cwd: Some(home.clone()),
+                ..AgentOptions::default()
+            },
+        );
+        let log = agent.log();
+        log.append(ChatMessage::user("original")).unwrap();
+        let original = agent.session_path().unwrap();
+        let directory = original.parent().unwrap();
+        // Hold preparation after the new log is created, before it can commit.
+        let name = log.session_name.lock().unwrap();
+        let worker = log.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let task =
+            std::thread::spawn(move || worker.load_compacted("summary", vec![], &worker_cancel));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let logs = std::fs::read_dir(directory)
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+                .count();
+            if logs == 2 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "checkpoint was not staged");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        cancel.store(true, Ordering::SeqCst);
+        drop(name);
+        assert!(!task.join().unwrap());
+        assert_eq!(agent.session_path().unwrap(), original);
+        assert_eq!(agent.history_snapshot()[0].content, "original");
+        assert_eq!(
+            std::fs::read_dir(directory)
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+                .count(),
+            1
+        );
+        drop(agent);
+        drop(log);
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn no_save_commits_to_memory_without_opening_a_session() {

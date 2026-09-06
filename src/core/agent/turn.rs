@@ -480,7 +480,7 @@ pub(super) async fn run(context: Context, compact_only: bool) -> Outcome {
         // generated. Emitted even when the stream then errored — the
         // tokens were still consumed.
         if let Some((input, output, cache_read)) = step_usage {
-            last_context = input + output;
+            last_context = input.saturating_add(output);
             let _ = events
                 .send(SessionEvent::Usage {
                     input,
@@ -667,87 +667,107 @@ pub(super) async fn run(context: Context, compact_only: bool) -> Outcome {
             })
             .await;
 
-        // Run the batch concurrently: every
-        // child streams its own lifecycle on the shared channel as it
-        // progresses. Results commit in assistant source order.
-        let mut handles = Vec::with_capacity(batch.len());
-        for (id, call, _) in batch {
-            let host = host.clone();
-            let cancel = cancel.clone();
-            let events = events.clone();
-            let cwd = cwd.clone();
-            let allowed_tools = allowed_tools.clone();
-            let tool_runtime = tool_runtime.clone();
-            handles.push((
-                call.clone(),
-                tokio::spawn(async move {
-                    let _ = events.send(SessionEvent::ToolStart { id }).await;
-                    let output = run_tool(
-                        ToolRunContext {
-                            tools: tool_runtime,
-                            host,
-                            tool_mode,
-                            allowed_tools,
-                            cwd,
-                            cancel,
-                            id,
-                            events: events.clone(),
-                        },
-                        &call.name,
-                        &call.arguments,
-                    )
-                    .await;
-                    let _ = events
-                        .send(SessionEvent::ToolEnd {
-                            id,
-                            outcome: output.outcome,
-                            summary: output.summary.clone(),
-                            // The viewer gets the rich detail (full
-                            // diffs); history keeps the lean content.
-                            content: output.display_text().to_string(),
-                        })
+        // Bound each wave before spawning tasks. Calls naming the same file
+        // start in separate waves so their mutations follow provider order.
+        let concurrency = crate::core::config::settings::get_u64("tool_concurrency")
+            .unwrap_or(8)
+            .clamp(1, 64) as usize;
+        let mut remaining = batch.into_iter().peekable();
+        while remaining.peek().is_some() {
+            let mut paths = std::collections::HashSet::new();
+            let mut wave = Vec::new();
+            while wave.len() < concurrency {
+                let Some((_, call, _)) = remaining.peek() else {
+                    break;
+                };
+                if let Some(path) = file_target(call, &cwd, &cancel).await {
+                    if !paths.insert(path) {
+                        break;
+                    }
+                }
+                if let Some(call) = remaining.next() {
+                    wave.push(call);
+                }
+            }
+            let mut handles = Vec::with_capacity(wave.len());
+            for (id, call, _) in wave {
+                let host = host.clone();
+                let cancel = cancel.clone();
+                let events = events.clone();
+                let cwd = cwd.clone();
+                let allowed_tools = allowed_tools.clone();
+                let tool_runtime = tool_runtime.clone();
+                handles.push((
+                    call.clone(),
+                    tokio::spawn(async move {
+                        let _ = events.send(SessionEvent::ToolStart { id }).await;
+                        let output = run_tool(
+                            ToolRunContext {
+                                tools: tool_runtime,
+                                host,
+                                tool_mode,
+                                allowed_tools,
+                                cwd,
+                                cancel,
+                                id,
+                                events: events.clone(),
+                            },
+                            &call.name,
+                            &call.arguments,
+                        )
                         .await;
-                    output
-                }),
-            ));
-        }
+                        let _ = events
+                            .send(SessionEvent::ToolEnd {
+                                id,
+                                outcome: output.outcome,
+                                summary: output.summary.clone(),
+                                // The viewer gets the rich detail (full
+                                // diffs); history keeps the lean content.
+                                content: output.display_text().to_string(),
+                            })
+                            .await;
+                        output
+                    }),
+                ));
+            }
 
-        for (call, handle) in handles {
-            // A blocked filesystem operation cannot be interrupted in
-            // place; on Esc, stop waiting, record the call as
-            // cancelled, and detach the task — the turn must end
-            // promptly even over a stalled FIFO or NFS mount.
-            let output = tokio::select! {
-                biased;
-                joined = handle => match joined {
-                    Ok(output) => output,
-                    Err(_) => tools::ToolOutput {
-                        content: "tool panicked".into(),
-                        outcome: tools::ToolOutcome::Failed,
-                        summary: "error".into(),
+            for (call, handle) in handles {
+                // A blocked filesystem operation cannot be interrupted in
+                // place; on Esc, stop waiting, record the call as
+                // cancelled, and detach the task — the turn must end
+                // promptly even over a stalled FIFO or NFS mount.
+                let output = tokio::select! {
+                    biased;
+                    joined = handle => match joined {
+                        Ok(output) => output,
+                        Err(_) => tools::ToolOutput {
+                            content: "tool panicked".into(),
+                            outcome: tools::ToolOutcome::Failed,
+                            summary: "error".into(),
+                            display: None,
+                        },
+                    },
+                    _ = wait_cancelled(&cancel) => tools::ToolOutput {
+                        // Honest record: the blocked operation is only
+                        // detached, so it may still complete after this.
+                        content: "tool cancelled — the underlying operation \
+                                  may still complete in the background"
+                            .into(),
+                        outcome: tools::ToolOutcome::Cancelled,
+                        summary: "cancelled".into(),
                         display: None,
                     },
-                },
-                _ = wait_cancelled(&cancel) => tools::ToolOutput {
-                    // Honest record: the blocked operation is only
-                    // detached, so it may still complete after this.
-                    content: "tool cancelled — the underlying operation \
-                              may still complete in the background"
-                        .into(),
-                    outcome: tools::ToolOutcome::Cancelled,
-                    summary: "cancelled".into(),
-                    display: None,
-                },
-            };
-            last_context =
-                last_context.saturating_add((output.content.chars().count() as u64).div_ceil(4));
-            log.commit_async(ChatMessage::tool_result_with_meta(
-                call.id,
-                output.content,
-                output.outcome,
-                output.summary,
-            ))
-            .await;
+                };
+                last_context = last_context
+                    .saturating_add((output.content.chars().count() as u64).div_ceil(4));
+                log.commit_async(ChatMessage::tool_result_with_meta(
+                    call.id,
+                    output.content,
+                    output.outcome,
+                    output.summary,
+                ))
+                .await;
+            }
         }
         if cancel.load(Ordering::SeqCst) {
             break 'turn Outcome::Cancelled;
@@ -778,4 +798,42 @@ pub(super) async fn run(context: Context, compact_only: bool) -> Outcome {
         }
     };
     outcome
+}
+
+/// Identify explicit filesystem targets, including aliases and new paths.
+/// Metadata lookup stays off the async worker and cancellation stops waiting.
+async fn file_target(
+    call: &ToolCall,
+    cwd: &std::path::Path,
+    cancel: &AtomicBool,
+) -> Option<FileTarget> {
+    if !matches!(call.name.as_str(), "read" | "write" | "edit") {
+        return None;
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return None;
+    }
+    let args: serde_json::Value = serde_json::from_str(&call.arguments).ok()?;
+    let path = cwd.join(args.get("path")?.as_str()?);
+    let lookup = tokio::task::spawn_blocking(move || {
+        let path = tools::stable_path_key(&path);
+        #[cfg(unix)]
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            use std::os::unix::fs::MetadataExt;
+            return FileTarget::Inode(metadata.dev(), metadata.ino());
+        }
+        FileTarget::Path(path)
+    });
+    tokio::select! {
+        result = lookup => result.ok(),
+        _ = wait_cancelled(cancel) => None,
+    }
+}
+
+/// Existing Unix aliases share an inode; missing targets share a resolved path.
+#[derive(PartialEq, Eq, Hash)]
+enum FileTarget {
+    Path(PathBuf),
+    #[cfg(unix)]
+    Inode(u64, u64),
 }

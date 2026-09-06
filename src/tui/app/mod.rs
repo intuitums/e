@@ -995,20 +995,20 @@ impl App {
             self.notice("a turn is running — press Esc to stop it, then resume".into());
             return;
         }
-        let messages = match crate::core::session::SessionLog::load(&path) {
-            Ok(m) => m,
-            Err(e) => {
-                self.notice(format!("could not open session: {e}"));
-                self.release_initial_prompt();
-                return;
-            }
-        };
         // Ownership first: a session another e is appending to must not be
         // replayed into a second, diverging history.
         let session = match crate::core::session::SessionLog::reopen(&path) {
             Ok(s) => s,
             Err(e) => {
                 self.notice(format!("could not resume session: {e}"));
+                self.release_initial_prompt();
+                return;
+            }
+        };
+        let messages = match crate::core::session::SessionLog::load(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                self.notice(format!("could not open session: {e}"));
                 self.release_initial_prompt();
                 return;
             }
@@ -1159,7 +1159,7 @@ impl App {
             let host = self.host.clone();
             let results = self.results.clone();
             let sequence = self.input_verdicts.reserve();
-            tokio::spawn(async move {
+            crate::core::config::home::spawn(async move {
                 let verdict = host.hook_input(&trimmed).await;
                 let _ = results
                     .send(AppJob::InputVerdict {
@@ -1395,7 +1395,7 @@ impl App {
                     let results = self.results.clone();
                     let (name, args) = (name.to_string(), args.to_string());
                     let epoch = self.session_epoch;
-                    tokio::spawn(async move {
+                    crate::core::config::home::spawn(async move {
                         let out = host.run_command(&name, &args).await;
                         if let Some(notice) = out.notice {
                             let _ = results.send(AppJob::Notice(notice)).await;
@@ -1449,7 +1449,7 @@ impl App {
             let results = self.results.clone();
             let sequence = self.input_verdicts.reserve();
             let images = std::mem::take(&mut self.pending_initial_images);
-            tokio::spawn(async move {
+            crate::core::config::home::spawn(async move {
                 let verdict = host.hook_input(&text).await;
                 let _ = results
                     .send(AppJob::InputVerdict {
@@ -1531,10 +1531,13 @@ impl App {
         let results = self.results.clone();
         let cwd = self.agent.cwd();
         let epoch = self.session_epoch;
-        tokio::spawn(async move {
+        crate::core::config::home::spawn(async move {
             let shell_cmd = cmd.clone();
+            let home = crate::core::config::home::home();
             let output = tokio::task::spawn_blocking(move || {
-                crate::core::tools::run_shell(&shell_cmd, &cwd)
+                crate::core::config::home::with_home(home, || {
+                    crate::core::tools::run_shell(&shell_cmd, &cwd)
+                })
             })
             .await
             .unwrap_or(crate::core::tools::ToolOutput {
@@ -1599,7 +1602,7 @@ impl App {
         let old = self.host.clone();
         let jobs = self.jobs.clone();
         let results = self.results.clone();
-        tokio::spawn(async move {
+        crate::core::config::home::spawn(async move {
             old.shutdown().await;
             let host = crate::core::extensions::ExtensionHost::start(jobs).await;
             let _ = results.send(AppJob::Reloaded(host)).await;
@@ -1964,7 +1967,7 @@ fn tree_items(nodes: &[crate::core::session::Node]) -> Vec<(String, String, bool
 
 /// The rewind target for a chosen node: its parent, the message history before
 /// it, and its prompt text for the composer. None means the id no longer
-/// resolves. A broken ancestor link truncates the replayed path there.
+/// resolves or the ancestor path is corrupt.
 fn rewind_target(
     nodes: &[crate::core::session::Node],
     node_id: &str,
@@ -1979,10 +1982,12 @@ fn rewind_target(
     let head = target.parent.clone();
     let mut path_ids = Vec::new();
     let mut cursor = head.clone();
+    let mut seen = std::collections::HashSet::new();
     while let Some(id) = cursor {
-        let Some(node) = by_id.get(id.as_str()).copied() else {
-            break;
-        };
+        if !seen.insert(id.clone()) {
+            return None;
+        }
+        let node = by_id.get(id.as_str()).copied()?;
         path_ids.push(id.clone());
         cursor = node.parent.clone();
     }
@@ -2062,6 +2067,21 @@ pub struct RunOptions {
 }
 
 pub async fn run(
+    options: RunOptions,
+    host: std::sync::Arc<crate::core::extensions::ExtensionHost>,
+    jobs_tx: tokio::sync::mpsc::Sender<String>,
+    jobs_rx: tokio::sync::mpsc::Receiver<String>,
+) -> std::io::Result<()> {
+    let home = options
+        .agent
+        .home
+        .clone()
+        .unwrap_or_else(crate::core::config::home::home);
+    crate::core::config::home::scope(home, run_scoped(options, host, jobs_tx, jobs_rx)).await
+}
+
+/// Run the terminal and its configuration reads within the selected home.
+async fn run_scoped(
     options: RunOptions,
     host: std::sync::Arc<crate::core::extensions::ExtensionHost>,
     jobs_tx: tokio::sync::mpsc::Sender<String>,
@@ -2191,7 +2211,7 @@ pub async fn run(
     // untouched until a restart. Dev builds and the opt-out are exempt.
     if !crate::core::update::is_dev_build() && crate::core::config::settings::auto_update() {
         let results = app.results.clone();
-        tokio::spawn(async move {
+        crate::core::config::home::spawn(async move {
             if let Ok(Some(version)) = crate::core::update::self_update().await {
                 let _ = results.send(AppJob::Updated(version)).await;
             }
@@ -2200,7 +2220,7 @@ pub async fn run(
     // Providers' model lists refresh in the background (the reference
     // behavior, sourced from each gateway's own /models): a model a provider
     // ships today shows in /models today, no e release involved.
-    tokio::spawn(crate::core::providers::catalog::refresh_remote());
+    crate::core::config::home::spawn(crate::core::providers::catalog::refresh_remote());
     if crate::core::auth::load().is_empty() {
         app.notice(
             "no provider signed in — use /login to sign in with an account or API key".into(),
@@ -2746,7 +2766,7 @@ pub async fn run(
                                     back: authpanel::BackTarget::Account(back),
                                 });
                             }
-                            tokio::spawn(crate::core::providers::catalog::refresh_remote());
+                            crate::core::config::home::spawn(crate::core::providers::catalog::refresh_remote());
                             // A fresh credential may make new models available:
                             // if the current model's provider is still signed out,
                             // fall back to the first available model.

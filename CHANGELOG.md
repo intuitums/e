@@ -7,6 +7,14 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Session resume locks the log before loading history, and tree readers reject
+  corrupt parent links on inactive branches too.
+- Tool batches have bounded concurrency and execute calls naming the same file
+  in provider order. Completed commands replace partial streaming previews with
+  their retained output.
+- The TUI and its background tasks inherit the selected configuration home.
+  Compaction checks cancellation after staging its checkpoint, before replacing
+  history. Provider usage totals saturate instead of overflowing.
 - Provider and OAuth requests refuse redirects so API-key headers and private
   request bodies cannot reach another origin. Release downloads retain a
   separate redirect policy that rejects HTTPS downgrades.
@@ -29,8 +37,9 @@ the pipeline publishes.
 - Each run has a permanent cancellation token. Bash output queues are bounded
   and continuous output cannot starve timeout checks. Slow viewers may miss
   live preview chunks, but the final tool result retains the output tail.
-- File edits and writes stage replacements before committing. Symlink targets
-  and permissions survive; multiply linked files are refused. Grep no longer
+- File edits and writes stage content before updating existing inodes, preserving
+  symlink targets, hard-link aliases, ACLs, and extended attributes. A failure
+  during the final in-place copy can leave a partial update. Grep no longer
   skips the line immediately following an oversized line.
 - Independent agents can select explicit configuration homes and workspaces.
   File observations and background handles belong to each agent. Unstable

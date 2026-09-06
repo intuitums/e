@@ -29,7 +29,7 @@ impl App {
         self.cancel_login();
         let flow_id = self.next_login_flow();
         let cancellation = crate::core::auth::login::LoginCancellation::default();
-        let task = tokio::spawn(crate::core::auth::login::codex_login(
+        let task = crate::core::config::home::spawn(crate::core::auth::login::codex_login(
             provider,
             self.jobs.clone(),
             self.logins.clone(),
@@ -48,7 +48,7 @@ impl App {
         self.cancel_login();
         let flow_id = self.next_login_flow();
         let cancellation = crate::core::auth::login::LoginCancellation::default();
-        let task = tokio::spawn(crate::core::auth::login::xai_login(
+        let task = crate::core::config::home::spawn(crate::core::auth::login::xai_login(
             self.jobs.clone(),
             self.logins.clone(),
             cancellation.clone(),

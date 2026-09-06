@@ -50,10 +50,12 @@ longer follow HTTP redirects, including same-origin redirects. Update any
 custom gateway URL that relied on one. Release asset downloads still follow
 redirects, without provider credentials, and reject HTTPS-to-HTTP downgrades.
 
-Filesystem `write` and `edit` stage replacements before renaming them over
-the target. Existing permissions and symlink targets are preserved. Files
-with multiple hard links are refused because replacing one name would
-separate it from its aliases.
+Filesystem `write` and `edit` stage and sync content before committing it.
+Existing files are updated through their original inode, preserving symlink
+targets, hard-link aliases, ACLs, and extended attributes. Staging failures
+leave the original intact; an I/O failure during the in-place copy can leave
+a partial update. New files are published without overwriting a concurrent
+creator. On Unix, the parent directory is synced before success is reported.
 
 ## Not a supported contract
 

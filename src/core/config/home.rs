@@ -16,6 +16,15 @@ pub async fn scope<F: std::future::Future>(path: PathBuf, future: F) -> F::Outpu
     SCOPED_HOME.scope(path, future).await
 }
 
+/// Spawn a task that inherits the caller's configuration home.
+pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(scope(home(), future))
+}
+
 /// The synchronous counterpart, used by constructors and blocking log I/O.
 pub fn with_home<R>(path: PathBuf, operation: impl FnOnce() -> R) -> R {
     SCOPED_HOME.sync_scope(path, operation)

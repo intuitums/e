@@ -56,7 +56,7 @@ pub fn run(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput {
         );
     }
     let updated = text.replacen(old, new, 1);
-    match super::atomic_write(&full, updated.as_bytes()) {
+    match super::staged_write(&full, updated.as_bytes()) {
         Ok(()) => {
             super::note_seen(state, &full);
             let delta = updated.lines().count() as isize - text.lines().count() as isize;
