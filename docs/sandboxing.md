@@ -7,6 +7,13 @@ network the machine can reach, any credential in the environment. This is
 deliberate (CLAUDE.md: "keep the harness small"), not an oversight, but it
 means the isolation has to come from outside e, not from inside it.
 
+Local storage still has privacy boundaries. On Unix, e makes its state home
+private on writes and session reopening, creates session logs owner-only,
+and creates credential staging files owner-only before writing secrets.
+These permissions protect against other local accounts, not tools or
+extensions running as your own user. See [compatibility.md](compatibility.md)
+for how older session files are handled.
+
 `scripts/guard.sh` is a different thing and doesn't cover this: it audits
 *e's own build* (allowed network hosts, the `~/.e` home, where `unsafe`
 lives, SHA-pinned CI actions), not the permissions of a running session. A

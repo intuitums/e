@@ -147,11 +147,7 @@ fn write_atomic(path: &Path, contents: &str, mode: u32) -> io::Result<()> {
     let (tmp, mut file) = loop {
         let n = ATTEMPT.fetch_add(1, Ordering::Relaxed);
         let candidate = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
+        match create_staging(&candidate) {
             Ok(file) => break (candidate, file),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
@@ -174,4 +170,34 @@ fn write_atomic(path: &Path, contents: &str, mode: u32) -> io::Result<()> {
         // Don't leave the temp behind if the destination cannot be replaced.
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// Create staging files privately, before any credential bytes are written.
+fn create_staging(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn staging_is_private_before_the_first_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("e-private-stage-{}", uuid::Uuid::new_v4()));
+        let file = super::create_staging(&path).unwrap();
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o077, 0);
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        assert_eq!(
+            super::create_staging(&path).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
 }

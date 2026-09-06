@@ -9,6 +9,7 @@
 pub mod compact;
 pub mod context;
 pub mod retry;
+mod turn;
 pub mod wake;
 
 /// The continuation message committed after a sleep-caused mid-reply loss:
@@ -29,7 +30,7 @@ use crate::core::providers::catalog::{slug, Model};
 use crate::core::providers::{
     self, ChatMessage, Event as ProviderEvent, FailureCause, FinishReason, Request, ToolCall,
 };
-use crate::core::session::Session;
+use crate::core::session::SessionLog;
 use crate::core::tools;
 
 /// Steps (provider requests, tool batches between them) one turn may run
@@ -42,8 +43,9 @@ const MAX_STEPS: u32 = 256;
 /// one call instead of threading six parameters through every site.
 #[derive(Clone)]
 struct TurnLog {
+    home: PathBuf,
     history: Arc<Mutex<Vec<ChatMessage>>>,
-    session: Arc<Mutex<Option<Session>>>,
+    session: Arc<Mutex<Option<SessionLog>>>,
     cwd: PathBuf,
     model: Model,
     session_name: Arc<Mutex<Option<String>>>,
@@ -78,6 +80,10 @@ impl TurnLog {
     }
 
     fn append(&self, message: ChatMessage) -> std::io::Result<()> {
+        crate::core::config::home::with_home(self.home.clone(), || self.append_inner(message))
+    }
+
+    fn append_inner(&self, message: ChatMessage) -> std::io::Result<()> {
         self.history
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -87,7 +93,7 @@ impl TurnLog {
         }
         let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
-            let mut created = Session::create(&self.cwd, &slug(&self.model))?;
+            let mut created = SessionLog::create(&self.cwd, &slug(&self.model))?;
             // A pending name applies before the first record. It is
             // best-effort: failing here must not discard the freshly created
             // log — dropping it would make the next commit open a different
@@ -118,6 +124,12 @@ impl TurnLog {
     /// new file holding only an unanchored tail. Blocking session I/O —
     /// callers run it off the async task (`Agent::load_compacted`).
     fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) -> bool {
+        crate::core::config::home::with_home(self.home.clone(), || {
+            self.install_compacted(summary, kept)
+        })
+    }
+
+    fn install_compacted(&self, summary: &str, kept: Vec<ChatMessage>) -> bool {
         let seed_message = ChatMessage::user(crate::core::agent::compact::seed(summary));
         let mut fresh_history = Vec::with_capacity(kept.len() + 1);
         fresh_history.push(seed_message.clone());
@@ -131,7 +143,7 @@ impl TurnLog {
         // Same lock order as `commit`: history before session.
         let mut history_guard = self.history.lock().unwrap_or_else(|e| e.into_inner());
         let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
-        let result = match Session::create(&self.cwd, &slug(&self.model)) {
+        let result = match SessionLog::create(&self.cwd, &slug(&self.model)) {
             Ok(mut created) => {
                 // Same best-effort pending-name application as `commit`.
                 if let Some(name) = self
@@ -201,6 +213,59 @@ fn clone_request(r: &Request) -> Request {
     }
 }
 
+/// Build and install a checkpoint without exposing a partial history swap.
+/// Cancellation stops the provider request; failed summaries leave the log intact.
+async fn compact_log(log: &TurnLog, system: &str, cancel: &AtomicBool) -> Result<bool, String> {
+    let history = log
+        .history
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let (older, kept) = compact::split(&history, log.model.context_window);
+    if older.is_empty() {
+        return Ok(false);
+    }
+    let _ = log.events.send(SessionEvent::Compacting).await;
+    let session_id = log
+        .session
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .map(|session| session.id().to_string())
+        .unwrap_or_default();
+    let summary = tokio::select! {
+        result = compact::summarize(log.model.clone(), &older, session_id) => result?,
+        _ = wait_cancelled(cancel) => return Err("compaction cancelled; history was preserved".into()),
+    };
+    let mut projected = vec![ChatMessage::user(compact::seed(&summary))];
+    projected.extend(kept.iter().cloned());
+    let tokens = compact::estimate_request_tokens(system, &projected);
+    if tokens >= compact::estimate_request_tokens(system, &history)
+        || compact::should_compact(tokens, log.model.context_window)
+    {
+        return Err("compaction did not reduce context enough; history was preserved".into());
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return Err("compaction cancelled; history was preserved".into());
+    }
+    let writer = log.clone();
+    let checkpoint = summary.clone();
+    let installed = tokio::task::spawn_blocking(move || writer.load_compacted(&checkpoint, kept))
+        .await
+        .map_err(|error| format!("compaction commit failed: {error}"))?;
+    if !installed {
+        return Err("compaction could not be saved; history was preserved".into());
+    }
+    let _ = log
+        .events
+        .send(SessionEvent::Compacted {
+            summary,
+            context_tokens: tokens,
+        })
+        .await;
+    Ok(true)
+}
+
 /// Resolve when Esc (or any interrupt) has been requested. Polled on a short
 /// interval so a stalled provider stream — which never yields another event —
 /// cannot strand the turn with `running` stuck true and Esc inert.
@@ -221,26 +286,59 @@ async fn sleep_cancellable(delay: Duration, cancel: &AtomicBool) -> bool {
     }
 }
 
-/// Await one turn worker and own its terminal event. Tokio reports panics and
-/// cancellation through the join result, so neither can leave the UI running.
-async fn supervise_turn(
-    worker: tokio::task::JoinHandle<bool>,
+/// Own completion and the submission race. A prompt arriving before the
+/// terminal event is published is consumed by another worker in this run.
+async fn supervise_turn<F>(
+    mut spawn_worker: F,
     events: mpsc::Sender<SessionEvent>,
-) -> bool {
-    let aborted = match worker.await {
-        Ok(aborted) => aborted,
-        Err(error) => {
-            let failure = if error.is_panic() {
-                format!("turn worker panicked: {error}")
-            } else {
-                format!("turn worker stopped unexpectedly: {error}")
-            };
-            let _ = events.send(SessionEvent::Error(failure)).await;
-            false
+    pending: Arc<Mutex<PendingQueue>>,
+    compact_requested: Arc<AtomicBool>,
+) -> bool
+where
+    F: FnMut() -> tokio::task::JoinHandle<turn::Outcome>,
+{
+    let _ = events.send(SessionEvent::TurnStart).await;
+    loop {
+        let (aborted, failed) = match spawn_worker().await {
+            Ok(outcome) => (
+                outcome == turn::Outcome::Cancelled,
+                outcome == turn::Outcome::Failed,
+            ),
+            Err(error) => {
+                let failure = if error.is_panic() {
+                    format!("turn worker panicked: {error}")
+                } else {
+                    format!("turn worker stopped unexpectedly: {error}")
+                };
+                let _ = events.send(SessionEvent::Error(failure)).await;
+                (false, true)
+            }
+        };
+        // Reserve before locking: publishing completion and becoming idle are
+        // one transaction with submit, without blocking a Tokio worker.
+        let permits = events.reserve_many(2).await;
+        let mut queue = pending.lock().unwrap_or_else(|error| error.into_inner());
+        if !aborted
+            && !failed
+            && (!queue.items.is_empty() || compact_requested.load(Ordering::SeqCst))
+        {
+            continue;
         }
-    };
-    let _ = events.send(SessionEvent::TurnEnd { aborted }).await;
-    aborted
+        let discarded: Vec<String> = queue.items.drain(..).map(|(_, text)| text).collect();
+        compact_requested.store(false, Ordering::SeqCst);
+        queue.running = false;
+        if let Ok(mut permits) = permits {
+            if !discarded.is_empty() {
+                if let Some(permit) = permits.next() {
+                    permit.send(SessionEvent::Discarded(discarded));
+                }
+            }
+            if let Some(permit) = permits.next() {
+                permit.send(SessionEvent::TurnEnd { aborted });
+            }
+        }
+        return aborted;
+    }
 }
 
 /// Presentation contract for one call in a provider-issued tool batch.
@@ -256,9 +354,17 @@ pub struct ToolCallPresentation {
 #[derive(Debug)]
 pub enum SessionEvent {
     TurnStart,
+    /// Queued prompts that could not run after cancellation or worker failure.
+    Discarded(Vec<String>),
+    /// Context maintenance belongs to the core, including headless runs.
+    Compacting,
+    Compacted {
+        summary: String,
+        context_tokens: u64,
+    },
     TextDelta(String),
     ReasoningDelta(String),
-    /// All calls from one assistant message, known before serial execution.
+    /// All calls from one assistant message, known before concurrent execution.
     ToolBatchStart {
         calls: Vec<ToolCallPresentation>,
     },
@@ -354,6 +460,9 @@ pub fn next_effort(levels: &[String], current: &str) -> String {
 
 #[derive(Clone, Debug)]
 pub struct AgentOptions {
+    /// Explicit workspace and configuration paths for in-process callers.
+    pub cwd: Option<PathBuf>,
+    pub home: Option<PathBuf>,
     pub save_session: bool,
     pub tool_mode: ToolMode,
     pub effort_override: Option<String>,
@@ -366,6 +475,8 @@ pub struct AgentOptions {
 impl Default for AgentOptions {
     fn default() -> Self {
         AgentOptions {
+            cwd: None,
+            home: None,
             save_session: true,
             tool_mode: ToolMode::All,
             effort_override: None,
@@ -376,14 +487,17 @@ impl Default for AgentOptions {
 
 #[derive(Default)]
 struct PendingQueue {
+    running: bool,
     next_id: u64,
     items: Vec<(u64, String)>,
 }
 
 pub struct Agent {
+    home: PathBuf,
+    tools: Arc<tools::ToolRuntime>,
     pub model: Model,
     /// The extension host; None means built-in tools only.
-    host: Option<std::sync::Arc<crate::core::api::ExtensionHost>>,
+    host: Option<std::sync::Arc<crate::core::extensions::ExtensionHost>>,
     cwd: PathBuf,
     history: Arc<Mutex<Vec<ChatMessage>>>,
     events: mpsc::Sender<SessionEvent>,
@@ -393,12 +507,12 @@ pub struct Agent {
     /// commits such an entry as a fresh prompt instead of resurrecting it.
     pending: Arc<Mutex<PendingQueue>>,
     cancel: Arc<AtomicBool>,
-    running: bool,
+    compact_requested: Arc<AtomicBool>,
     /// The supervisor owns the worker's terminal event. Keeping its handle
     /// prevents the turn from becoming unobserved background work.
     turn_task: Option<tokio::task::JoinHandle<()>>,
     /// The session log; every committed message is appended.
-    session: Arc<Mutex<Option<Session>>>,
+    session: Arc<Mutex<Option<SessionLog>>>,
     /// An extension-set display name, applied when the log exists or when it
     /// is created on the first message.
     session_name: Arc<Mutex<Option<String>>>,
@@ -425,15 +539,33 @@ impl Agent {
         options: AgentOptions,
     ) -> (Self, mpsc::Receiver<SessionEvent>) {
         let (events, rx) = mpsc::channel(256);
+        let process_cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = options.cwd.clone().unwrap_or_else(|| process_cwd.clone());
+        let home = options
+            .home
+            .clone()
+            .unwrap_or_else(crate::core::config::home::home);
+        let cwd = if cwd.is_absolute() {
+            cwd
+        } else {
+            process_cwd.join(cwd)
+        };
+        let home = if home.is_absolute() {
+            home
+        } else {
+            process_cwd.join(home)
+        };
         let agent = Agent {
+            home,
+            tools: Arc::new(tools::ToolRuntime::default()),
             model,
             host: None,
-            cwd: std::env::current_dir().unwrap_or_default(),
+            cwd,
             history: Arc::new(Mutex::new(Vec::new())),
             events,
             pending: Arc::new(Mutex::new(PendingQueue::default())),
             cancel: Arc::new(AtomicBool::new(false)),
-            running: false,
+            compact_requested: Arc::new(AtomicBool::new(false)),
             turn_task: None,
             session: Arc::new(Mutex::new(None)),
             session_name: Arc::new(Mutex::new(None)),
@@ -457,12 +589,15 @@ impl Agent {
 
     /// Attach the extension host: its tools join (and may override) the
     /// built-ins, and its hooks gate every tool call.
-    pub fn set_host(&mut self, host: std::sync::Arc<crate::core::api::ExtensionHost>) {
+    pub fn set_host(&mut self, host: std::sync::Arc<crate::core::extensions::ExtensionHost>) {
         self.host = Some(host);
     }
 
     pub fn is_streaming(&self) -> bool {
-        self.running
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .running
     }
     pub fn model_slug(&self) -> String {
         slug(&self.model)
@@ -476,11 +611,11 @@ impl Agent {
     /// supports it, else the model's strong default (`high` when declared,
     /// otherwise its first level).
     pub fn effort(&self) -> Option<String> {
-        let saved = self
-            .options
-            .effort_override
-            .clone()
-            .or_else(|| crate::core::config::settings::get_string("effort"));
+        let saved = self.options.effort_override.clone().or_else(|| {
+            crate::core::config::home::with_home(self.home.clone(), || {
+                crate::core::config::settings::get_string("effort")
+            })
+        });
         effort(&self.model.effort, saved.as_deref())
     }
     /// Select one of the current model's declared effort levels and persist it.
@@ -489,7 +624,9 @@ impl Agent {
         if !self.model.effort.iter().any(|level| level == effort) {
             return Ok(false);
         }
-        crate::core::config::settings::set_string("effort", effort)?;
+        crate::core::config::home::with_home(self.home.clone(), || {
+            crate::core::config::settings::set_string("effort", effort)
+        })?;
         // Keep the running agent in sync too. In particular, this replaces a
         // launch-time override so /effort and shift+tab take effect now rather
         // than only after e restarts.
@@ -525,10 +662,12 @@ impl Agent {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
-    pub fn load_history(&self, messages: Vec<ChatMessage>) {
+    pub fn load_history(&mut self, messages: Vec<ChatMessage>) {
+        self.tools = Arc::new(tools::ToolRuntime::default());
         *self.history.lock().unwrap_or_else(|e| e.into_inner()) = messages;
     }
-    pub fn clear(&self) {
+    pub fn clear(&mut self) {
+        self.tools = Arc::new(tools::ToolRuntime::default());
         self.history
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -539,6 +678,7 @@ impl Agent {
     /// latch — the one way messages enter the record.
     fn log(&self) -> TurnLog {
         TurnLog {
+            home: self.home.clone(),
             history: self.history.clone(),
             session: self.session.clone(),
             cwd: self.cwd.clone(),
@@ -578,7 +718,7 @@ impl Agent {
     }
 
     /// Attach a session log; created lazily on the first message when None.
-    pub fn set_session(&self, session: Option<Session>) {
+    pub fn set_session(&self, session: Option<SessionLog>) {
         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = if self.options.save_session {
             session
         } else {
@@ -714,6 +854,13 @@ impl Agent {
         self.cwd.clone()
     }
 
+    /// Assemble this agent's prompt using its own workspace and home.
+    pub fn system_prompt(&self) -> String {
+        crate::core::config::home::with_home(self.home.clone(), || {
+            context::system_prompt(&self.cwd)
+        })
+    }
+
     /// Queue a message. If a turn is running it steers (drained next step);
     /// otherwise it starts a turn.
     /// A message typed while a turn runs never fires immediately: it is held
@@ -727,22 +874,40 @@ impl Agent {
     /// Steering remains text-only because a running request cannot safely
     /// acquire a new binary payload halfway through its provider stream.
     pub fn submit_message(&mut self, message: ChatMessage, system: String) -> bool {
-        if self.running {
-            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.running {
             pending.next_id += 1;
             let key = pending.next_id;
             pending.items.push((key, message.content));
             drop(pending);
             return true;
         }
+        pending.running = true;
+        drop(pending);
         self.log().commit(message);
-        self.start(system);
+        self.start(system, false);
         false
     }
 
-    fn start(&mut self, system: String) {
-        self.running = true;
-        self.cancel.store(false, Ordering::SeqCst);
+    /// Request a checkpoint at the next provider boundary, or immediately
+    /// when idle. No frontend needs to summarize or replace history.
+    pub fn request_compaction(&mut self, system: String) {
+        let mut queue = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.compact_requested.store(true, Ordering::SeqCst);
+        if queue.running {
+            return;
+        }
+        queue.running = true;
+        drop(queue);
+        self.start(system, true);
+    }
+
+    fn start(&mut self, system: String, compact_only: bool) {
+        // A detached task retains its turn's permanently cancelled token.
+        self.cancel = Arc::new(AtomicBool::new(false));
         let log = self.log();
         let events = self.events.clone();
         let history = self.history.clone();
@@ -755,6 +920,8 @@ impl Agent {
         let host = self.host.clone();
         let tool_seq = self.tool_seq.clone();
         let wake = self.wake.clone();
+        let compact_requested = self.compact_requested.clone();
+        let tool_runtime = self.tools.clone();
         let tool_mode = if model.supports_tools {
             self.options.tool_mode
         } else {
@@ -762,16 +929,18 @@ impl Agent {
         };
         // The request's allowlist is shared across the turn's tool tasks.
         let allowed_tools = self.options.allowed_tools.clone().map(Arc::new);
-        let system = match (tool_mode, allowed_tools.as_deref()) {
-            (ToolMode::None, _) => format!("{system}\n\n{}", context::no_tools_notice()),
-            (ToolMode::All, Some(tools)) if tools.is_empty() => {
-                format!("{system}\n\n{}", context::no_tools_notice())
+        let system = crate::core::config::home::with_home(self.home.clone(), || {
+            match (tool_mode, allowed_tools.as_deref()) {
+                (ToolMode::None, _) => format!("{system}\n\n{}", context::no_tools_notice()),
+                (ToolMode::All, Some(tools)) if tools.is_empty() => {
+                    format!("{system}\n\n{}", context::no_tools_notice())
+                }
+                (ToolMode::All, Some(tools)) => {
+                    format!("{system}\n\n{}", context::tool_allowlist_notice(tools))
+                }
+                (ToolMode::All, None) => system,
             }
-            (ToolMode::All, Some(tools)) => {
-                format!("{system}\n\n{}", context::tool_allowlist_notice(tools))
-            }
-            (ToolMode::All, None) => system,
-        };
+        });
 
         // The heartbeat belongs to the supervisor too. If the turn worker
         // panics, it is stopped instead of leaking into later turns.
@@ -783,704 +952,52 @@ impl Agent {
         ));
         let lifecycle_events = events.clone();
         let lifecycle_host = host.clone();
-        let worker = tokio::spawn(async move {
-            let window_secs = wake::policy::window_secs();
-            let max_continuations = wake::policy::max_continuations();
-            let mut sleep_continuations = 0u32;
-            let _ = events.send(SessionEvent::TurnStart).await;
-            // One free retry for a blank success per turn: an empty stream is
-            // the most transient failure there is, and ending the turn on the
-            // first one traded a 1s pause for a dead turn.
-            let mut empty_retried = false;
-            // Steps this turn has run (one request each). The cap is a
-            // runaway backstop far above real work, not a working budget.
-            let mut steps = 0u32;
-            let aborted = 'turn: loop {
-                if cancel.load(Ordering::SeqCst) {
-                    break true;
-                }
-                steps += 1;
-                if steps > MAX_STEPS {
-                    let _ = events
-                        .send(SessionEvent::Warning(format!(
-                            "turn stopped after {MAX_STEPS} steps — send a message to continue"
-                        )))
-                        .await;
-                    break false;
-                }
-                // Steer: fold any pending messages into this turn between
-                // steps. The queue review edits these entries by key
-                // concurrently; whatever the loop takes here is gone to it.
-                let steered: Vec<String> = {
-                    let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
-                    pending.items.drain(..).map(|(_, text)| text).collect()
-                };
-                for message in steered {
-                    let _ = events.send(SessionEvent::Steered(message.clone())).await;
-                    // Harness-authored: steering echoes and continuations
-                    // fill the history but are not user turns.
-                    let mut recorded = ChatMessage::user(message);
-                    recorded.internal = true;
-                    log.commit_async(recorded).await;
-                }
-
-                let mut messages = { history.lock().unwrap_or_else(|e| e.into_inner()).clone() };
-                // Some compatible gateways omit usage entirely. Keep a local,
-                // conservative fallback so the mid-turn safety guard still
-                // exists there; a real Usage frame replaces it below. Sized
-                // against history before the image strip below, so it stays
-                // the conservative side of what's actually sent.
-                let mut last_context = compact::estimate_request_tokens(&system, &messages);
-                // A resumed session, or a mid-session model switch, can carry
-                // image-bearing turns forward from an earlier, image-capable
-                // model to one that isn't — this is the one place every
-                // frontend's outgoing request passes through, so it's the one
-                // place that needs to know. This only edits the local copy
-                // just cloned from `history` above; the session's own stored
-                // record keeps its images regardless of what model sends the
-                // next turn.
-                providers::strip_incompatible_images(&mut messages, &model);
-                // The stable per-conversation id, read from the live log the
-                // steering commits above just created (empty for an unsaved
-                // session). Providers that opt in send it as their session
-                // header — see `providers::with_attribution`.
-                let session_id = log
-                    .session
+        let lifecycle_pending = pending.clone();
+        let lifecycle_compact = compact_requested.clone();
+        let context = turn::Context {
+            log,
+            events,
+            history,
+            cancel,
+            model,
+            cwd,
+            effort,
+            pending,
+            host,
+            tool_seq,
+            wake,
+            system,
+            allowed_tools,
+            compact_requested,
+            tool_runtime,
+            tool_mode,
+        };
+        let mut first_worker = true;
+        let spawn_worker = move || {
+            let compact_only = if first_worker {
+                compact_only
+            } else {
+                context
+                    .pending
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_ref()
-                    .map(|s| s.id().to_string())
-                    .unwrap_or_default();
-                let request = Request {
-                    model: model.clone(),
-                    system: system.clone(),
-                    messages,
-                    effort: effort.clone(),
-                    session_id,
-                    tools: tools::restrict_to(
-                        tools::filter_schemas(
-                            match (&host, tool_mode, allowed_tools.is_some()) {
-                                // A request allowlist names built-ins. Extension
-                                // tools and overrides stay outside that contract.
-                                (Some(h), ToolMode::All, false) => h.merged_tool_schemas(),
-                                _ => tools::schemas(),
-                            },
-                            tool_mode,
-                        ),
-                        allowed_tools.as_deref().map(Vec::as_slice),
-                    ),
-                };
-
-                // Total provider requests made for this step, including the
-                // initial request. The budget is a request budget, not a
-                // retry budget, and is file-backed (`retry_max_attempts`).
-                let max_attempts = retry::max_attempts();
-                let mut attempt = 1u32;
-                // When this attempt's stream opened. A sleep gap whose wake
-                // came after this instant happened with the attempt in
-                // flight, so a loss from it is attributable to the sleep.
-                let mut attempt_started = Instant::now();
-                let (mut rx, mut handle) = providers::stream(clone_request(&request));
-
-                let mut text = String::new();
-                let mut calls: Vec<ToolCall> = Vec::new();
-                let mut reasoning_items: Vec<String> = Vec::new();
-                // Set when a mid-reply loss should resume via a continuation
-                // over the committed partial; when the window or the
-                // continuation cap is exhausted, the stop flag is set instead.
-                let mut sleep_resume: Option<Duration> = None;
-                let mut sleep_stopped = false;
-                // A dialect can stream thought deltas without ever
-                // committing a ReasoningItem (e.g. Gemini's empty-text
-                // thought chunks), so a thinking-only stream must still
-                // count as produced by this flag alone: otherwise a
-                // retryable error after a long thinking phase would retry
-                // (replaying the thoughts on screen) and a thinking-only
-                // stream ending without text would be called an empty
-                // response.
-                let mut reasoning_streamed = false;
-                // Latest usage frame this step; emitted once after the stream
-                // ends. Dialects may report usage cumulatively mid-stream
-                // (Gemini sends usageMetadata per chunk), so forwarding every
-                // frame would let a consumer that sums per-step usage count
-                // the same tokens more than once.
-                let mut step_usage: Option<(u64, u64, u64)> = None;
-                // Cumulative argument bytes this attempt, for the liveness
-                // row. Deliberately not part of the retry-safety check: a
-                // partial call never left the dialect, so replaying the
-                // request commits nothing twice.
-                let mut assembly_bytes = 0u64;
-                let mut errored = false;
-                // True once this attempt has streamed anything at all — the
-                // signal both for "recovered" (first content after a retry)
-                // and for whether a fresh failure is still safe to retry.
-                let mut recovered_notified = false;
-                // Cancel must win even when the provider yields nothing: a
-                // prior `while let Some(event) = rx.recv()` only checked Esc
-                // after the next byte arrived, so a stalled SSE left the
-                // spinner running and Esc inert until the socket moved.
-                // Esc mid-stream falls through to the partial-commit path
-                // below instead of breaking the turn here: text the user
-                // watched stream must reach history, or the next turn's model
-                // has no memory of words the user is replying to.
-                let mut stream_cancelled = false;
-                'stream: loop {
-                    let event = tokio::select! {
-                        event = rx.recv() => event,
-                        _ = wait_cancelled(&cancel) => {
-                            handle.abort();
-                            stream_cancelled = true;
-                            break 'stream;
-                        }
-                    };
-                    let Some(event) = event else {
-                        break 'stream;
-                    };
-                    // The new stream (after one or more retries) just
-                    // produced its first non-error event — the retry
-                    // worked. An immediate second failure is not a recovery,
-                    // so this excludes Error and lets that arm decide
-                    // whether to retry again instead. `attempt` is 1-based:
-                    // 1 is the first try, so only attempt 2+ ever recovered.
-                    if attempt > 1
-                        && !recovered_notified
-                        && !matches!(event, ProviderEvent::Error(_))
-                    {
-                        recovered_notified = true;
-                        let _ = events
-                            .send(SessionEvent::Recovered {
-                                attempt,
-                                limit: max_attempts,
-                            })
-                            .await;
-                    }
-                    match event {
-                        ProviderEvent::TextDelta(d) => {
-                            text.push_str(&d);
-                            let _ = events.send(SessionEvent::TextDelta(d)).await;
-                        }
-                        ProviderEvent::ReasoningDelta(d) => {
-                            reasoning_streamed = true;
-                            let _ = events.send(SessionEvent::ReasoningDelta(d)).await;
-                        }
-                        ProviderEvent::ToolArgumentsDelta { delta, .. } => {
-                            assembly_bytes += delta.len() as u64;
-                            let _ = events
-                                .send(SessionEvent::ToolCallAssembly {
-                                    bytes: assembly_bytes,
-                                })
-                                .await;
-                        }
-                        ProviderEvent::ToolCallStart { .. } | ProviderEvent::ToolCallEnd { .. } => {
-                        }
-                        ProviderEvent::ToolCall(call) => calls.push(call),
-                        ProviderEvent::ReasoningItem(item) => reasoning_items.push(item),
-                        ProviderEvent::Usage {
-                            input,
-                            output,
-                            cache_read,
-                        } => {
-                            step_usage = Some((input, output, cache_read));
-                        }
-                        ProviderEvent::Error(err) => {
-                            // A suspension that outlived the resume window
-                            // stops the run whatever the provider call died
-                            // of: partial work is committed below, and the
-                            // stop is reported as a stop, not an error.
-                            if let Some(gap) = wake::gap_since(&wake, attempt_started)
-                                .filter(|gap| gap.duration.as_secs() >= window_secs)
-                            {
-                                let _ = events
-                                    .send(SessionEvent::SleepStopped {
-                                        duration_secs: gap.duration.as_secs(),
-                                    })
-                                    .await;
-                                let _ = events
-                                    .send(SessionEvent::Warning(format!(
-                                        "run stopped — the device was asleep for {} (window {window_secs}s)",
-                                        gap.label()
-                                    )))
-                                    .await;
-                                handle.abort();
-                                errored = true;
-                                sleep_stopped = true;
-                                break 'stream;
-                            }
-                            let nothing_produced = text.is_empty()
-                                && calls.is_empty()
-                                && reasoning_items.is_empty()
-                                && !reasoning_streamed;
-                            // The attempt was in flight across a sleep that
-                            // fits the window: the run keeps going. Nothing
-                            // streamed means an immediate replay — not
-                            // charged to the attempt budget, since the loss
-                            // was the machine's, not the provider's.
-                            let slept_through = wake::gap_since(&wake, attempt_started).is_some();
-                            if nothing_produced && slept_through {
-                                let duration = wake::gap_since(&wake, attempt_started)
-                                    .map(|gap| gap.duration.as_secs())
-                                    .unwrap_or(0);
-                                let _ = events
-                                    .send(SessionEvent::Slept {
-                                        duration_secs: duration,
-                                    })
-                                    .await;
-                                // No artificial backoff — the machine just
-                                // woke; let the connect decide.
-                                attempt_started = Instant::now();
-                                let (nrx, nhandle) = providers::stream(clone_request(&request));
-                                rx = nrx;
-                                handle = nhandle;
-                                assembly_bytes = 0;
-                                continue 'stream;
-                            }
-                            // Safe to retry only when the cause itself is
-                            // retryable (never Auth or Rejected) AND nothing
-                            // has streamed yet this attempt: a delivered
-                            // request that already produced output or ran
-                            // tools cannot be replayed without risking a
-                            // duplicate.
-                            if err.cause.is_retryable()
-                                && nothing_produced
-                                && attempt < max_attempts
-                            {
-                                let retry_number = attempt;
-                                attempt += 1;
-                                let delay = retry::delay_for(retry_number, err.retry_after);
-                                let _ = events
-                                    .send(SessionEvent::Retry {
-                                        attempt,
-                                        limit: max_attempts,
-                                        delay_secs: delay.as_secs(),
-                                        cause: err.cause,
-                                        reason: err.short.clone(),
-                                    })
-                                    .await;
-                                if !sleep_cancellable(delay, &cancel).await {
-                                    handle.abort();
-                                    break 'turn true;
-                                }
-                                attempt_started = Instant::now();
-                                let (nrx, nhandle) = providers::stream(clone_request(&request));
-                                rx = nrx;
-                                handle = nhandle;
-                                // A fresh attempt streams its arguments from
-                                // scratch; the liveness counter follows.
-                                assembly_bytes = 0;
-                                continue 'stream;
-                            }
-                            // A mid-reply loss under the window resumes
-                            // differently: the partial reply is committed
-                            // below, and a continuation request lets the
-                            // model finish its own sentence — bounded by the
-                            // continuation cap so lid-flapping cannot chain
-                            // turns unattended.
-                            if !nothing_produced {
-                                if let Some(gap) = wake::gap_since(&wake, attempt_started) {
-                                    if sleep_continuations < max_continuations {
-                                        sleep_resume = Some(gap.duration);
-                                        errored = true;
-                                        break 'stream;
-                                    }
-                                    let _ = events
-                                        .send(SessionEvent::SleepStopped {
-                                            duration_secs: gap.duration.as_secs(),
-                                        })
-                                        .await;
-                                    let _ = events
-                                        .send(SessionEvent::Warning(format!(
-                                            "run stopped — the device was asleep for {} (continuation cap {max_continuations} reached)",
-                                            gap.label()
-                                        )))
-                                        .await;
-                                    handle.abort();
-                                    // Enter the cancel-family stop path (like
-                                    // the past-window branch above): commit the
-                                    // partial once, synthesize results for any
-                                    // unrun calls, and end the turn. Without
-                                    // `errored` the stop block is skipped and
-                                    // the half-streamed reply is committed as a
-                                    // normal turn — running its tool calls after
-                                    // the run was already reported stopped.
-                                    errored = true;
-                                    sleep_stopped = true;
-                                    break 'stream;
-                                }
-                            }
-                            // Distinguish genuine exhaustion (the cause was
-                            // retryable and nothing had streamed, but the
-                            // budget ran out) from a failure that simply
-                            // can't be retried at all — partial content
-                            // already produced this attempt, or a rejected
-                            // cause. Only the former earns "gave up after
-                            // N/M"; the latter would misreport why the
-                            // attempt stopped.
-                            let message =
-                                if max_attempts > 0 && err.cause.is_retryable() && nothing_produced
-                                {
-                                    format!(
-                                        "{} — gave up after {attempt}/{} attempts: {}",
-                                        err.cause.label(),
-                                        max_attempts,
-                                        err.message
-                                    )
-                                } else if err.cause == FailureCause::QuotaExhausted {
-                                    // Lead with the why: the raw body behind it
-                                    // is provider JSON the row will never show.
-                                    format!("{} — {}", err.cause.label(), err.message)
-                                } else {
-                                    err.message
-                                };
-                            let _ = events.send(SessionEvent::Error(message)).await;
-                            errored = true;
-                        }
-                        ProviderEvent::Done(end) => {
-                            // The stream completed, but not necessarily with
-                            // the full answer — a truncated, refused, or
-                            // filtered reply arrives as an HTTP success and
-                            // must not pass silently.
-                            let finish_warning = match &end.finish {
-                                FinishReason::Normal | FinishReason::ToolCalls => None,
-                                FinishReason::Length => Some(
-                                    "reply truncated: the provider hit its output limit".into(),
-                                ),
-                                FinishReason::Refusal => {
-                                    Some("the model refused to answer".to_string())
-                                }
-                                FinishReason::ContentFilter => Some(
-                                    "output blocked by the provider's content filter".to_string(),
-                                ),
-                                FinishReason::Other(reason) => {
-                                    Some(format!("turn ended abnormally: {reason}"))
-                                }
-                            };
-                            if let Some(warning) = finish_warning {
-                                let _ = events.send(SessionEvent::Warning(warning)).await;
-                            }
-                            if end.malformed > 0 {
-                                let _ = events
-                                    .send(SessionEvent::Warning(format!(
-                                        "{} malformed stream event{} skipped",
-                                        end.malformed,
-                                        if end.malformed == 1 { "" } else { "s" }
-                                    )))
-                                    .await;
-                            }
-                        }
-                    }
-                }
-                // One Usage per step, the stream's final frame: `input` is
-                // this request's full context, `output` what this step alone
-                // generated. Emitted even when the stream then errored — the
-                // tokens were still consumed.
-                if let Some((input, output, cache_read)) = step_usage {
-                    last_context = input + output;
-                    let _ = events
-                        .send(SessionEvent::Usage {
-                            input,
-                            output,
-                            cache_read,
-                        })
-                        .await;
-                } else {
-                    let provisional = ChatMessage::assistant(text.clone(), calls.clone());
-                    last_context =
-                        last_context.saturating_add(compact::estimate_message_tokens(&provisional));
-                }
-                // A cancelled or failed stream still commits what it already
-                // produced: the user watched that text arrive, and a history
-                // missing it would have the model contradict its own visible
-                // words next turn. Calls that never ran get a synthetic
-                // result — a dangling tool_use without its tool_result fails
-                // the next request on every dialect.
-                if stream_cancelled || errored {
-                    if !text.is_empty() || !calls.is_empty() {
-                        for item in reasoning_items.drain(..) {
-                            log.commit_async(ChatMessage::reasoning(item)).await;
-                        }
-                        let (note, outcome, summary) = if stream_cancelled {
-                            (
-                                "not executed — the turn was cancelled before this call ran",
-                                tools::ToolOutcome::Cancelled,
-                                "cancelled",
-                            )
-                        } else {
-                            (
-                                "not executed — the provider stream failed before this call ran",
-                                tools::ToolOutcome::Failed,
-                                "error",
-                            )
-                        };
-                        let unrun = calls.clone();
-                        let mut final_message =
-                            ChatMessage::assistant(std::mem::take(&mut text), calls);
-                        if let Some((input, output, cache_read)) = step_usage {
-                            final_message = final_message.with_usage(providers::MessageUsage {
-                                input,
-                                output,
-                                cache_read,
-                            });
-                        }
-                        log.commit_async(final_message).await;
-                        for call in unrun {
-                            log.commit_async(ChatMessage::tool_result_with_meta(
-                                call.id, note, outcome, summary,
-                            ))
-                            .await;
-                        }
-                    }
-                    if stream_cancelled {
-                        break true;
-                    }
-                    // A sleep past the window (or the continuation cap) is a
-                    // stop in the cancel family: the stop line already went
-                    // out, so end aborted without a second row.
-                    if sleep_stopped {
-                        break true;
-                    }
-                    // A sleep under the window resumes: the continuation
-                    // message is committed and shown, and the next step asks
-                    // the model to finish its own sentence.
-                    if let Some(duration) = sleep_resume {
-                        sleep_continuations += 1;
-                        let _ = events
-                            .send(SessionEvent::Slept {
-                                duration_secs: duration.as_secs(),
-                            })
-                            .await;
-                        // Harness-authored: the wake continuation fills
-                        // the history but is not a user turn.
-                        let mut recorded = ChatMessage::user(SLEEP_CONTINUATION.to_string());
-                        recorded.internal = true;
-                        log.commit_async(recorded).await;
-                        let _ = events
-                            .send(SessionEvent::Steered(SLEEP_CONTINUATION.to_string()))
-                            .await;
-                        continue 'turn;
-                    }
-                    break false;
-                }
-
-                // A stream that ends with no text, no calls, no reasoning,
-                // and no error is a blank success — committing it would strand
-                // the turn in silence. It is also the most transient failure
-                // a provider produces, so it gets one quiet re-request per
-                // turn when the configured attempt budget permits. Abnormal
-                // finishes and skipped frames
-                // were already surfaced as warnings above; past the retry we
-                // guarantee the user at least sees that something went wrong.
-                if text.is_empty()
-                    && calls.is_empty()
-                    && reasoning_items.is_empty()
-                    && !reasoning_streamed
-                    && pending
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .items
-                        .is_empty()
-                {
-                    if !empty_retried && max_attempts > 1 {
-                        empty_retried = true;
-                        let _ = events
-                            .send(SessionEvent::Retry {
-                                attempt: 2,
-                                limit: max_attempts,
-                                delay_secs: 1,
-                                cause: FailureCause::ProviderUnavailable,
-                                reason: "empty response".into(),
-                            })
-                            .await;
-                        if !sleep_cancellable(Duration::from_secs(1), &cancel).await {
-                            break 'turn true;
-                        }
-                        continue 'turn;
-                    }
-                    let _ = events
-                        .send(SessionEvent::Error(
-                            "the model returned an empty response".into(),
-                        ))
-                        .await;
-                    break false;
-                }
-
-                // Reasoning items commit first — the dialect that produced
-                // them must replay them ahead of the assistant turn.
-                for item in reasoning_items.drain(..) {
-                    log.commit_async(ChatMessage::reasoning(item)).await;
-                }
-                // Commit the assistant turn (text + any calls), with the
-                // step's real usage attached when the stream reported it —
-                // the session file then carries the token accounting.
-                let mut final_message = ChatMessage::assistant(text, calls.clone());
-                if let Some((input, output, cache_read)) = step_usage {
-                    final_message = final_message.with_usage(providers::MessageUsage {
-                        input,
-                        output,
-                        cache_read,
-                    });
-                }
-                log.commit_async(final_message).await;
-
-                if calls.is_empty() {
-                    // A plain reply would end the turn — but a message that
-                    // landed mid-reply must still be delivered, so continue
-                    // the turn to pick it up rather than stranding it.
-                    if !pending
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .items
-                        .is_empty()
-                    {
-                        continue 'turn;
-                    }
-                    break 'turn false;
-                }
-
-                // Resolve the complete batch before serial execution so the
-                // transcript has one stable group from the first call.
-                let mut batch = Vec::with_capacity(calls.len());
-                for call in &calls {
-                    let args: serde_json::Value =
-                        serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
-                    let presentation = tools::present(&call.name, &args);
-                    let id = tool_seq.fetch_add(1, Ordering::SeqCst) + 1;
-                    batch.push((
-                        id,
-                        call.clone(),
-                        ToolCallPresentation {
-                            id,
-                            category: presentation.category,
-                            running: presentation.running,
-                            completed: presentation.completed,
-                            target: presentation.target,
-                        },
-                    ));
-                }
-                let _ = events
-                    .send(SessionEvent::ToolBatchStart {
-                        calls: batch.iter().map(|(_, _, shown)| shown.clone()).collect(),
-                    })
-                    .await;
-
-                // Run the batch concurrently (the reference behavior): every
-                // child streams its own lifecycle on the shared channel as it
-                // progresses. Results commit in assistant source order.
-                let mut handles = Vec::with_capacity(batch.len());
-                for (id, call, _) in batch {
-                    let host = host.clone();
-                    let cancel = cancel.clone();
-                    let events = events.clone();
-                    let cwd = cwd.clone();
-                    let allowed_tools = allowed_tools.clone();
-                    handles.push((
-                        call.clone(),
-                        tokio::spawn(async move {
-                            let _ = events.send(SessionEvent::ToolStart { id }).await;
-                            let output = run_tool(
-                                ToolRunContext {
-                                    host,
-                                    tool_mode,
-                                    allowed_tools,
-                                    cwd,
-                                    cancel,
-                                    id,
-                                    events: events.clone(),
-                                },
-                                &call.name,
-                                &call.arguments,
-                            )
-                            .await;
-                            let _ = events
-                                .send(SessionEvent::ToolEnd {
-                                    id,
-                                    outcome: output.outcome,
-                                    summary: output.summary.clone(),
-                                    // The viewer gets the rich detail (full
-                                    // diffs); history keeps the lean content.
-                                    content: output.display_text().to_string(),
-                                })
-                                .await;
-                            output
-                        }),
-                    ));
-                }
-
-                for (call, handle) in handles {
-                    // A blocked filesystem operation cannot be interrupted in
-                    // place; on Esc, stop waiting, record the call as
-                    // cancelled, and detach the task — the turn must end
-                    // promptly even over a stalled FIFO or NFS mount.
-                    let output = tokio::select! {
-                        biased;
-                        joined = handle => match joined {
-                            Ok(output) => output,
-                            Err(_) => tools::ToolOutput {
-                                content: "tool panicked".into(),
-                                outcome: tools::ToolOutcome::Failed,
-                                summary: "error".into(),
-                                display: None,
-                            },
-                        },
-                        _ = wait_cancelled(&cancel) => tools::ToolOutput {
-                            // Honest record: the blocked operation is only
-                            // detached, so it may still complete after this.
-                            content: "tool cancelled — the underlying operation \
-                                      may still complete in the background"
-                                .into(),
-                            outcome: tools::ToolOutcome::Cancelled,
-                            summary: "cancelled".into(),
-                            display: None,
-                        },
-                    };
-                    last_context = last_context
-                        .saturating_add((output.content.chars().count() as u64).div_ceil(4));
-                    log.commit_async(ChatMessage::tool_result_with_meta(
-                        call.id,
-                        output.content,
-                        output.outcome,
-                        output.summary,
-                    ))
-                    .await;
-                }
-                if cancel.load(Ordering::SeqCst) {
-                    break 'turn true;
-                }
-                // Context guard: a long tool loop grows the context fastest
-                // exactly where compaction (which runs between turns) can't
-                // reach it, and the next request past the window dies on a
-                // rejected 400 with the work half-done. When real usage says
-                // the reserve is spent, end the turn cleanly instead — the
-                // frontend compacts at TurnEnd — and queue a continuation so
-                // the task resumes in the fresh context.
-                if last_context > 0 && compact::should_compact(last_context, model.context_window) {
-                    let _ = events
-                        .send(SessionEvent::Warning(
-                            "context nearly full — pausing to compact, then continuing".into(),
-                        ))
-                        .await;
-                    // Worded so it stays true even if the compaction the
-                    // frontend runs at TurnEnd fails — it must not claim a
-                    // compaction that may not have happened.
-                    pending
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .items
-                        .insert(
-                        0,
-                        (
-                            0,
-                            "The turn was paused because the context ran low. Continue the task \
-                                 from where it left off."
-                                .to_string(),
-                        ),
-                    );
-                    break 'turn false;
-                }
+                    .unwrap_or_else(|error| error.into_inner())
+                    .items
+                    .is_empty()
             };
-            aborted
-        });
+            first_worker = false;
+            tokio::spawn(crate::core::config::home::scope(
+                context.log.home.clone(),
+                turn::run(context.clone(), compact_only),
+            ))
+        };
         let turn_task = tokio::spawn(async move {
-            let aborted = supervise_turn(worker, lifecycle_events).await;
+            let aborted = supervise_turn(
+                spawn_worker,
+                lifecycle_events,
+                lifecycle_pending,
+                lifecycle_compact,
+            )
+            .await;
             heartbeat_stop.store(true, Ordering::SeqCst);
             heartbeat.abort();
             let _ = heartbeat.await;
@@ -1492,30 +1009,22 @@ impl Agent {
         self.turn_task = Some(turn_task);
     }
 
-    /// Called by the frontend after each TurnEnd so a new turn may start.
-    /// Returns any prompts stranded by the shutdown race: submitted after
-    /// the worker's final empty-queue check but before this call, with no
-    /// worker left to drain them. The frontend must resubmit them in order.
-    pub fn on_turn_end(&mut self) -> Vec<String> {
-        self.running = false;
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.items.drain(..).map(|(_, text)| text).collect()
-    }
-
     pub fn interrupt(&mut self) {
         self.cancel.store(true, Ordering::SeqCst);
-        if !self.running {
-            let _ = self
-                .events
-                .try_send(SessionEvent::TurnEnd { aborted: true });
-        }
+    }
+}
+
+impl Drop for Agent {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
     }
 }
 
 /// Dispatch one tool call: extension hooks may block it, an extension that
 /// owns the name serves it, otherwise the built-in runs on a blocking thread.
 struct ToolRunContext {
-    host: Option<std::sync::Arc<crate::core::api::ExtensionHost>>,
+    tools: Arc<tools::ToolRuntime>,
+    host: Option<std::sync::Arc<crate::core::extensions::ExtensionHost>>,
     tool_mode: ToolMode,
     allowed_tools: Option<Arc<Vec<String>>>,
     cwd: PathBuf,
@@ -1526,6 +1035,7 @@ struct ToolRunContext {
 
 async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools::ToolOutput {
     let ToolRunContext {
+        tools: tool_runtime,
         host,
         tool_mode,
         allowed_tools,
@@ -1635,13 +1145,13 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
     let name = name.to_string();
     let arguments = arguments.to_string();
     tokio::task::spawn_blocking(move || {
-        tools::run_streaming(&name, &arguments, &cwd, &cancel, |stream, chunk| {
+        tool_runtime.run_streaming(&name, &arguments, &cwd, &cancel, |stream, chunk| {
             let chunk = tools::sanitize_display(chunk);
             if !chunk.is_empty() {
-                // Blocks this pump thread when the channel is full, so the
-                // SessionEvent receiver must never block on I/O — a stalled
-                // consumer here stalls the tool it is reporting on.
-                let _ = events.blocking_send(SessionEvent::ToolOutput { id, stream, chunk });
+                // Live output is a preview. A slow consumer must not prevent
+                // the command from checking its timeout or cancellation.
+                // ToolEnd carries the retained output even if preview chunks drop.
+                let _ = events.try_send(SessionEvent::ToolOutput { id, stream, chunk });
             }
         })
     })
@@ -1657,7 +1167,7 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
 async fn forward_extension_update(
     events: &mpsc::Sender<SessionEvent>,
     id: u64,
-    update: crate::core::api::ToolProgress,
+    update: crate::core::extensions::ToolProgress,
 ) {
     let chunk = tools::sanitize_display(&update.chunk);
     if !chunk.is_empty() {
@@ -1696,12 +1206,21 @@ mod option_tests {
     #[tokio::test]
     async fn a_panicking_turn_still_reports_one_terminal_event() {
         let (events, mut rx) = mpsc::channel(8);
-        let worker = tokio::spawn(async {
-            panic!("test turn panic");
-        });
-        let aborted = supervise_turn(worker, events).await;
+        let worker = || {
+            tokio::spawn(async {
+                panic!("test turn panic");
+            })
+        };
+        let aborted = supervise_turn(
+            worker,
+            events,
+            Arc::new(Mutex::new(PendingQueue::default())),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
 
         assert!(!aborted);
+        assert!(matches!(rx.recv().await, Some(SessionEvent::TurnStart)));
         let error = rx.recv().await.expect("panic must be reported");
         assert!(
             matches!(error, SessionEvent::Error(message) if message.contains("test turn panic"))
@@ -1714,10 +1233,54 @@ mod option_tests {
     }
 
     #[tokio::test]
+    async fn a_prompt_in_the_completion_gap_is_consumed_before_turn_end() {
+        let (events, mut rx) = mpsc::channel(8);
+        let queue = Arc::new(Mutex::new(PendingQueue {
+            running: true,
+            ..PendingQueue::default()
+        }));
+        let pending = queue.clone();
+        let calls = Arc::new(AtomicU64::new(0));
+        let count = calls.clone();
+        let factory = move || {
+            let pending = pending.clone();
+            let count = count.clone();
+            tokio::spawn(async move {
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                let mut pending = pending.lock().unwrap();
+                if attempt == 0 {
+                    // The worker has decided to stop, but completion has not
+                    // been published. A concurrent submit still belongs here.
+                    pending.items.push((1, "late prompt".into()));
+                } else {
+                    assert_eq!(pending.items.remove(0).1, "late prompt");
+                }
+                turn::Outcome::Complete
+            })
+        };
+        supervise_turn(
+            factory,
+            events,
+            queue.clone(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!queue.lock().unwrap().running);
+        assert!(matches!(rx.recv().await, Some(SessionEvent::TurnStart)));
+        assert!(matches!(
+            rx.recv().await,
+            Some(SessionEvent::TurnEnd { aborted: false })
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn execution_policy_blocks_a_disallowed_call_even_if_requested() {
         let (events, _rx) = mpsc::channel(1);
         let output = run_tool(
             ToolRunContext {
+                tools: Arc::new(tools::ToolRuntime::default()),
                 host: None,
                 tool_mode: ToolMode::None,
                 allowed_tools: None,
@@ -1740,6 +1303,7 @@ mod option_tests {
         let (events, _rx) = mpsc::channel(1);
         let output = run_tool(
             ToolRunContext {
+                tools: Arc::new(tools::ToolRuntime::default()),
                 host: None,
                 tool_mode: ToolMode::All,
                 allowed_tools: Some(Arc::new(vec!["read".into(), "grep".into()])),

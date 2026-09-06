@@ -4,10 +4,9 @@
 //! or turn cancellation kills the command's process group. Pipe readers feed
 //! one tagged queue so display and retained output keep observed ordering.
 //!
-//! `background: true` is the one exception to "spawn-and-capture, not a
-//! daemon": the process outlives the call that started it (though never the
-//! e process — no persistence, nothing survives a restart), tracked in
-//! `BACKGROUND` by a handle the model checks or kills later. Everything else
+//! A background process outlives its starting call and belongs to the agent's
+//! registry. The model can check or kill its handle in later turns. Dropping
+//! that agent stops its background processes. Everything else
 //! about it — the process group, the 32KB retained tail, ANSI/carriage-return
 //! cleanup — matches the foreground path; only the waiting is removed.
 
@@ -29,7 +28,7 @@ use super::{schema_object, OutputStream, ToolOutcome, ToolOutput};
 pub fn schema() -> Value {
     schema_object(
         "bash",
-        "Run a shell command in the workspace root and return its combined output. Each call is a fresh shell: cd, environment variables, and (unless started with `background: true`) background processes do not persist between calls. Output keeps the most recent 32KB when longer.\n\nFor something long-lived (a dev server, a watcher) that would otherwise block the turn: pass `background: true` to start it detached and get a `handle` back immediately, instead of waiting for it to exit. Check on it, or read more of its output, with a later call passing `handle` and no `command`; add `signal: \"kill\"` to stop it. A background process outlives the turn that started it but not the e process — nothing persists across a restart.",
+        "Run a shell command in the workspace root and return its combined output. Each call is a fresh shell: cd, environment variables, and (unless started with `background: true`) background processes do not persist between calls. Output keeps the most recent 32KB when longer.\n\nFor something long-lived (a dev server, a watcher) that would otherwise block the turn: pass `background: true` to start it detached and get a `handle` back immediately, instead of waiting for it to exit. Check on it, or read more of its output, with a later call passing `handle` and no `command`; add `signal: \"kill\"` to stop it. A background process outlives the turn that started it but not its owning agent — nothing persists across a restart.",
         json!({
             "command": {"type": "string", "description": "The command to run. Omit when checking or killing a background process by `handle`."},
             "timeout": {"type": "integer", "description": "Seconds before the command is killed (default 120). Ignored when starting a background process — it runs until it exits or is killed."},
@@ -65,10 +64,31 @@ struct BackgroundProcess {
     finished_sequence: AtomicU64,
 }
 
-/// Live background processes, keyed by handle. Process-lifetime only — like
-/// everything else in this tool, nothing here survives past the e process
-/// itself; there is no daemon and no persistence to reload on restart.
-static BACKGROUND: Mutex<Option<HashMap<String, Arc<BackgroundProcess>>>> = Mutex::new(None);
+/// Background handles belong to one agent and are killed when it is dropped.
+#[derive(Default)]
+pub(super) struct BackgroundRegistry {
+    jobs: Mutex<HashMap<String, Arc<BackgroundProcess>>>,
+}
+
+impl Drop for BackgroundRegistry {
+    fn drop(&mut self) {
+        for process in self
+            .jobs
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+        {
+            if process
+                .exit
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_none()
+            {
+                kill_group(process.pid);
+            }
+        }
+    }
+}
 
 /// Shells run in their own process groups. Track each live leader so process
 /// shutdown can kill the groups before the runtime exits.
@@ -134,9 +154,13 @@ fn prune_background(map: &mut HashMap<String, Arc<BackgroundProcess>>) {
     }
 }
 
-fn register_background(id: String, process: Arc<BackgroundProcess>) -> bool {
-    let mut guard = BACKGROUND.lock().unwrap_or_else(|e| e.into_inner());
-    let map = guard.get_or_insert_with(HashMap::new);
+fn register_background(
+    registry: &BackgroundRegistry,
+    id: String,
+    process: Arc<BackgroundProcess>,
+) -> bool {
+    let mut guard = registry.jobs.lock().unwrap_or_else(|e| e.into_inner());
+    let map = &mut *guard;
     prune_background(map);
     if map.len() >= BACKGROUND_PROCESS_LIMIT {
         return false;
@@ -145,18 +169,19 @@ fn register_background(id: String, process: Arc<BackgroundProcess>) -> bool {
     true
 }
 
-fn find_background(id: &str) -> Option<Arc<BackgroundProcess>> {
-    BACKGROUND
+fn find_background(registry: &BackgroundRegistry, id: &str) -> Option<Arc<BackgroundProcess>> {
+    registry
+        .jobs
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .and_then(|map| map.get(id).cloned())
+        .get(id)
+        .cloned()
 }
 
 /// Start `command` detached and return immediately with a handle. Output
 /// keeps accumulating (capped) in the background; nothing here blocks the
 /// calling turn.
-fn start_background(command: &str, cwd: &Path) -> ToolOutput {
+fn start_background(command: &str, cwd: &Path, registry: &Arc<BackgroundRegistry>) -> ToolOutput {
     let mut cmd = Command::new("bash");
     cmd.arg("-lc")
         .arg(command)
@@ -188,7 +213,7 @@ fn start_background(command: &str, cwd: &Path) -> ToolOutput {
         exit: Mutex::new(None),
         finished_sequence: AtomicU64::new(0),
     });
-    if !register_background(id.clone(), process.clone()) {
+    if !register_background(registry, id.clone(), process.clone()) {
         kill_group(pid);
         let _ = child.wait();
         untrack_group(pid);
@@ -205,7 +230,10 @@ fn start_background(command: &str, cwd: &Path) -> ToolOutput {
         let process = process.clone();
         std::thread::spawn(move || drain_into_background(pipe, process))
     });
-    std::thread::spawn(move || reap_background(child, process, stdout_thread, stderr_thread));
+    let registry = Arc::downgrade(registry);
+    std::thread::spawn(move || {
+        reap_background(child, process, stdout_thread, stderr_thread, registry)
+    });
 
     ToolOutput {
         content: format!("started background process {id} (pid {pid}): {command}"),
@@ -253,6 +281,7 @@ fn reap_background(
     process: Arc<BackgroundProcess>,
     stdout_thread: Option<std::thread::JoinHandle<()>>,
     stderr_thread: Option<std::thread::JoinHandle<()>>,
+    registry: std::sync::Weak<BackgroundRegistry>,
 ) {
     let status = child.wait();
     if let Some(t) = stdout_thread {
@@ -284,18 +313,14 @@ fn reap_background(
         Ordering::Relaxed,
     );
     untrack_group(process.pid);
-    if let Some(map) = BACKGROUND
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_mut()
-    {
-        prune_background(map);
+    if let Some(registry) = registry.upgrade() {
+        prune_background(&mut registry.jobs.lock().unwrap_or_else(|e| e.into_inner()));
     }
 }
 
 /// Check on, read more from, or kill a background process by handle.
-fn query_background(id: &str, kill: bool) -> ToolOutput {
-    let Some(process) = find_background(id) else {
+fn query_background(registry: &BackgroundRegistry, id: &str, kill: bool) -> ToolOutput {
+    let Some(process) = find_background(registry, id) else {
         return failure(&format!("bash: no background process with handle {id}"));
     };
     if kill {
@@ -385,14 +410,15 @@ fn kill_group(pid: u32) {
 }
 
 /// Compatibility entry point for non-streaming callers.
-pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
-    run_streaming(args, cwd, &AtomicBool::new(false), |_, _| {})
+pub fn run(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput {
+    run_streaming(args, cwd, state, &AtomicBool::new(false), |_, _| {})
 }
 
 /// Run bash and publish decoded stdout/stderr chunks while the process lives.
 pub fn run_streaming<F>(
     args: &Value,
     cwd: &Path,
+    state: &super::ToolRuntime,
     cancel: &AtomicBool,
     mut on_output: F,
 ) -> ToolOutput
@@ -400,13 +426,17 @@ where
     F: FnMut(OutputStream, &str),
 {
     if let Some(handle) = args["handle"].as_str() {
-        return query_background(handle, args["signal"].as_str() == Some("kill"));
+        return query_background(
+            &state.background,
+            handle,
+            args["signal"].as_str() == Some("kill"),
+        );
     }
     let Some(command) = args["command"].as_str() else {
         return failure("bash: missing command (or a background `handle` to check)");
     };
     if args["background"].as_bool().unwrap_or(false) {
-        return start_background(command, cwd);
+        return start_background(command, cwd, &state.background);
     }
     let timeout = args["timeout"].as_u64().unwrap_or(120).clamp(1, 600);
 
@@ -432,7 +462,7 @@ where
     };
     let _tracked_group = TrackedGroup::new(child.id());
 
-    let (tx, rx) = mpsc::channel::<(OutputStream, Vec<u8>)>();
+    let (tx, rx) = mpsc::sync_channel::<(OutputStream, Vec<u8>)>(64);
     let reader_stop = Arc::new(AtomicBool::new(false));
     let mut readers = Vec::new();
     if let Some(stdout) = child.stdout.take() {
@@ -464,7 +494,8 @@ where
     let mut carries = [Vec::<u8>::new(), Vec::<u8>::new()];
 
     while status.is_none() {
-        while let Ok((stream, bytes)) = rx.try_recv() {
+        // Bound each drain so continuous output cannot starve cancellation.
+        for (stream, bytes) in rx.try_iter().take(64) {
             retain_and_publish(
                 &mut retained,
                 &mut total_bytes,
@@ -498,6 +529,16 @@ where
     kill_group(child.id());
     let drain_deadline = Instant::now() + Duration::from_millis(100);
     while readers.iter().any(|reader| !reader.is_finished()) && Instant::now() < drain_deadline {
+        for (stream, bytes) in rx.try_iter().take(64) {
+            retain_and_publish(
+                &mut retained,
+                &mut total_bytes,
+                &mut carries[carry_index(stream)],
+                stream,
+                &bytes,
+                &mut on_output,
+            );
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
     reader_stop.store(true, Ordering::SeqCst);
@@ -586,7 +627,7 @@ where
 fn spawn_reader<R>(
     pipe: R,
     stream: OutputStream,
-    tx: mpsc::Sender<(OutputStream, Vec<u8>)>,
+    tx: mpsc::SyncSender<(OutputStream, Vec<u8>)>,
     stop: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()>
 where
@@ -606,7 +647,7 @@ where
 fn spawn_reader<R>(
     pipe: R,
     stream: OutputStream,
-    tx: mpsc::Sender<(OutputStream, Vec<u8>)>,
+    tx: mpsc::SyncSender<(OutputStream, Vec<u8>)>,
     stop: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()>
 where
@@ -618,7 +659,7 @@ where
 fn spawn_reader_loop<R>(
     mut pipe: R,
     stream: OutputStream,
-    tx: mpsc::Sender<(OutputStream, Vec<u8>)>,
+    tx: mpsc::SyncSender<(OutputStream, Vec<u8>)>,
     stop: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()>
 where
@@ -630,8 +671,19 @@ where
             match pipe.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
-                    if tx.send((stream, buffer[..count].to_vec())).is_err() {
-                        break;
+                    let mut chunk = (stream, buffer[..count].to_vec());
+                    loop {
+                        match tx.try_send(chunk) {
+                            Ok(()) => break,
+                            Err(mpsc::TrySendError::Disconnected(_)) => return,
+                            Err(mpsc::TrySendError::Full(pending)) => {
+                                if stop.load(Ordering::SeqCst) {
+                                    return;
+                                }
+                                chunk = pending;
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                        }
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

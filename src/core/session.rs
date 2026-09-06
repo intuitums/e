@@ -15,7 +15,7 @@
 //! visible: pick an earlier point and continue, and the new messages chain
 //! onto that point's id instead of the file's last line, growing a second
 //! branch in the same file. The abandoned tail is never touched — `nodes`
-//! reads every branch a file holds, while `Session::load` follows parents
+//! reads every branch a file holds, while `SessionLog::load` follows parents
 //! from the most recently appended node and restores only that active path.
 //! Records written before branching existed carry neither
 //! field; `nodes` synthesizes both positionally so an old session still
@@ -69,15 +69,14 @@ enum Entry {
     Name { name: String },
 }
 
-pub struct Session {
+pub struct SessionLog {
     path: PathBuf,
     file: File,
     /// False only when an append failed and even truncating its partial tail
     /// failed. Such a log is retired permanently; later records must never be
     /// written behind a possibly torn line.
     healthy: bool,
-    /// Held for as long as this Session exists; its sidecar file marks
-    /// ownership so a second e cannot append to the same log.
+    /// The OS releases exclusive ownership when this file handle closes.
     _lock: LockGuard,
     /// The node the next appended message attaches to as parent — the tip of
     /// whichever branch is active. None only before this file holds any
@@ -93,82 +92,28 @@ pub struct Node {
     pub message: ChatMessage,
 }
 
-/// A sidecar `<session>.lock` holding the owner's PID. Exclusive creation
-/// arbitrates ownership; a lock whose PID is no longer alive is stolen, so
-/// a crashed e never wedges a session permanently.
+/// An OS-held lock on a persistent sidecar. Never unlink it: contenders
+/// must all lock the same inode, including after an owner exits or crashes.
 struct LockGuard {
-    path: PathBuf,
+    _file: File,
 }
 
 impl LockGuard {
     fn acquire(session_path: &Path) -> std::io::Result<LockGuard> {
-        let lock_path = session_path.with_extension("lock");
-        loop {
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-            {
-                Ok(mut file) => {
-                    writeln!(file, "{}", std::process::id())?;
-                    return Ok(LockGuard { path: lock_path });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if lock_owner_alive(&lock_path) {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::AlreadyExists,
-                            "this session is already active in another e",
-                        ));
-                    }
-                    // The owner is gone — steal the stale lock and retry;
-                    // if another stealer won the race, its live PID fails
-                    // us on the next pass.
-                    let _ = std::fs::remove_file(&lock_path);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-    }
-}
-
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// `kill -0` reports liveness without signaling. Only reached on a lock
-/// conflict, so spawning `/bin/kill` costs nothing on the happy path.
-#[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn lock_owner_alive(lock_path: &Path) -> bool {
-    // An unreadable or empty lock (crashed between create and PID write)
-    // counts as dead — it must never wedge a session shut.
-    let Ok(content) = std::fs::read_to_string(lock_path) else {
-        return false;
-    };
-    let Ok(pid) = content.trim().parse::<u32>() else {
-        return false;
-    };
-    if pid == 0 {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        pid_alive(pid)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        true // No liveness probe available; stay conservative.
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(session_path.with_extension("lock"))?;
+        file.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "this session is already active in another e",
+            ),
+            std::fs::TryLockError::Error(error) => error,
+        })?;
+        Ok(LockGuard { _file: file })
     }
 }
 
@@ -205,16 +150,25 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-impl Session {
+impl SessionLog {
     /// Create a fresh session log for this workspace.
-    pub fn create(cwd: &Path, model: &str) -> std::io::Result<Session> {
+    pub fn create(cwd: &Path, model: &str) -> std::io::Result<SessionLog> {
+        home::ensure()?;
         let cwd = normalized_cwd(cwd);
         let dir = home::sessions_dir().join(cwd_slug(&cwd));
-        std::fs::create_dir_all(&dir)?;
+        home::private_dir(&home::sessions_dir())?;
+        home::private_dir(&dir)?;
         let id = uuid::Uuid::now_v7().to_string();
         let stamp = now_ms();
         let path = dir.join(format!("{stamp}_{id}.jsonl"));
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut options = OpenOptions::new();
+        options.create_new(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
         let lock = LockGuard::acquire(&path)?;
         let header = Entry::Header {
             format_version: FORMAT_VERSION,
@@ -224,7 +178,7 @@ impl Session {
             model: model.to_string(),
         };
         writeln!(file, "{}", serde_json::to_string(&header)?)?;
-        Ok(Session {
+        Ok(SessionLog {
             path,
             file,
             healthy: true,
@@ -323,7 +277,7 @@ impl Session {
     /// common artifact an append-only log ever shows, and refusing to resume
     /// the whole session over it turns a lost record into a lost session.
     pub fn load(path: &Path) -> std::io::Result<Vec<ChatMessage>> {
-        let nodes = Session::nodes(path)?;
+        let nodes = SessionLog::nodes(path)?;
         let mut by_id = std::collections::HashMap::new();
         for (index, node) in nodes.iter().enumerate() {
             if by_id.insert(node.id.as_str(), index).is_some() {
@@ -434,13 +388,20 @@ impl Session {
     /// exactly where the file's last branch left off — reading the file
     /// once here is what lets a resumed session keep growing that branch
     /// instead of quietly starting a second root next to it.
-    pub fn reopen(path: &Path) -> std::io::Result<Session> {
+    pub fn reopen(path: &Path) -> std::io::Result<SessionLog> {
+        home::ensure()?;
         let lock = LockGuard::acquire(path)?;
         let file = OpenOptions::new().append(true).open(path)?;
-        let current = Session::nodes(path)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = file.metadata()?.permissions().mode() & 0o600;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+        let current = SessionLog::nodes(path)
             .ok()
             .and_then(|nodes| nodes.last().map(|n| n.id.clone()));
-        Ok(Session {
+        Ok(SessionLog {
             path: path.to_path_buf(),
             file,
             healthy: true,
@@ -466,19 +427,19 @@ fn validate_format(version: u32) -> std::io::Result<()> {
 /// dangling tool_use every dialect rejects. The former is dropped; the
 /// latter gets an honest synthetic result so the content survives.
 fn repair_tail(messages: &mut Vec<ChatMessage>) {
-    while matches!(messages.last(), Some(m) if m.role == "reasoning") {
+    while matches!(messages.last(), Some(m) if m.role() == "reasoning") {
         messages.pop();
     }
-    let Some(assistant_at) = messages.iter().rposition(|m| m.role == "assistant") else {
+    let Some(assistant_at) = messages.iter().rposition(|m| m.role() == "assistant") else {
         return;
     };
     let answered: Vec<String> = messages[assistant_at..]
         .iter()
-        .filter(|m| m.role == "tool")
-        .filter_map(|m| m.tool_call_id.clone())
+        .filter(|m| m.role() == "tool")
+        .filter_map(|m| m.tool_call_id().cloned())
         .collect();
     let missing: Vec<String> = messages[assistant_at]
-        .tool_calls
+        .tool_calls()
         .iter()
         .map(|c| c.id.clone())
         .filter(|id| !answered.contains(id))
@@ -687,7 +648,7 @@ mod tests {
             uuid::Uuid::now_v7()
         ));
         let mut steered = ChatMessage::user("steering echo");
-        steered.internal = true;
+        steered.mark_internal();
         let entries = [
             Entry::Header {
                 format_version: FORMAT_VERSION,
@@ -776,7 +737,7 @@ mod tests {
             .join("\n");
         std::fs::write(&path, format!("{body}\n")).unwrap();
 
-        let loaded = Session::load(&path).unwrap();
+        let loaded = SessionLog::load(&path).unwrap();
         let content = loaded
             .iter()
             .map(|message| message.content.as_str())
@@ -796,7 +757,7 @@ mod tests {
             std::process::id(),
             uuid::Uuid::now_v7()
         ));
-        let mut session = Session {
+        let mut session = SessionLog {
             path: PathBuf::from("/dev/full"),
             file,
             healthy: true,

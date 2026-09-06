@@ -31,6 +31,30 @@ readers must continue to load them or intentionally document the migration.
 Regenerable caches such as `models-store.json` are internal and are not a
 persisted compatibility contract.
 
+Session sidecars now use OS-held locks. Stop older e processes before
+resuming their sessions with the new writer; mixed PID-lock and OS-lock
+writers must not open the same session concurrently. Existing JSONL needs
+no migration. Empty `.lock` sidecars are expected and should not be deleted.
+
+On Unix, e creates its state directories with `0700` and session logs with
+`0600`. Configuration writes and session creation or reopening also tighten
+the e home directory to `0700`, protecting older files underneath it without
+rewriting their contents. Reopening an older session sets its file to `0600`.
+Stricter owner permissions are preserved, including read-only directories.
+Use a dedicated directory for `E_HOME`; it is private application state, not a
+shared workspace. Files copied outside that directory are not migrated.
+Credential staging files start at `0600`, before any secret is written.
+
+Provider and OAuth endpoints must be final URLs: authenticated requests no
+longer follow HTTP redirects, including same-origin redirects. Update any
+custom gateway URL that relied on one. Release asset downloads still follow
+redirects, without provider credentials, and reject HTTPS-to-HTTP downgrades.
+
+Filesystem `write` and `edit` stage replacements before renaming them over
+the target. Existing permissions and symlink targets are preserved. Files
+with multiple hard links are refused because replacing one name would
+separate it from its aliases.
+
 ## Not a supported contract
 
 The Cargo library target lets the binary, the integration tests, and the

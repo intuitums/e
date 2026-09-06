@@ -18,7 +18,7 @@ pub fn schema() -> Value {
     )
 }
 
-pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
+pub fn run(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput {
     let err = |m: String, target: &str| ToolOutput {
         summary: super::failure_summary(&m, "edit", target),
         content: m,
@@ -38,7 +38,7 @@ pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
     // Hold this path's write lock across read-modify-write so a concurrent
     // batch member can't overwrite this edit (or vice versa) unseen.
     let _guard = super::fs_write_lock(&full);
-    if let Err(output) = super::check_fresh(&full, "edit", path) {
+    if let Err(output) = super::check_fresh(state, &full, "edit", path) {
         return output;
     }
     let text = match std::fs::read_to_string(&full) {
@@ -56,9 +56,9 @@ pub fn run(args: &Value, cwd: &Path) -> ToolOutput {
         );
     }
     let updated = text.replacen(old, new, 1);
-    match std::fs::write(&full, &updated) {
+    match super::atomic_write(&full, updated.as_bytes()) {
         Ok(()) => {
-            super::note_seen(&full);
+            super::note_seen(state, &full);
             let delta = updated.lines().count() as isize - text.lines().count() as isize;
             let additions = new.lines().count();
             let deletions = old.lines().count();

@@ -32,6 +32,15 @@ fn timeout_kills_a_runaway_command() {
 }
 
 #[test]
+fn continuous_output_cannot_starve_timeout() {
+    let started = Instant::now();
+    let output = run_cmd("yes noisy", 1);
+    assert_eq!(output.outcome, ToolOutcome::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(output.content.len() < 34 * 1024);
+}
+
+#[test]
 fn timeout_kills_spawned_children_too() {
     let started = Instant::now();
     let out = run_cmd("sh -c 'sleep 30' && echo never", 1);

@@ -1009,16 +1009,7 @@ async fn signed_thinking_blocks_are_captured_and_replayed() {
         system: "sys".into(),
         messages: vec![
             ChatMessage::user("read a.txt"),
-            ChatMessage {
-                role: "reasoning".into(),
-                content: items.remove(0),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                tool_meta: None,
-                images: Vec::new(),
-                usage: None,
-                internal: false,
-            },
+            ChatMessage::reasoning(items.remove(0)),
             ChatMessage::assistant("", calls.clone()),
             ChatMessage::tool_result("tu_1", "contents"),
         ],

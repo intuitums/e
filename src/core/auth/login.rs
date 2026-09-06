@@ -8,7 +8,7 @@
 use base64::Engine;
 use rand::Rng;
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::TcpListener;
 
 use crate::core::auth::{self, Credential};
@@ -241,7 +241,61 @@ async fn codex_login_inner(
     Ok(())
 }
 
-/// Accept exactly one callback request, validate state, answer with a page.
+/// Read one bounded HTTP header within an absolute deadline. A bad connection
+/// is discarded without ending login; cancellation also interrupts trickles.
+fn callback_path(
+    stream: &mut std::net::TcpStream,
+    cancellation: &LoginCancellation,
+) -> Option<String> {
+    const MAX_HEADER_BYTES: usize = 16 * 1024;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    stream.set_nonblocking(false).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(50)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_millis(100)))
+        .ok()?;
+    let mut header = Vec::new();
+    while header.len() < MAX_HEADER_BYTES
+        && std::time::Instant::now() < deadline
+        && !cancellation.is_cancelled()
+    {
+        let mut chunk = [0u8; 1024];
+        let room = chunk.len().min(MAX_HEADER_BYTES - header.len());
+        match stream.read(&mut chunk[..room]) {
+            Ok(0) => return None,
+            Ok(count) => header.extend_from_slice(&chunk[..count]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue
+            }
+            Err(_) => return None,
+        }
+        if let Some(end) = header.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            let header = std::str::from_utf8(&header[..end]).ok()?;
+            let mut parts = header.lines().next()?.split_whitespace();
+            let method = parts.next()?;
+            let path = parts.next()?;
+            let version = parts.next()?;
+            return (method == "GET"
+                && matches!(version, "HTTP/1.0" | "HTTP/1.1")
+                && parts.next().is_none()
+                && path.starts_with('/'))
+            .then(|| path.to_string());
+        }
+    }
+    None
+}
+
+/// Accept callbacks until one validates state. Malformed, idle, oversized,
+/// or unrelated connections must not terminate the user's login attempt.
 fn wait_for_code(
     listener: &TcpListener,
     expected_state: &str,
@@ -260,37 +314,21 @@ fn wait_for_code(
             }
             Err(e) => return Err(e.to_string()),
         };
-        // BSD platforms can inherit O_NONBLOCK from the listener. Callback
-        // reads should block only up to the timeout below, not fail before the
-        // browser has written its request.
-        stream.set_nonblocking(false).map_err(|e| e.to_string())?;
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_millis(250)))
-            .map_err(|e| e.to_string())?;
-        let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
-        let mut request_line = String::new();
-        reader
-            .read_line(&mut request_line)
-            .map_err(|e| e.to_string())?;
-        // Drain headers so the browser sees a complete exchange.
-        let mut line = String::new();
-        while reader.read_line(&mut line).map_err(|e| e.to_string())? > 2 {
-            line.clear();
-        }
-
-        let path = request_line.split_whitespace().nth(1).unwrap_or("");
-        if !path.starts_with("/auth/callback") {
+        let Some(path) = callback_path(&mut stream, cancellation) else {
+            continue;
+        };
+        let Ok(url) = reqwest::Url::parse(&format!("http://localhost{path}")) else {
+            continue;
+        };
+        if path.split('?').next() != Some("/auth/callback") {
             respond(&mut stream, 404, "Not found", "");
             continue;
         }
-        let query: std::collections::HashMap<_, _> = path
-            .split_once('?')
-            .map(|(_, q)| q)
-            .unwrap_or("")
-            .split('&')
-            .filter_map(|pair| pair.split_once('='))
-            .collect();
-        if query.get("state").copied() != Some(expected_state) {
+        let mut query = std::collections::HashMap::new();
+        let duplicate = url
+            .query_pairs()
+            .any(|(key, value)| query.insert(key.into_owned(), value.into_owned()).is_some());
+        if duplicate || query.get("state").map(String::as_str) != Some(expected_state) {
             respond(
                 &mut stream,
                 400,
@@ -300,7 +338,7 @@ fn wait_for_code(
             continue;
         }
         let Some(code) = query.get("code") else {
-            let err = query.get("error").copied().unwrap_or("no code");
+            let err = query.get("error").map(String::as_str).unwrap_or("no code");
             respond(
                 &mut stream,
                 400,
@@ -309,8 +347,11 @@ fn wait_for_code(
             );
             return Err(format!("authorization failed: {err}"));
         };
+        if code.is_empty() {
+            continue;
+        }
         respond(&mut stream, 200, "Signed in", "You can close this tab.");
-        return Ok(urldecode(code));
+        return Ok(code.clone());
     }
 }
 
@@ -365,34 +406,6 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
-}
-
-fn urldecode(s: &str) -> String {
-    let mut out = Vec::new();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    out.push(byte);
-                    i += 3;
-                    continue;
-                }
-                out.push(bytes[i]);
-                i += 1;
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            other => {
-                out.push(other);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /* ---------- xAI (device-code flow) ---------- */
@@ -710,6 +723,82 @@ fn required(value: &serde_json::Value, field: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn malformed_and_idle_connections_do_not_abort_login() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            super::wait_for_code(&listener, "expected", &super::LoginCancellation::default())
+        });
+        // A stalled socket is discarded at its request deadline, not treated
+        // as the end of login. The following invalid clients are isolated too.
+        let idle = std::net::TcpStream::connect(addr).unwrap();
+        for bad in [
+            b"GET / HTTP/1.1\r\nX: \xff\r\n\r\n".to_vec(),
+            vec![b'x'; 16 * 1024],
+        ] {
+            let mut stream = std::net::TcpStream::connect(addr).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            use std::io::{Read, Write};
+            stream.write_all(&bad).unwrap();
+            let mut bytes = Vec::new();
+            let _ = stream.read_to_end(&mut bytes);
+        }
+        let wrong_path = callback(addr, "/auth/callback-extra?state=expected&code=bad");
+        assert!(wrong_path.starts_with("HTTP/1.1 404"));
+        let duplicate = callback(addr, "/auth/callback?state=expected&state=wrong&code=bad");
+        assert!(duplicate.starts_with("HTTP/1.1 400"));
+        let correct = callback(addr, "/auth/callback?state=expected&code=a%2Bb%25");
+        assert!(correct.starts_with("HTTP/1.1 200"));
+        assert_eq!(server.join().unwrap().unwrap(), "a+b%");
+        drop(idle);
+    }
+
+    #[test]
+    fn trickling_callback_cannot_extend_the_request_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let start = std::time::Instant::now();
+            assert!(
+                super::callback_path(&mut stream, &super::LoginCancellation::default()).is_none()
+            );
+            assert!(start.elapsed() < std::time::Duration::from_secs(4));
+        });
+        let mut client = std::net::TcpStream::connect(addr).unwrap();
+        use std::io::Write;
+        for _ in 0..150 {
+            if client.write_all(b"x").is_err() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cancellation_interrupts_an_accepted_idle_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cancellation = super::LoginCancellation::default();
+        let server_cancel = cancellation.clone();
+        let (accepted, ready) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            accepted.send(()).unwrap();
+            assert!(super::callback_path(&mut stream, &server_cancel).is_none());
+        });
+        let _client = std::net::TcpStream::connect(addr).unwrap();
+        ready
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        cancellation.cancel();
+        server.join().unwrap();
+    }
+
     /// The callback page must declare UTF-8 — the em-dash mojibake bug — and
     /// carry e's wordmark.
     #[test]

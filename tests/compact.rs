@@ -176,19 +176,19 @@ fn split_never_separates_signed_thinking_from_its_assistant_turn() {
     let (to_summarize, kept) = e::core::agent::compact::split(&history, 200_000);
     // A cut happened, and the signed block stayed with its turn: either both
     // were summarized away or both remain in the kept tail, adjacent.
-    let reasoning_kept = kept.iter().any(|m| m.role == "reasoning");
+    let reasoning_kept = kept.iter().any(|m| m.role() == "reasoning");
     let turn_kept = kept
         .iter()
-        .any(|m| m.tool_calls.iter().any(|c| c.id == "c1"));
+        .any(|m| m.tool_calls().iter().any(|c| c.id == "c1"));
     assert_eq!(
         reasoning_kept, turn_kept,
         "the cut separated the signed thinking block from its assistant turn"
     );
     if reasoning_kept {
-        let r = kept.iter().position(|m| m.role == "reasoning").unwrap();
+        let r = kept.iter().position(|m| m.role() == "reasoning").unwrap();
         let t = kept
             .iter()
-            .position(|m| m.tool_calls.iter().any(|c| c.id == "c1"))
+            .position(|m| m.tool_calls().iter().any(|c| c.id == "c1"))
             .unwrap();
         assert_eq!(t, r + 1, "reasoning and its turn must stay adjacent");
     }
@@ -215,10 +215,10 @@ async fn failed_fresh_log_keeps_the_old_session_attached() {
     let model = test_model("mock", 1, Api::Completions);
 
     // An old session with history, attached the way a resumed session is.
-    let mut old = e::core::session::Session::create(&ws, "m").unwrap();
+    let mut old = e::core::session::SessionLog::create(&ws, "m").unwrap();
     let old_path = old.path().to_path_buf();
     old.append(&ChatMessage::user("original work")).unwrap();
-    let (agent, _rx) = Agent::new(model);
+    let (mut agent, _rx) = Agent::new(model);
     agent.load_history(vec![ChatMessage::user("original work")]);
     agent.set_session(Some(old));
 
@@ -311,6 +311,24 @@ async fn one_huge_tool_call_cannot_bypass_the_summary_budget() {
         "summary request was {} bytes",
         flattened.len()
     );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_truncated_summary_is_rejected() {
+    let _lock = env_lock();
+    let response = "data: {\"choices\":[{\"delta\":{\"content\":\"Only half the checkpoint\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n";
+    let (port, server) = serve_sse(&[response]);
+    let home = Home::new("compact-truncated");
+    home.auth(r#"{"mock":{"key":"k"}}"#);
+    let result = e::core::agent::compact::summarize(
+        test_model("mock", port, Api::Completions),
+        &[ChatMessage::user("original task")],
+        String::new(),
+    )
+    .await;
+    assert!(result.unwrap_err().contains("complete, valid response"));
+    server.join().unwrap();
 }
 
 /// Every file under `dir`, any depth — small trees only.

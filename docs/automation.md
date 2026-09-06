@@ -7,6 +7,12 @@ agent. Requests are memory-only unless `save` is explicitly true. Add
 `--no-tools` (`--nt`) for a no-tool policy and `--no-extensions` (`--ne`)
 when process startup must be hermetic.
 
+A request stays active through automatic compaction and continuation. The
+response describes the completed run, not an intermediate context pause.
+If compaction cannot finish safely, the response contains an error and
+`final_output` is empty. Background tool handles belong to that request's
+agent and cannot be queried by a later request.
+
 ```json
 {"id":"one","prompt":"summarize this repository","model":"openai/gpt-5.5","effort":"high","tool_mode":"none","save":false,"images":[]}
 ```

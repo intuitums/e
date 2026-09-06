@@ -45,10 +45,10 @@ impl ToolChild {
     ) -> Self {
         Self {
             id,
-            category,
-            running,
-            completed,
-            target,
+            category: crate::core::tools::sanitize_display(&category),
+            running: crate::core::tools::sanitize_display(&running),
+            completed: crate::core::tools::sanitize_display(&completed),
+            target: crate::core::tools::sanitize_display(&target),
             state: ToolState::Pending,
             result: None,
             output: String::new(),
@@ -198,6 +198,7 @@ impl Block {
     pub fn append_tool_output(&mut self, id: u64, chunk: &str) {
         const DISPLAY_CAP: usize = 64 * 1024;
         if let Some(child) = self.tool_children.iter_mut().find(|child| child.id == id) {
+            let chunk = crate::core::tools::sanitize_display(chunk);
             let room = DISPLAY_CAP.saturating_sub(child.output.len());
             if room > 0 {
                 let mut take = room.min(chunk.len());

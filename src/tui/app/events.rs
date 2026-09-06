@@ -8,6 +8,31 @@ impl App {
     /// The single session stream, in order. Turn bookkeeping hangs off it.
     pub(super) fn on_session_event(&mut self, event: SessionEvent) {
         match event {
+            SessionEvent::Discarded(prompts) => {
+                for text in prompts {
+                    self.notice(format!(
+                        "queued message discarded when the run stopped: {text}"
+                    ));
+                }
+            }
+            SessionEvent::Compacting => {
+                self.compacting = true;
+                self.end_thinking_burst();
+                self.end_assistant_burst();
+                self.notice("compacting…".into());
+            }
+            SessionEvent::Compacted {
+                summary,
+                context_tokens,
+            } => {
+                self.compacting = false;
+                self.context_tokens = context_tokens;
+                self.transcript.push(Block::new(
+                    Kind::Notice,
+                    "compacted — recent messages kept, the full session is under /resume",
+                ));
+                self.transcript.push(Block::new(Kind::Summary, summary));
+            }
             SessionEvent::TurnStart => {
                 self.active = Some(ActiveTurn {
                     block: None,
@@ -272,11 +297,11 @@ impl App {
                 ));
             }
             SessionEvent::TurnEnd { aborted } => {
+                self.compacting = false;
                 // The queue the review was editing died with the turn.
                 self.close_queue_review();
-                let stranded = self.agent.on_turn_end();
                 if aborted {
-                    // Every started or serially pending member reaches a
+                    // Every started or pending member reaches a
                     // terminal state; no ghost Running row survives Esc.
                     for block in &mut self.transcript.blocks {
                         if block.kind == Kind::ToolGroup {
@@ -330,23 +355,9 @@ impl App {
                     self.transcript
                         .push(Block::new(Kind::Error, format!("error: {message}")));
                 }
-                // Compaction runs between turns, never during one: a deferred
-                // /compact fires here, and so does the auto threshold check
-                // against real usage (window minus reserve).
-                let over = crate::core::agent::compact::should_compact(
-                    self.context_tokens,
-                    self.agent.model.context_window,
-                );
-                if !aborted && (self.compact_requested || over) {
-                    let auto = !self.compact_requested;
-                    self.compact_requested = false;
-                    self.start_compaction(auto);
-                }
-                // A prompt submitted in the gap between the worker's final
-                // pending check and this handler had no worker left to drain
-                // it. Resubmit in order; after Esc, dropping it visibly
-                // beats silently starting a turn the user just stopped.
-                for text in stranded {
+                // Release prompts held by frontend work such as shell passthrough.
+                // Prompts queued in the agent are consumed by the core itself.
+                for text in std::mem::take(&mut self.held_prompts) {
                     if aborted {
                         self.notice(format!("queued message discarded by Esc: {text}"));
                     } else {

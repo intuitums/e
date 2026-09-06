@@ -4,7 +4,7 @@
 
 use std::sync::Mutex;
 
-use e::core::api::{ExtensionHost, StartupAction};
+use e::core::extensions::{ExtensionHost, StartupAction};
 
 mod common;
 

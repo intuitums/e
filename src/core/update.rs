@@ -12,6 +12,33 @@ use std::path::Path;
 const RELEASES: &str = "https://github.com/intuitums/e/releases";
 const API_LATEST: &str = "https://api.github.com/repos/intuitums/e/releases/latest";
 
+/// Release assets redirect to GitHub's download hosts. This client carries
+/// no provider credentials and must not be reused for authenticated requests.
+fn download_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .user_agent(format!("e/{}", crate::VERSION))
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    let downgrade = attempt.previous().last().is_some_and(|previous| {
+                        previous.scheme() == "https" && attempt.url().scheme() != "https"
+                    });
+                    if downgrade || attempt.previous().len() >= 10 {
+                        attempt.error("unsafe or excessive release redirects")
+                    } else {
+                        attempt.follow()
+                    }
+                }))
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 /// The compile-time target triple, matching the release artifact names.
 pub fn target() -> &'static str {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
@@ -157,8 +184,7 @@ pub async fn install_from(base: &str, tag: &str, dest: &Path) -> Result<String, 
 }
 
 async fn fetch(url: &str) -> Result<Vec<u8>, String> {
-    let response = crate::core::providers::http()
-        .map_err(|e| e.message)?
+    let response = download_client()?
         .get(url)
         .timeout(std::time::Duration::from_secs(60))
         .send()
