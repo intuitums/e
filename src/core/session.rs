@@ -761,7 +761,7 @@ mod tests {
             path: PathBuf::from("/dev/full"),
             file,
             healthy: true,
-            _lock: LockGuard { path: lock_path },
+            _lock: LockGuard::acquire(&lock_path).unwrap(),
             current: None,
         };
 
@@ -771,5 +771,7 @@ mod tests {
             .append(&ChatMessage::user("must not append"))
             .unwrap_err();
         assert!(second.to_string().contains("retired"));
+        drop(session);
+        std::fs::remove_file(lock_path).unwrap();
     }
 }
