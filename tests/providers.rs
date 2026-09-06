@@ -490,6 +490,7 @@ async fn streaming_rate_limit_codes_respect_quota_messages() {
             system: "sys".into(),
             messages: vec![ChatMessage::user("hi")],
             effort: None,
+            session_id: String::new(),
             tools: Vec::new(),
         })
         .await;
@@ -519,6 +520,7 @@ async fn semantic_tool_progress_preserves_interleaved_call_identity() {
         system: "sys".into(),
         messages: vec![ChatMessage::user("use two tools")],
         effort: None,
+        session_id: String::new(),
         tools: vec![read_tool()],
     };
     let (mut rx, _handle) = providers::stream(request);
@@ -567,6 +569,7 @@ async fn each_dialect_streams_text_tools_and_usage() {
             system: "sys".into(),
             messages: history_messages(&case.history),
             effort: case.effort.map(str::to_string),
+            session_id: String::new(),
             tools: vec![read_tool()],
         };
 
@@ -614,6 +617,7 @@ async fn anthropic_nameless_tool_use_opens_no_lifecycle() {
         system: "sys".into(),
         messages: history_messages(&History::AnthropicToolLoop),
         effort: Some("high".into()),
+        session_id: String::new(),
         tools: vec![read_tool()],
     };
     let (_text, _reasoning, calls, _usage, _finish) = collect_stream(request).await;
@@ -643,6 +647,7 @@ async fn each_dialect_translates_the_same_image_message() {
                 }],
             )],
             effort: case.effort.map(str::to_string),
+            session_id: String::new(),
             tools: vec![read_tool()],
         };
         let _ = collect_stream(request).await;
@@ -703,6 +708,7 @@ async fn completions_retries_without_rejected_stream_options() {
         system: "sys".into(),
         messages: vec![ChatMessage::user("hello")],
         effort: None,
+        session_id: String::new(),
         tools: Vec::new(),
     };
 
@@ -711,6 +717,59 @@ async fn completions_retries_without_rejected_stream_options() {
     assert_eq!(sent.len(), 2);
     assert!(request_json(&sent[0]).get("stream_options").is_some());
     assert!(request_json(&sent[1]).get("stream_options").is_none());
+}
+
+/// OpenCode's gateways (go and zen) opt into attribution headers: e sends the
+/// stable session id as `x-opencode-session` and its client name as
+/// `x-opencode-client`. No other provider receives them — the id is never sent
+/// to a provider that did not opt in, so it cannot correlate a conversation
+/// across providers.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn opencode_gateways_get_session_and_client_headers() {
+    let _lock = env_lock();
+    let home = Home::new("opencode-attribution");
+    home.auth(r#"{"opencode-go":{"key":"k"},"opencode-zen":{"key":"k"},"openai":{"key":"k"}}"#);
+
+    for provider in ["opencode-go", "opencode-zen"] {
+        let (port, server) = serve_sse(&["data: [DONE]\n\n"]);
+        let request = Request {
+            model: test_model(provider, port, Api::Completions),
+            system: "sys".into(),
+            messages: vec![ChatMessage::user("hi")],
+            effort: None,
+            session_id: "sess-abc123".into(),
+            tools: Vec::new(),
+        };
+        collect_stream(request).await;
+        let sent = server.join().unwrap().remove(0).to_lowercase();
+        assert!(
+            sent.contains("x-opencode-session: sess-abc123"),
+            "{provider} must send the stable session id: {sent}"
+        );
+        assert!(
+            sent.contains("x-opencode-client: e"),
+            "{provider} must identify e as the client: {sent}"
+        );
+    }
+
+    // Same dialect, a provider that did not opt in: neither header appears.
+    let (port, server) = serve_sse(&["data: [DONE]\n\n"]);
+    let request = Request {
+        model: test_model("openai", port, Api::Completions),
+        system: "sys".into(),
+        messages: vec![ChatMessage::user("hi")],
+        effort: None,
+        session_id: "sess-abc123".into(),
+        tools: Vec::new(),
+    };
+    collect_stream(request).await;
+    let sent = server.join().unwrap().remove(0).to_lowercase();
+    assert!(
+        !sent.contains("x-opencode-session"),
+        "a provider that did not opt in must not receive the session id: {sent}"
+    );
+    assert!(!sent.contains("x-opencode-client"));
 }
 
 /// A declared effort level can be wrong for the real backend (an unadvertised
@@ -741,6 +800,7 @@ async fn completions_self_heals_and_remembers_rejected_reasoning_effort() {
         system: "sys".into(),
         messages: vec![ChatMessage::user("hello")],
         effort: Some("high".into()),
+        session_id: String::new(),
         tools: Vec::new(),
     };
 
@@ -795,6 +855,7 @@ async fn responses_codex_oauth_mount_sends_prompt_cache_key() {
         system: "sys".into(),
         messages: history_messages(&case.history),
         effort: case.effort.map(str::to_string),
+        session_id: String::new(),
         tools: vec![read_tool()],
     };
 
@@ -833,6 +894,7 @@ async fn responses_platform_mount_is_not_inferred_from_oauth_credentials() {
         system: "sys".into(),
         messages: history_messages(&case.history),
         effort: case.effort.map(str::to_string),
+        session_id: String::new(),
         tools: vec![read_tool()],
     };
 
@@ -864,6 +926,7 @@ async fn adaptive_models_take_effort_through_output_config() {
         system: "be helpful".into(),
         messages: vec![ChatMessage::user("hi")],
         effort: Some("high".into()),
+        session_id: String::new(),
         tools: Vec::new(),
     };
     let (_text, _reasoning, _calls, _usage, _finish) = collect_stream(request).await;
@@ -919,6 +982,7 @@ async fn signed_thinking_blocks_are_captured_and_replayed() {
         system: "sys".into(),
         messages: vec![ChatMessage::user("read a.txt")],
         effort: Some("high".into()),
+        session_id: String::new(),
         tools: Vec::new(),
     };
     let (mut rx, _handle) = providers::stream(request);
@@ -959,6 +1023,7 @@ async fn signed_thinking_blocks_are_captured_and_replayed() {
             ChatMessage::tool_result("tu_1", "contents"),
         ],
         effort: Some("high".into()),
+        session_id: String::new(),
         tools: Vec::new(),
     };
     let (_text, _reasoning, _calls, _usage, _finish) = collect_stream(request).await;
@@ -1002,6 +1067,7 @@ async fn gemini_replays_signed_thought_text_ahead_of_its_function_call() {
         system: "sys".into(),
         messages: vec![ChatMessage::user("read a.txt")],
         effort: None,
+        session_id: String::new(),
         tools: Vec::new(),
     };
     let (mut rx, _handle) = providers::stream(request);
@@ -1033,6 +1099,7 @@ async fn gemini_replays_signed_thought_text_ahead_of_its_function_call() {
             ChatMessage::tool_result("g-call-1", "contents"),
         ],
         effort: None,
+        session_id: String::new(),
         tools: Vec::new(),
     };
     let (_text, _reasoning, _calls, _usage, _finish) = collect_stream(request).await;
@@ -1079,6 +1146,7 @@ async fn small_context_window_drops_thinking_instead_of_an_invalid_budget() {
         system: "be helpful".into(),
         messages: vec![ChatMessage::user("hi")],
         effort: Some("high".into()),
+        session_id: String::new(),
         tools: Vec::new(),
     };
     let (_text, _reasoning, _calls, _usage, _finish) = collect_stream(request).await;
@@ -1117,6 +1185,7 @@ async fn small_max_output_clamps_max_tokens_below_the_dialect_default() {
         system: "be helpful".into(),
         messages: vec![ChatMessage::user("hi")],
         effort: None,
+        session_id: String::new(),
         tools: Vec::new(),
     };
     let (_text, _reasoning, _calls, _usage, _finish) = collect_stream(request).await;
@@ -1203,6 +1272,7 @@ async fn google_max_tokens_maps_to_length() {
         system: "sys".into(),
         messages: vec![ChatMessage::user("hi")],
         effort: None,
+        session_id: String::new(),
         tools: Vec::new(),
     };
     let (_text, _reasoning, _calls, _usage, finish) = collect_stream(request).await;
@@ -1224,6 +1294,7 @@ async fn unexpected_eof_is_an_error_not_a_silent_done() {
         system: "sys".into(),
         messages: vec![ChatMessage::user("hi")],
         effort: None,
+        session_id: String::new(),
         tools: Vec::new(),
     };
     let (mut rx, _handle) = providers::stream(request);
@@ -2038,6 +2109,7 @@ async fn completions_send_reasoning_effort_when_the_model_has_a_knob() {
             system: "sys".into(),
             messages: vec![ChatMessage::user("hi")],
             effort: effort.map(str::to_string),
+            session_id: String::new(),
             tools: Vec::new(),
         };
         collect_stream(request).await;

@@ -59,6 +59,7 @@ async fn configured_provider_streams_a_complete_tool_loop() {
             "Run the live canary by calling live_echo once with marker E_LIVE_OK. Do not answer before using the tool.",
         )],
         effort: None,
+        session_id: String::new(),
         tools: vec![tool.clone()],
     };
     let (_prefix, calls, starts, deltas, ends) =
@@ -83,6 +84,7 @@ async fn configured_provider_streams_a_complete_tool_loop() {
         system: "After the tool result, answer with the marker it returned.".into(),
         messages: history,
         effort: None,
+        session_id: String::new(),
         tools: vec![tool],
     };
     let (text, _, _, _, _) =

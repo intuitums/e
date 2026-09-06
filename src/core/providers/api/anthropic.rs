@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use crate::core::providers::catalog::Thinking;
 use crate::core::providers::runtime::Authorization;
 use crate::core::providers::{
-    http, require_success, send_request, Event, FailureCause, FinishReason, ProviderError, Request,
-    SseStream, StreamEnd, ToolCall,
+    http, require_success, send_request, with_attribution, Event, FailureCause, FinishReason,
+    ProviderError, Request, SseStream, StreamEnd, ToolCall,
 };
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -178,14 +178,15 @@ pub async fn run(
     }
 
     let response = require_success(
-        send_request(
+        send_request(with_attribution(
             http()?
                 .post(format!("{}/v1/messages", request.model.base_url))
                 .header("x-api-key", &authorization.bearer)
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .header("accept", "text/event-stream")
                 .json(&body),
-        )
+            request,
+        ))
         .await?,
     )
     .await?;

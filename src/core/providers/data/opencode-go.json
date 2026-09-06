@@ -8,6 +8,8 @@
 		"key_env": "OPENCODE_GO_API_KEY",
 		"key_hint": "the Go plan gateway"
 	},
+	"client_header": "x-opencode-client",
+	"session_header": "x-opencode-session",
 	"models": [
 		{
 			"id": "deepseek-v4-flash",

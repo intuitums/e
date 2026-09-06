@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 
 use crate::core::providers::runtime::Authorization;
 use crate::core::providers::{
-    http, require_success, send_request, Event, FinishReason, ProviderError, Request, SseStream,
-    StreamEnd, ToolCall,
+    http, require_success, send_request, with_attribution, Event, FinishReason, ProviderError,
+    Request, SseStream, StreamEnd, ToolCall,
 };
 
 /// Older Gemini responses carried no wire id. A UUID fallback stays unique
@@ -150,7 +150,7 @@ pub async fn run(
     }
 
     let response = require_success(
-        send_request(
+        send_request(with_attribution(
             http()?
                 .post(format!(
                     "{}/models/{}:streamGenerateContent?alt=sse",
@@ -159,7 +159,8 @@ pub async fn run(
                 .header("x-goog-api-key", &authorization.bearer)
                 .header("accept", "text/event-stream")
                 .json(&body),
-        )
+            request,
+        ))
         .await?,
     )
     .await?;

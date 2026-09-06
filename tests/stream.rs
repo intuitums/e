@@ -513,6 +513,7 @@ async fn truncation_and_malformed_payloads_surface_in_stream_end() {
         system: "sys".into(),
         messages: vec![ChatMessage::user("hi")],
         effort: None,
+        session_id: String::new(),
         tools: Vec::new(),
     };
     let (mut rx, _handle) = stream(request);

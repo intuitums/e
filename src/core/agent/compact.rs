@@ -125,7 +125,14 @@ pub fn split(history: &[ChatMessage], context_window: u64) -> (Vec<ChatMessage>,
 }
 
 /// One request, one summary. Errors are the provider's message, verbatim.
-pub async fn summarize(model: Model, history: &[ChatMessage]) -> Result<String, String> {
+/// `session_id` carries the conversation's stable id so the summarization
+/// request rides the same gateway session as the turn it compacts (empty for
+/// an unsaved session).
+pub async fn summarize(
+    model: Model,
+    history: &[ChatMessage],
+    session_id: String,
+) -> Result<String, String> {
     // The transcript itself must fit the model being asked to summarize it —
     // the history that triggered compaction by definition nearly filled the
     // window, so an unbudgeted flatten could fail with a context overflow at
@@ -158,6 +165,7 @@ pub async fn summarize(model: Model, history: &[ChatMessage]) -> Result<String, 
         system: SYSTEM.into(),
         messages: vec![ChatMessage::user(format!("{flattened}\n\n{INSTRUCTION}"))],
         effort: None,
+        session_id,
         tools: Vec::new(),
     };
     let (mut rx, _handle) = providers::stream(request);

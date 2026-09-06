@@ -92,6 +92,41 @@ fn session_round_trips_and_lists() {
     assert_eq!(session::most_recent(&cwd), Some(path));
 }
 
+// The stable conversation id e sends as the OpenCode session header: a real
+// UUID carried in the filename, unchanged when the log is reopened for resume.
+#[test]
+fn session_id_is_stable_across_reopen() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("e-session-id-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+    let cwd = std::env::temp_dir().join("e-id-proj");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut s = Session::create(&cwd, "test/model").unwrap();
+    let id = s.id().to_string();
+    // An opaque UUID (8-4-4-4-12 hex), not an identity-bearing value.
+    let groups: Vec<&str> = id.split('-').collect();
+    assert_eq!(
+        groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+        [8, 4, 4, 4, 12]
+    );
+    assert!(
+        groups
+            .iter()
+            .all(|g| g.bytes().all(|b| b.is_ascii_hexdigit())),
+        "id is an opaque hex UUID: {id}"
+    );
+    assert!(s.path().to_string_lossy().contains(&id));
+    s.append(&ChatMessage::user("hi")).unwrap();
+    let path = s.path().to_path_buf();
+    drop(s);
+
+    let reopened = Session::reopen(&path).unwrap();
+    assert_eq!(reopened.id(), id, "resume must not change the session id");
+}
+
 #[test]
 fn session_name_sets_reads_and_clears() {
     let _lock = ENV_LOCK.lock().unwrap();

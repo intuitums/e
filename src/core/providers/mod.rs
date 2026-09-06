@@ -662,6 +662,37 @@ pub struct Request {
     pub effort: Option<String>,
     /// Tool schemas to advertise (dialect-shaped by each implementation).
     pub tools: Vec<serde_json::Value>,
+    /// The conversation's stable session id (`Session::id`), or empty when
+    /// this request has no persisted session. Sent only to providers that opt
+    /// in via `session_header` — see `with_attribution`.
+    pub session_id: String,
+}
+
+/// Attach a provider's opt-in attribution headers before the request is sent.
+/// A provider opts in through `client_header` / `session_header` in its
+/// registry data; e sends its client name and stable session id under those
+/// names so an OpenCode-style gateway recognizes the caller and can pin a
+/// conversation to one upstream for cache hits. A provider that declares
+/// neither receives neither — the session id is never broadcast to a provider
+/// that did not ask for it, so it cannot become a cross-provider correlation
+/// handle. Unknown/custom providers (not in the registry) get nothing.
+pub fn with_attribution(
+    builder: reqwest::RequestBuilder,
+    request: &Request,
+) -> reqwest::RequestBuilder {
+    let Some(provider) = registry::find(&request.model.provider) else {
+        return builder;
+    };
+    let mut builder = builder;
+    if let Some(header) = provider.client_header.as_deref() {
+        builder = builder.header(header, crate::CLIENT);
+    }
+    if let Some(header) = provider.session_header.as_deref() {
+        if !request.session_id.is_empty() {
+            builder = builder.header(header, request.session_id.as_str());
+        }
+    }
+    builder
 }
 
 /// Start the request; events arrive on the returned channel. The task ends
