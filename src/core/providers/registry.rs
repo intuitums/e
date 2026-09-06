@@ -94,6 +94,18 @@ pub struct Provider {
     pub responses_mount: ResponsesMount,
     #[serde(default)]
     pub auth: Auth,
+    /// Opt-in gateway attribution headers. A provider that sets these asks e
+    /// to identify its requests: `client_header` carries e's client name
+    /// (`crate::CLIENT`) so the gateway recognizes the caller, and
+    /// `session_header` carries e's stable per-conversation id so the gateway
+    /// can pin a conversation to one upstream for cache hits. Only OpenCode's
+    /// gateways (`x-opencode-client` / `x-opencode-session`) set them today;
+    /// a provider that leaves them unset receives neither header, so the id is
+    /// never sent to a provider that did not opt in.
+    #[serde(default)]
+    pub client_header: Option<String>,
+    #[serde(default)]
+    pub session_header: Option<String>,
     #[serde(default)]
     pub models: Vec<ModelDecl>,
 }

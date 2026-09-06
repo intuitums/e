@@ -1576,9 +1576,12 @@ impl App {
         let epoch = self.compaction_epoch;
         self.notice("compacting…".into());
         let model = self.agent.model.clone();
+        let session_id = self.agent.session_id().unwrap_or_default();
         let results = self.results.clone();
         tokio::spawn(async move {
-            let job = match crate::core::agent::compact::summarize(model, &to_summarize).await {
+            let job = match crate::core::agent::compact::summarize(model, &to_summarize, session_id)
+                .await
+            {
                 Ok(summary) => AppJob::Compacted {
                     summary,
                     kept,

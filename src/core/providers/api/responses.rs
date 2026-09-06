@@ -11,8 +11,8 @@ use tokio::sync::mpsc;
 
 use crate::core::providers::runtime::Authorization;
 use crate::core::providers::{
-    http, require_success, send_request, Event, FailureCause, FinishReason, ProviderError, Request,
-    SseStream, StreamEnd, ToolCall,
+    http, require_success, send_request, with_attribution, Event, FailureCause, FinishReason,
+    ProviderError, Request, SseStream, StreamEnd, ToolCall,
 };
 
 pub async fn run(
@@ -132,7 +132,9 @@ pub async fn run(
     builder = builder
         .bearer_auth(&authorization.bearer)
         .header("accept", "text/event-stream");
-    let response = require_success(send_request(builder.json(&body)).await?).await?;
+    let response =
+        require_success(send_request(with_attribution(builder, request).json(&body)).await?)
+            .await?;
 
     let mut sse = SseStream::new(response.bytes_stream());
     // function_call items accumulate argument deltas keyed by item id.

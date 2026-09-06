@@ -49,7 +49,7 @@ async fn compact_summarizes_and_seeds_a_fresh_session() {
         ChatMessage::assistant("the bug is in line 3", Vec::new()),
     ];
 
-    let summary = e::core::agent::compact::summarize(model.clone(), &history[..3])
+    let summary = e::core::agent::compact::summarize(model.clone(), &history[..3], String::new())
         .await
         .unwrap();
     assert_eq!(summary, "Goal: fix the parser. Next: run tests.");
@@ -298,7 +298,7 @@ async fn one_huge_tool_call_cannot_bypass_the_summary_budget() {
         }],
     )];
 
-    let summary = e::core::agent::compact::summarize(model, &history)
+    let summary = e::core::agent::compact::summarize(model, &history, String::new())
         .await
         .unwrap();
     assert_eq!(summary, "summary");

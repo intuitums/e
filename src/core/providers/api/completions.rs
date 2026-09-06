@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 
 use crate::core::providers::runtime::Authorization;
 use crate::core::providers::{
-    http, require_success, retry_after_seconds, send_request, Event, FinishReason, ProviderError,
-    Request, SseStream, StreamEnd, ToolCall,
+    http, require_success, retry_after_seconds, send_request, with_attribution, Event,
+    FinishReason, ProviderError, Request, SseStream, StreamEnd, ToolCall,
 };
 
 /// Provider/model/level combinations that rejected our `reasoning_effort`
@@ -53,13 +53,14 @@ async fn send(
     authorization: &Authorization,
     body: &serde_json::Value,
 ) -> Result<reqwest::Response, ProviderError> {
-    send_request(
+    send_request(with_attribution(
         http()?
             .post(format!("{}/chat/completions", request.model.base_url))
             .bearer_auth(&authorization.bearer)
             .header("accept", "text/event-stream")
             .json(body),
-    )
+        request,
+    ))
     .await
 }
 

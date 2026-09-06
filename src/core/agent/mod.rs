@@ -196,6 +196,7 @@ fn clone_request(r: &Request) -> Request {
         system: r.system.clone(),
         messages: r.messages.clone(),
         effort: r.effort.clone(),
+        session_id: r.session_id.clone(),
         tools: r.tools.clone(),
     }
 }
@@ -598,6 +599,17 @@ impl Agent {
             .map(|s| s.path().to_path_buf())
     }
 
+    /// The active conversation's stable session id, or None before the first
+    /// message creates the log. Sent to gateways that ask for a per-
+    /// conversation handle (see `providers::with_attribution`).
+    pub fn session_id(&self) -> Option<String> {
+        self.session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|s| s.id().to_string())
+    }
+
     /// Rewind: point the session at an earlier node (`/tree`'s choice) and
     /// mirror the path from root to that node into in-memory history. The
     /// file itself is untouched — the next commit attaches after `head`, so
@@ -828,11 +840,23 @@ impl Agent {
                 // record keeps its images regardless of what model sends the
                 // next turn.
                 providers::strip_incompatible_images(&mut messages, &model);
+                // The stable per-conversation id, read from the live log the
+                // steering commits above just created (empty for an unsaved
+                // session). Providers that opt in send it as their session
+                // header — see `providers::with_attribution`.
+                let session_id = log
+                    .session
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .map(|s| s.id().to_string())
+                    .unwrap_or_default();
                 let request = Request {
                     model: model.clone(),
                     system: system.clone(),
                     messages,
                     effort: effort.clone(),
+                    session_id,
                     tools: tools::restrict_to(
                         tools::filter_schemas(
                             match (&host, tool_mode, allowed_tools.is_some()) {
