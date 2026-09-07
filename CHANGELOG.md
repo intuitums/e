@@ -11,8 +11,8 @@ the pipeline publishes.
   newer turn. Rejected-image text stays a literal prompt, even when it starts
   with a command.
 - Compaction rejects stale history snapshots and observes cancellation while
-  waiting to announce its start. File writes detect inode replacement during
-  staging and copying on Unix.
+  reserving its start and completion events. File writes detect inode replacement
+  during staging and copying on Unix.
 - Session resume locks the log before loading history, and tree readers reject
   corrupt parent links on inactive branches too.
 - Tool batches have bounded concurrency and execute calls naming the same file

@@ -256,6 +256,13 @@ async fn compact_log(
         _ = wait_cancelled(cancel) => return Err("compaction cancelled; history was preserved".into()),
         _ = log.events.send(SessionEvent::Compacting) => {}
     }
+    // Reserve completion capacity before doing work or changing history.
+    // Once installed, the checkpoint can then be published without an await.
+    let completion = tokio::select! {
+        biased;
+        _ = wait_cancelled(cancel) => return Err("compaction cancelled; history was preserved".into()),
+        result = log.events.reserve() => result.map_err(|_| "session event receiver closed; history was preserved".to_string())?,
+    };
     let session_id = log
         .session
         .lock()
@@ -292,13 +299,10 @@ async fn compact_log(
         }
         return Err("compaction could not be installed; history changed or could not be saved; history was preserved".into());
     }
-    let _ = log
-        .events
-        .send(SessionEvent::Compacted {
-            summary,
-            context_tokens: tokens,
-        })
-        .await;
+    completion.send(SessionEvent::Compacted {
+        summary,
+        context_tokens: tokens,
+    });
     Ok(true)
 }
 
@@ -1233,40 +1237,47 @@ mod option_tests {
     use super::*;
 
     #[tokio::test]
-    async fn compaction_cancels_while_its_start_event_is_backpressured() {
-        let (mut agent, _events) = Agent::with_options(
-            crate::core::providers::catalog::builtin_catalog().remove(0),
-            AgentOptions {
-                save_session: false,
-                ..AgentOptions::default()
-            },
-        );
-        agent.load_history(vec![
-            ChatMessage::user("x".repeat(10_000)),
-            ChatMessage::user("recent"),
-        ]);
-        let mut log = agent.log();
-        log.model.context_window = 8192;
-        let (events, _receiver) = mpsc::channel(1);
-        events.try_send(SessionEvent::TurnStart).unwrap();
-        log.events = events;
-        let cancel = Arc::new(AtomicBool::new(false));
-        let compaction = compact_log(&log, "system", &cancel);
-        tokio::pin!(compaction);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), &mut compaction)
+    async fn compaction_cancels_when_either_event_slot_is_backpressured() {
+        for start_blocked in [false, true] {
+            let (mut agent, _events) = Agent::with_options(
+                crate::core::providers::catalog::builtin_catalog().remove(0),
+                AgentOptions {
+                    save_session: false,
+                    ..AgentOptions::default()
+                },
+            );
+            agent.load_history(vec![
+                ChatMessage::user("x".repeat(10_000)),
+                ChatMessage::user("recent"),
+            ]);
+            let mut log = agent.log();
+            log.model.context_window = 8192;
+            // Capacity must be reserved before any provider request can start.
+            log.model.provider = "review-unconfigured".into();
+            log.model.base_url = "http://127.0.0.1:0".into();
+            let (events, _receiver) = mpsc::channel(1);
+            if start_blocked {
+                events.try_send(SessionEvent::TurnStart).unwrap();
+            }
+            log.events = events;
+            let cancel = Arc::new(AtomicBool::new(false));
+            let compaction = compact_log(&log, "system", &cancel);
+            tokio::pin!(compaction);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut compaction)
+                    .await
+                    .is_err()
+            );
+            cancel.store(true, Ordering::SeqCst);
+            let result = tokio::time::timeout(Duration::from_secs(1), compaction)
                 .await
-                .is_err()
-        );
-        cancel.store(true, Ordering::SeqCst);
-        let result = tokio::time::timeout(Duration::from_secs(1), compaction)
-            .await
-            .unwrap();
-        assert_eq!(
-            result.unwrap_err(),
-            "compaction cancelled; history was preserved"
-        );
-        assert_eq!(agent.history_snapshot().len(), 2);
+                .unwrap();
+            assert_eq!(
+                result.unwrap_err(),
+                "compaction cancelled; history was preserved"
+            );
+            assert_eq!(agent.history_snapshot().len(), 2);
+        }
     }
 
     #[test]
