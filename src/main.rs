@@ -22,7 +22,7 @@ use e::tui::app;
 
 /// Print the usage text shared by `e --help` and `e help`, including any
 /// flags and commands that extensions contribute.
-fn print_help(host: &e::core::api::ExtensionHost) {
+fn print_help(host: &e::core::extensions::ExtensionHost) {
     println!(
         "e — a coding agent for your terminal\n\n\
 usage:\n  e [message]           start a session (optionally with a first prompt;\n                        piped stdin counts as prompt text)\n  \
@@ -112,7 +112,7 @@ fn unknown_command_hint(options: &Options) -> Option<String> {
 
 /// Report a usage error — themed on a terminal, JSON on stdout when
 /// requested — shut extensions down, and exit with the usage status code.
-async fn usage_error(host: &e::core::api::ExtensionHost, json: bool, message: String) -> ! {
+async fn usage_error(host: &e::core::extensions::ExtensionHost, json: bool, message: String) -> ! {
     if json {
         println!("{}", serde_json::json!({"error": message}));
     } else if std::io::stderr().is_terminal() {
@@ -153,9 +153,9 @@ async fn main() -> std::io::Result<()> {
     let diagnostic_requested =
         matches!(cli::leading_subcommand(&args), Some("doctor" | "providers"));
     let host = if cli::extensions_disabled(&args) || diagnostic_requested {
-        e::core::api::ExtensionHost::empty()
+        e::core::extensions::ExtensionHost::empty()
     } else {
-        e::core::api::ExtensionHost::start(jobs_tx.clone()).await
+        e::core::extensions::ExtensionHost::start(jobs_tx.clone()).await
     };
     if cli::has_flag(&args, &["--help", "-h"]) {
         print_help(&host);
@@ -226,8 +226,8 @@ async fn main() -> std::io::Result<()> {
         }
     }
     match host.startup(args).await {
-        Ok(e::core::api::StartupAction::Continue(next)) => args = next,
-        Ok(e::core::api::StartupAction::Relaunch { argv, request }) => {
+        Ok(e::core::extensions::StartupAction::Continue(next)) => args = next,
+        Ok(e::core::extensions::StartupAction::Relaunch { argv, request }) => {
             host.shutdown().await;
             return app::relaunch_self(&request.cwd, &argv, &request.env);
         }
@@ -420,6 +420,7 @@ fn agent_options(options: &Options) -> AgentOptions {
         tool_mode: options.tool_mode,
         effort_override: options.effort.clone(),
         allowed_tools: None,
+        ..AgentOptions::default()
     }
 }
 
@@ -605,7 +606,7 @@ impl RpcSignals {
 /// is idle, so returning from main could leave signal shutdown hung forever.
 #[cfg(unix)]
 async fn exit_rpc_on_signal(
-    host: &e::core::api::ExtensionHost,
+    host: &e::core::extensions::ExtensionHost,
     agent: Option<&mut Agent>,
     status: i32,
 ) -> ! {
@@ -621,7 +622,7 @@ async fn exit_rpc_on_signal(
 /// exactly one JSON object out for each line. The extension host is reused,
 /// while each request gets an isolated Agent and is memory-only by default.
 async fn rpc(
-    host: std::sync::Arc<e::core::api::ExtensionHost>,
+    host: std::sync::Arc<e::core::extensions::ExtensionHost>,
     defaults: &Options,
 ) -> std::io::Result<()> {
     let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
@@ -630,11 +631,12 @@ async fn rpc(
     loop {
         #[cfg(unix)]
         let line_result = tokio::select! {
-            line = e::core::api::read_bounded_line(&mut reader, MAX_RPC_LINE_BYTES) => line,
+            line = e::core::extensions::read_bounded_line(&mut reader, MAX_RPC_LINE_BYTES) => line,
             status = signals.recv() => exit_rpc_on_signal(&host, None, status).await,
         };
         #[cfg(not(unix))]
-        let line_result = e::core::api::read_bounded_line(&mut reader, MAX_RPC_LINE_BYTES).await;
+        let line_result =
+            e::core::extensions::read_bounded_line(&mut reader, MAX_RPC_LINE_BYTES).await;
         let line = match line_result {
             Ok(Some(line)) => line,
             Ok(None) => break,

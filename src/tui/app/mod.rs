@@ -48,7 +48,7 @@ struct ActiveTurn {
     error: Option<String>,
     /// tool id → stable group block, so lifecycle events update in place.
     tool_blocks: std::collections::HashMap<u64, usize>,
-    /// Batch members not yet terminal, including serially pending calls.
+    /// Batch members not yet terminal, including pending calls.
     pending_tools: usize,
     /// Set when the turn was stopped because the device slept past the
     /// resume window: the stop line is already in the transcript, so the
@@ -96,19 +96,11 @@ enum AppJob {
         sequence: u64,
         text: String,
         images: Option<Vec<crate::core::providers::ImageInput>>,
-        verdict: crate::core::api::InputVerdict,
+        verdict: crate::core::extensions::InputVerdict,
     },
     /// An extension named the session (command result). Tagged with the
     /// session epoch the command started in.
     Rename { name: String, epoch: u64 },
-    /// A finished /compact: the summary and the recent messages kept verbatim.
-    Compacted {
-        summary: String,
-        kept: Vec<crate::core::providers::ChatMessage>,
-        epoch: u64,
-    },
-    /// A /compact that didn't produce a summary.
-    CompactFailed { message: String, epoch: u64 },
     /// A finished `!` shell command: what ran and what it printed. Tagged
     /// with the session epoch it started in.
     Shell {
@@ -117,7 +109,7 @@ enum AppJob {
         epoch: u64,
     },
     /// A /reload finished: the restarted extension host.
-    Reloaded(std::sync::Arc<crate::core::api::ExtensionHost>),
+    Reloaded(std::sync::Arc<crate::core::extensions::ExtensionHost>),
     /// The background updater installed a new version.
     Updated(String),
     /// A provider model-list refresh finished; rebuild an open picker.
@@ -145,7 +137,7 @@ fn input_route(awaiting_api_key: bool, has_input_hook: bool) -> InputRoute {
 type InputVerdictItem = (
     String,
     Option<Vec<crate::core::providers::ImageInput>>,
-    crate::core::api::InputVerdict,
+    crate::core::extensions::InputVerdict,
 );
 
 #[derive(Default)]
@@ -167,7 +159,7 @@ impl PendingInputVerdicts {
         sequence: u64,
         text: String,
         images: Option<Vec<crate::core::providers::ImageInput>>,
-        verdict: crate::core::api::InputVerdict,
+        verdict: crate::core::extensions::InputVerdict,
     ) -> Vec<InputVerdictItem> {
         self.ready.insert(sequence, (text, images, verdict));
         let mut ordered = Vec::new();
@@ -232,18 +224,12 @@ struct App {
     /// Monotonic identity used to ignore a canceled flow's queued outcome.
     login_sequence: u64,
     /// Extension host; commands and prompts come back on `results`.
-    host: std::sync::Arc<crate::core::api::ExtensionHost>,
+    host: std::sync::Arc<crate::core::extensions::ExtensionHost>,
     results: tokio::sync::mpsc::Sender<AppJob>,
     /// Completed input-hook calls waiting for earlier submissions to finish.
     input_verdicts: PendingInputVerdicts,
     /// A /compact summary is being generated; cleared when it lands or fails.
     compacting: bool,
-    /// Identity of the in-flight compaction. Session changes and a later
-    /// compaction invalidate older results before they can replace history.
-    compaction_epoch: u64,
-    /// /compact was asked for mid-turn; runs when the turn ends (the
-    /// reference behavior — compaction never touches a running turn).
-    compact_requested: bool,
     /// Messages typed while compacting; submitted once the swap lands.
     held_prompts: Vec<String>,
     /// First visit to this directory: the trust question, until answered.
@@ -888,15 +874,15 @@ impl App {
         // one growing tree live — the replay keeps them one tree.
         let mut open_group: Option<usize> = None;
         for m in messages {
-            match m.role.as_str() {
+            match m.role() {
                 "user" => {
                     open_group = None;
                     let mut content = m.content.clone();
-                    if !m.images.is_empty() {
+                    if !m.images().is_empty() {
                         content.push_str(&format!(
                             "\n[attached {} image{}]",
-                            m.images.len(),
-                            if m.images.len() == 1 { "" } else { "s" }
+                            m.images().len(),
+                            if m.images().len() == 1 { "" } else { "s" }
                         ));
                     }
                     self.transcript.push(Block::new(Kind::User, content));
@@ -907,10 +893,10 @@ impl App {
                         self.transcript
                             .push(Block::new(Kind::Assistant, m.content.clone()));
                     }
-                    if !m.tool_calls.is_empty() {
-                        let mut children = Vec::with_capacity(m.tool_calls.len());
-                        let mut ids = Vec::with_capacity(m.tool_calls.len());
-                        for call in &m.tool_calls {
+                    if !m.tool_calls().is_empty() {
+                        let mut children = Vec::with_capacity(m.tool_calls().len());
+                        let mut ids = Vec::with_capacity(m.tool_calls().len());
+                        for call in m.tool_calls() {
                             restored_id += 1;
                             let args = serde_json::from_str(&call.arguments)
                                 .unwrap_or(serde_json::Value::Null);
@@ -941,14 +927,14 @@ impl App {
                     }
                 }
                 "tool" => {
-                    let Some(call_id) = m.tool_call_id.as_ref() else {
+                    let Some(call_id) = m.tool_call_id() else {
                         continue;
                     };
                     let Some(&(block, id)) = restored_calls.get(call_id) else {
                         continue;
                     };
                     let (outcome, summary) = m
-                        .tool_meta
+                        .tool_meta()
                         .as_ref()
                         .map(|meta| (meta.outcome, meta.summary.clone()))
                         .unwrap_or((crate::core::tools::ToolOutcome::Completed, "done".into()));
@@ -1009,20 +995,20 @@ impl App {
             self.notice("a turn is running — press Esc to stop it, then resume".into());
             return;
         }
-        let messages = match crate::core::session::Session::load(&path) {
-            Ok(m) => m,
+        // Ownership first: a session another e is appending to must not be
+        // replayed into a second, diverging history.
+        let session = match crate::core::session::SessionLog::reopen(&path) {
+            Ok(s) => s,
             Err(e) => {
-                self.notice(format!("could not open session: {e}"));
+                self.notice(format!("could not resume session: {e}"));
                 self.release_initial_prompt();
                 return;
             }
         };
-        // Ownership first: a session another e is appending to must not be
-        // replayed into a second, diverging history.
-        let session = match crate::core::session::Session::reopen(&path) {
-            Ok(s) => s,
+        let messages = match crate::core::session::SessionLog::load(&path) {
+            Ok(m) => m,
             Err(e) => {
-                self.notice(format!("could not resume session: {e}"));
+                self.notice(format!("could not open session: {e}"));
                 self.release_initial_prompt();
                 return;
             }
@@ -1034,8 +1020,6 @@ impl App {
         self.shell_block = None;
         self.held_prompts.clear();
         self.compacting = false;
-        self.compaction_epoch += 1;
-        self.compact_requested = false;
         self.rebuild_transcript(&messages);
         self.agent.load_history(messages);
         self.agent.set_session(Some(session));
@@ -1069,7 +1053,7 @@ impl App {
             self.notice("nothing to rewind yet — send a message first".into());
             return;
         };
-        let nodes = match crate::core::session::Session::nodes(&path) {
+        let nodes = match crate::core::session::SessionLog::nodes(&path) {
             Ok(n) => n,
             Err(e) => {
                 self.notice(format!("could not read session: {e}"));
@@ -1113,7 +1097,7 @@ impl App {
         let Some(path) = self.agent.session_path() else {
             return;
         };
-        let nodes = match crate::core::session::Session::nodes(&path) {
+        let nodes = match crate::core::session::SessionLog::nodes(&path) {
             Ok(n) => n,
             Err(e) => {
                 self.notice(format!("could not read session: {e}"));
@@ -1127,8 +1111,6 @@ impl App {
         self.shell_block = None;
         self.held_prompts.clear();
         self.compacting = false;
-        self.compaction_epoch += 1;
-        self.compact_requested = false;
         self.rebuild_transcript(&messages);
         self.agent.rewind_to(head, messages);
         self.editor.set_text(&prompt);
@@ -1177,7 +1159,7 @@ impl App {
             let host = self.host.clone();
             let results = self.results.clone();
             let sequence = self.input_verdicts.reserve();
-            tokio::spawn(async move {
+            crate::core::config::home::spawn(async move {
                 let verdict = host.hook_input(&trimmed).await;
                 let _ = results
                     .send(AppJob::InputVerdict {
@@ -1197,7 +1179,7 @@ impl App {
         &mut self,
         text: String,
         images: Option<Vec<crate::core::providers::ImageInput>>,
-        verdict: crate::core::api::InputVerdict,
+        verdict: crate::core::extensions::InputVerdict,
     ) {
         if let Some(notice) = verdict.notice.filter(|n| !n.trim().is_empty()) {
             self.notice(notice);
@@ -1249,7 +1231,7 @@ impl App {
                         "{} does not accept image input — sending the text without the screenshot",
                         model::slug(&self.agent.model)
                     ));
-                    self.submit_direct(prompt.to_string());
+                    self.prompt(prompt.to_string());
                 }
                 return;
             }
@@ -1372,8 +1354,6 @@ impl App {
                     return;
                 }
                 self.compacting = false;
-                self.compaction_epoch += 1;
-                self.compact_requested = false;
                 self.held_prompts.clear();
                 self.shell_block = None;
                 self.reload_block = None;
@@ -1415,7 +1395,7 @@ impl App {
                     let results = self.results.clone();
                     let (name, args) = (name.to_string(), args.to_string());
                     let epoch = self.session_epoch;
-                    tokio::spawn(async move {
+                    crate::core::config::home::spawn(async move {
                         let out = host.run_command(&name, &args).await;
                         if let Some(notice) = out.notice {
                             let _ = results.send(AppJob::Notice(notice)).await;
@@ -1469,7 +1449,7 @@ impl App {
             let results = self.results.clone();
             let sequence = self.input_verdicts.reserve();
             let images = std::mem::take(&mut self.pending_initial_images);
-            tokio::spawn(async move {
+            crate::core::config::home::spawn(async move {
                 let verdict = host.hook_input(&text).await;
                 let _ = results
                     .send(AppJob::InputVerdict {
@@ -1511,10 +1491,10 @@ impl App {
         // A fresh prompt closes the queued-prompt review and resumes the
         // queue — the reference's resume-after-new-prompt.
         self.close_queue_review();
-        // While compacting, reloading, or a `!` shell command is running,
+        // While reloading or a `!` shell command is running,
         // hold the message; it submits (and displays) when the block lifts —
         // a turn must not start without the shell output it was promised.
-        if self.compacting || self.reloading || self.shell_block.is_some() {
+        if self.reloading || self.shell_block.is_some() {
             self.held_prompts.push(text);
             return;
         }
@@ -1526,75 +1506,13 @@ impl App {
         }
     }
 
-    /// /compact: mid-turn it is deferred to TurnEnd (compaction never touches
-    /// a running turn); idle it starts now.
+    /// Ask the core to checkpoint at its next safe provider boundary.
     fn compact_now(&mut self) {
-        if self.agent.is_streaming() {
-            if !self.compact_requested {
-                self.compact_requested = true;
-                self.notice("will compact when this turn ends".into());
-            }
-            return;
-        }
         if self.shell_block.is_some() {
             self.notice("a shell command is running — compact after it finishes".into());
             return;
         }
-        self.start_compaction(false);
-    }
-
-    /// Summarize everything before the keep-recent cut, off-task; the swap
-    /// lands via AppJob::Compacted. `auto` softens the too-small notice.
-    fn start_compaction(&mut self, auto: bool) {
-        if self.compacting {
-            if !auto {
-                self.notice("already compacting".into());
-            }
-            return;
-        }
-        if self.shell_block.is_some() {
-            if !auto {
-                self.notice("a shell command is running — compact after it finishes".into());
-            }
-            return;
-        }
-        let history = self.agent.history_snapshot();
-        if history.is_empty() {
-            self.notice("nothing to compact yet".into());
-            return;
-        }
-        let (to_summarize, kept) =
-            crate::core::agent::compact::split(&history, self.agent.model.context_window);
-        if to_summarize.is_empty() {
-            if !auto {
-                self.notice("recent context already fits — nothing to compact".into());
-            }
-            return;
-        }
-        self.compacting = true;
-        self.compaction_epoch += 1;
-        let epoch = self.compaction_epoch;
-        self.notice("compacting…".into());
-        let model = self.agent.model.clone();
-        let session_id = self.agent.session_id().unwrap_or_default();
-        let results = self.results.clone();
-        tokio::spawn(async move {
-            let job = match crate::core::agent::compact::summarize(model, &to_summarize, session_id)
-                .await
-            {
-                Ok(summary) => AppJob::Compacted {
-                    summary,
-                    kept,
-                    epoch,
-                },
-                Err(message) => AppJob::CompactFailed { message, epoch },
-            };
-            let _ = results.send(job).await;
-        });
-    }
-
-    fn compaction_is_current(&self, epoch: u64) -> bool {
-        self.compacting && epoch == self.compaction_epoch
+        self.agent.request_compaction(system_prompt());
     }
 
     /// `!cmd`: run it through the bash tool off-task; the result arrives as
@@ -1613,10 +1531,13 @@ impl App {
         let results = self.results.clone();
         let cwd = self.agent.cwd();
         let epoch = self.session_epoch;
-        tokio::spawn(async move {
+        crate::core::config::home::spawn(async move {
             let shell_cmd = cmd.clone();
+            let home = crate::core::config::home::home();
             let output = tokio::task::spawn_blocking(move || {
-                crate::core::tools::run_shell(&shell_cmd, &cwd)
+                crate::core::config::home::with_home(home, || {
+                    crate::core::tools::run_shell(&shell_cmd, &cwd)
+                })
             })
             .await
             .unwrap_or(crate::core::tools::ToolOutput {
@@ -1681,9 +1602,9 @@ impl App {
         let old = self.host.clone();
         let jobs = self.jobs.clone();
         let results = self.results.clone();
-        tokio::spawn(async move {
+        crate::core::config::home::spawn(async move {
             old.shutdown().await;
-            let host = crate::core::api::ExtensionHost::start(jobs).await;
+            let host = crate::core::extensions::ExtensionHost::start(jobs).await;
             let _ = results.send(AppJob::Reloaded(host)).await;
         });
     }
@@ -1694,7 +1615,7 @@ impl App {
             .history_snapshot()
             .iter()
             .rev()
-            .find(|m| m.role == "assistant" && !m.content.trim().is_empty())
+            .find(|m| m.role() == "assistant" && !m.content.trim().is_empty())
             .map(|m| m.content.clone());
         match last {
             Some(text) => {
@@ -2023,7 +1944,7 @@ fn tree_items(nodes: &[crate::core::session::Node]) -> Vec<(String, String, bool
     }
     nodes
         .iter()
-        .filter(|n| n.message.role == "user")
+        .filter(|n| n.message.role() == "user")
         .map(|n| {
             let preview: String = n
                 .message
@@ -2046,7 +1967,7 @@ fn tree_items(nodes: &[crate::core::session::Node]) -> Vec<(String, String, bool
 
 /// The rewind target for a chosen node: its parent, the message history before
 /// it, and its prompt text for the composer. None means the id no longer
-/// resolves. A broken ancestor link truncates the replayed path there.
+/// resolves or the ancestor path is corrupt.
 fn rewind_target(
     nodes: &[crate::core::session::Node],
     node_id: &str,
@@ -2061,10 +1982,12 @@ fn rewind_target(
     let head = target.parent.clone();
     let mut path_ids = Vec::new();
     let mut cursor = head.clone();
+    let mut seen = std::collections::HashSet::new();
     while let Some(id) = cursor {
-        let Some(node) = by_id.get(id.as_str()).copied() else {
-            break;
-        };
+        if !seen.insert(id.clone()) {
+            return None;
+        }
+        let node = by_id.get(id.as_str()).copied()?;
         path_ids.push(id.clone());
         cursor = node.parent.clone();
     }
@@ -2145,7 +2068,22 @@ pub struct RunOptions {
 
 pub async fn run(
     options: RunOptions,
-    host: std::sync::Arc<crate::core::api::ExtensionHost>,
+    host: std::sync::Arc<crate::core::extensions::ExtensionHost>,
+    jobs_tx: tokio::sync::mpsc::Sender<String>,
+    jobs_rx: tokio::sync::mpsc::Receiver<String>,
+) -> std::io::Result<()> {
+    let home = options
+        .agent
+        .home
+        .clone()
+        .unwrap_or_else(crate::core::config::home::home);
+    crate::core::config::home::scope(home, run_scoped(options, host, jobs_tx, jobs_rx)).await
+}
+
+/// Run the terminal and its configuration reads within the selected home.
+async fn run_scoped(
+    options: RunOptions,
+    host: std::sync::Arc<crate::core::extensions::ExtensionHost>,
     jobs_tx: tokio::sync::mpsc::Sender<String>,
     mut jobs_rx: tokio::sync::mpsc::Receiver<String>,
 ) -> std::io::Result<()> {
@@ -2229,8 +2167,6 @@ pub async fn run(
         results: results_tx,
         input_verdicts: PendingInputVerdicts::default(),
         compacting: false,
-        compaction_epoch: 0,
-        compact_requested: false,
         held_prompts: Vec::new(),
         trust: None,
         pending_initial: None,
@@ -2275,7 +2211,7 @@ pub async fn run(
     // untouched until a restart. Dev builds and the opt-out are exempt.
     if !crate::core::update::is_dev_build() && crate::core::config::settings::auto_update() {
         let results = app.results.clone();
-        tokio::spawn(async move {
+        crate::core::config::home::spawn(async move {
             if let Ok(Some(version)) = crate::core::update::self_update().await {
                 let _ = results.send(AppJob::Updated(version)).await;
             }
@@ -2284,7 +2220,7 @@ pub async fn run(
     // Providers' model lists refresh in the background (the reference
     // behavior, sourced from each gateway's own /models): a model a provider
     // ships today shows in /models today, no e release involved.
-    tokio::spawn(crate::core::providers::catalog::refresh_remote());
+    crate::core::config::home::spawn(crate::core::providers::catalog::refresh_remote());
     if crate::core::auth::load().is_empty() {
         app.notice(
             "no provider signed in — use /login to sign in with an account or API key".into(),
@@ -2724,34 +2660,6 @@ pub async fn run(
                             set_tab_title(&tab_title(&title_path(), Some(&name)));
                         }
                     }
-                    Some(AppJob::Compacted { summary, kept, epoch }) => {
-                        // Ignore a result that outlived its session (/new won).
-                        if app.compaction_is_current(epoch) {
-                            app.compacting = false;
-                            if app.agent.load_compacted(&summary, kept).await {
-                                app.context_tokens =
-                                    crate::core::agent::compact::estimate_request_tokens(
-                                        &system_prompt(),
-                                        &app.agent.history_snapshot(),
-                                    );
-                                app.transcript.clear();
-                                app.transcript.push(Block::new(Kind::Notice, "compacted — recent messages kept, the full session is under /resume"));
-                                app.transcript.push(Block::new(Kind::Summary, summary));
-                            }
-                            for text in std::mem::take(&mut app.held_prompts) {
-                                app.prompt(text);
-                            }
-                        }
-                    }
-                    Some(AppJob::CompactFailed { message, epoch })
-                        if app.compaction_is_current(epoch) => {
-                        app.compacting = false;
-                        app.notice(format!("compact failed: {message}"));
-                        for text in std::mem::take(&mut app.held_prompts) {
-                            app.prompt(text);
-                        }
-                    }
-                    Some(AppJob::CompactFailed { .. }) => {}
                     Some(AppJob::CatalogRefreshed) => {
                         if let Some(menu) = &app.menu {
                             if menu.kind == MenuKind::Models {
@@ -2858,7 +2766,7 @@ pub async fn run(
                                     back: authpanel::BackTarget::Account(back),
                                 });
                             }
-                            tokio::spawn(crate::core::providers::catalog::refresh_remote());
+                            crate::core::config::home::spawn(crate::core::providers::catalog::refresh_remote());
                             // A fresh credential may make new models available:
                             // if the current model's provider is still signed out,
                             // fall back to the first available model.
@@ -3216,7 +3124,7 @@ mod tests {
             second,
             "second".into(),
             None,
-            crate::core::api::InputVerdict::default(),
+            crate::core::extensions::InputVerdict::default(),
         );
         assert!(later.is_empty(), "a later verdict must wait");
 
@@ -3224,7 +3132,7 @@ mod tests {
             first,
             "first".into(),
             None,
-            crate::core::api::InputVerdict::default(),
+            crate::core::extensions::InputVerdict::default(),
         );
         assert_eq!(
             ordered
@@ -3256,7 +3164,7 @@ mod tests {
             with_images,
             "with images".into(),
             Some(vec![image]),
-            crate::core::api::InputVerdict::default(),
+            crate::core::extensions::InputVerdict::default(),
         );
         assert!(none_ready.is_empty(), "text_only hasn't completed yet");
 
@@ -3264,7 +3172,7 @@ mod tests {
             text_only,
             "text only".into(),
             None,
-            crate::core::api::InputVerdict::default(),
+            crate::core::extensions::InputVerdict::default(),
         );
         assert_eq!(ordered.len(), 2);
         let (first_text, first_images, _) = &ordered[0];
@@ -3421,12 +3329,10 @@ mod tests {
             logins,
             login_task: None,
             login_sequence: 0,
-            host: crate::core::api::ExtensionHost::empty(),
+            host: crate::core::extensions::ExtensionHost::empty(),
             results,
             input_verdicts: PendingInputVerdicts::default(),
             compacting: false,
-            compaction_epoch: 0,
-            compact_requested: false,
             held_prompts: Vec::new(),
             trust: None,
             pending_initial: None,
@@ -3625,6 +3531,58 @@ mod tests {
     }
 
     #[test]
+    fn rejected_image_suffixes_remain_literal_prompts() {
+        let image =
+            std::env::temp_dir().join(format!("e-image-command-{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&image, b"image placeholder").unwrap();
+        for suffix in ["/new", "/quit", "!touch should-not-run"] {
+            let mut app = session_app();
+            app.agent
+                .load_history(vec![crate::core::providers::ChatMessage::user(
+                    "keep history",
+                )]);
+            // Hold literal prompts locally without starting a provider request.
+            app.reloading = true;
+            app.submit_direct(format!("{} {suffix}", image.display()));
+            assert_eq!(app.held_prompts, [suffix]);
+            assert!(!app.should_quit);
+            assert!(app.shell_block.is_none());
+            assert_eq!(app.agent.history_snapshot()[0].content, "keep history");
+        }
+        std::fs::remove_file(image).unwrap();
+    }
+
+    #[test]
+    fn stale_tool_lifecycle_does_not_change_the_current_turn() {
+        let mut app = session_app();
+        app.on_session_event(SessionEvent::TurnStart);
+        app.on_session_event(SessionEvent::ToolStart { id: 99 });
+        assert!(matches!(
+            app.active.as_ref().unwrap().turn.phase,
+            TurnPhase::Waiting
+        ));
+        app.on_session_event(SessionEvent::ToolBatchStart {
+            calls: vec![crate::core::agent::ToolCallPresentation {
+                id: 2,
+                category: "command".into(),
+                running: "Running".into(),
+                completed: "Ran".into(),
+                target: "current".into(),
+            }],
+        });
+        app.on_session_event(SessionEvent::ToolEnd {
+            id: 99,
+            outcome: crate::core::tools::ToolOutcome::Completed,
+            summary: "late".into(),
+            content: "old output".into(),
+        });
+        let active = app.active.as_ref().unwrap();
+        assert_eq!(active.pending_tools, 1);
+        assert!(matches!(active.turn.phase, TurnPhase::Tool));
+        assert!(app.outputs.is_empty());
+    }
+
+    #[test]
     fn streamed_deltas_append_to_the_active_transcript_block() {
         let mut app = session_app();
         app.on_session_event(SessionEvent::TurnStart);
@@ -3684,16 +3642,6 @@ mod tests {
         app.remember_output("old session".into(), "old detail".into());
         app.rebuild_transcript(&[]);
         assert!(app.outputs.is_empty());
-    }
-
-    #[test]
-    fn stale_compaction_generation_cannot_replace_current_history() {
-        let mut app = session_app();
-        app.compacting = true;
-        app.compaction_epoch = 4;
-        assert!(app.compaction_is_current(4));
-        app.compaction_epoch += 1; // /new, /resume, or /tree invalidated it.
-        assert!(!app.compaction_is_current(4));
     }
 
     fn tool_batch() -> SessionEvent {

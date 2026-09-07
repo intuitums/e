@@ -69,7 +69,7 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
-pub fn report(host: &crate::core::api::ExtensionHost) -> Report {
+pub fn report(host: &crate::core::extensions::ExtensionHost) -> Report {
     let credentials = auth::load();
     let catalog = super::catalog::catalog();
     let mut providers = Vec::new();

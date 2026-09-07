@@ -21,7 +21,7 @@ const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_IMAGE_COUNT: usize = 10;
 const MAX_TOTAL_IMAGE_BYTES: u64 = 40 * 1024 * 1024;
 
-#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, Serialize)]
 pub struct ImageInput {
     pub media_type: String,
     /// Base64 without a data-URL prefix. Sessions retain the bytes so resume
@@ -124,7 +124,7 @@ impl ImageInput {
 }
 
 /// One requested tool invocation, as the model asked for it.
-#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, Serialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -139,7 +139,7 @@ pub struct ToolCall {
 
 /// Presentation metadata persisted beside a tool result, ignored by provider
 /// dialects and used to reconstruct the transcript on resume.
-#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct ToolResultMeta {
     pub outcome: crate::core::tools::ToolOutcome,
     pub summary: String,
@@ -149,33 +149,46 @@ pub struct ToolResultMeta {
 /// session file can answer "where did the time and tokens go" without the
 /// provider. `input` is the request's full context (cached tokens included,
 /// matching the dialects' Usage event), `output` what the step generated.
-#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct MessageUsage {
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
 }
 
-#[derive(Clone, Serialize, serde::Deserialize)]
+/// A conversation record. The tagged payload makes tool results, assistant
+/// calls, and user attachments distinct while retaining the JSONL wire shape.
+#[derive(Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct ChatMessage {
-    pub role: String, // "user" | "assistant" | "tool" | "system"
     pub content: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<ToolCall>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_meta: Option<ToolResultMeta>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub images: Vec<ImageInput>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<MessageUsage>,
-    /// True for harness-authored user-role messages — steering echoes and
-    /// wake continuations. They fill the history but are not user turns
-    /// (the /resume picker's "N turns" excludes them); the flag never
-    /// reaches the provider wire.
-    #[serde(default, skip_serializing_if = "not_internal")]
-    pub internal: bool,
+    #[serde(flatten)]
+    pub kind: MessageKind,
+}
+
+/// Fields that are valid for each message role. Provider-owned reasoning
+/// remains opaque and is replayed only by the dialect that recognizes it.
+#[derive(Clone, PartialEq, Serialize, serde::Deserialize)]
+#[serde(tag = "role", rename_all = "lowercase")]
+pub enum MessageKind {
+    User {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageInput>,
+        #[serde(default, skip_serializing_if = "not_internal")]
+        internal: bool,
+    },
+    Assistant {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_calls: Vec<ToolCall>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<MessageUsage>,
+    },
+    Tool {
+        tool_call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_meta: Option<ToolResultMeta>,
+    },
+    Reasoning,
+    System,
 }
 
 fn not_internal(internal: &bool) -> bool {
@@ -183,88 +196,132 @@ fn not_internal(internal: &bool) -> bool {
 }
 
 impl ChatMessage {
+    /// A user instruction without attachments.
     pub fn user(content: impl Into<String>) -> Self {
-        ChatMessage {
-            role: "user".into(),
+        Self::user_with_images(content, Vec::new())
+    }
+
+    /// A user instruction with persisted image bytes.
+    pub fn user_with_images(content: impl Into<String>, images: Vec<ImageInput>) -> Self {
+        Self {
             content: content.into(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_meta: None,
-            images: Vec::new(),
-            usage: None,
-            internal: false,
-        }
-    }
-    pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
-        ChatMessage {
-            role: "assistant".into(),
-            content: content.into(),
-            tool_calls,
-            tool_call_id: None,
-            tool_meta: None,
-            images: Vec::new(),
-            usage: None,
-            internal: false,
-        }
-    }
-    /// Attach the step's real usage — the agent commits assistant turns with
-    /// it so the session file carries token accounting, not just text.
-    pub fn with_usage(mut self, usage: MessageUsage) -> Self {
-        self.usage = Some(usage);
-        self
-    }
-    /// A dialect-owned reasoning item (signed thinking block, Responses
-    /// reasoning JSON) that must replay ahead of its assistant turn.
-    pub fn reasoning(item: impl Into<String>) -> Self {
-        ChatMessage {
-            role: "reasoning".into(),
-            content: item.into(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_meta: None,
-            images: Vec::new(),
-            usage: None,
-            internal: false,
-        }
-    }
-    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
-        ChatMessage {
-            role: "tool".into(),
-            content: content.into(),
-            tool_calls: Vec::new(),
-            tool_call_id: Some(call_id.into()),
-            tool_meta: None,
-            images: Vec::new(),
-            usage: None,
-            internal: false,
+            kind: MessageKind::User {
+                images,
+                internal: false,
+            },
         }
     }
 
+    /// A model reply and the tool calls issued in that same response.
+    pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            content: content.into(),
+            kind: MessageKind::Assistant {
+                tool_calls,
+                usage: None,
+            },
+        }
+    }
+
+    /// Opaque signed or encrypted state, replayed by its provider dialect.
+    pub fn reasoning(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            kind: MessageKind::Reasoning,
+        }
+    }
+
+    /// A tool result linked to the assistant call that requested it.
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            kind: MessageKind::Tool {
+                tool_call_id: call_id.into(),
+                tool_meta: None,
+            },
+        }
+    }
+
+    /// A tool result with the presentation metadata needed for session replay.
     pub fn tool_result_with_meta(
         call_id: impl Into<String>,
         content: impl Into<String>,
         outcome: crate::core::tools::ToolOutcome,
         summary: impl Into<String>,
     ) -> Self {
-        ChatMessage {
-            role: "tool".into(),
+        Self {
             content: content.into(),
-            tool_calls: Vec::new(),
-            tool_call_id: Some(call_id.into()),
-            tool_meta: Some(ToolResultMeta {
-                outcome,
-                summary: summary.into(),
-            }),
-            images: Vec::new(),
-            usage: None,
-            internal: false,
+            kind: MessageKind::Tool {
+                tool_call_id: call_id.into(),
+                tool_meta: Some(ToolResultMeta {
+                    outcome,
+                    summary: summary.into(),
+                }),
+            },
         }
     }
 
-    pub fn user_with_images(content: impl Into<String>, images: Vec<ImageInput>) -> Self {
-        let mut message = Self::user(content);
-        message.images = images;
-        message
+    /// Attach provider accounting to an assistant record.
+    pub fn with_usage(mut self, observed: MessageUsage) -> Self {
+        if let MessageKind::Assistant { usage, .. } = &mut self.kind {
+            *usage = Some(observed);
+        }
+        self
+    }
+
+    /// Mark a continuation or steering echo without counting a new user turn.
+    pub fn mark_internal(&mut self) {
+        if let MessageKind::User { internal, .. } = &mut self.kind {
+            *internal = true;
+        }
+    }
+
+    /// Whether the record is a continuation or steering echo.
+    pub fn is_internal(&self) -> bool {
+        matches!(self.kind, MessageKind::User { internal: true, .. })
+    }
+
+    /// The stable persisted role name for this typed payload.
+    pub fn role(&self) -> &'static str {
+        match self.kind {
+            MessageKind::User { .. } => "user",
+            MessageKind::Assistant { .. } => "assistant",
+            MessageKind::Tool { .. } => "tool",
+            MessageKind::Reasoning => "reasoning",
+            MessageKind::System => "system",
+        }
+    }
+
+    /// Calls issued by an assistant, or an empty slice for other records.
+    pub fn tool_calls(&self) -> &[ToolCall] {
+        match &self.kind {
+            MessageKind::Assistant { tool_calls, .. } => tool_calls,
+            _ => &[],
+        }
+    }
+
+    /// The associated call id, present only on tool results.
+    pub fn tool_call_id(&self) -> Option<&String> {
+        match &self.kind {
+            MessageKind::Tool { tool_call_id, .. } => Some(tool_call_id),
+            _ => None,
+        }
+    }
+
+    /// Optional display information recorded with a tool result.
+    pub fn tool_meta(&self) -> Option<&ToolResultMeta> {
+        match &self.kind {
+            MessageKind::Tool { tool_meta, .. } => tool_meta.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// User attachments, or an empty slice for other records.
+    pub fn images(&self) -> &[ImageInput] {
+        match &self.kind {
+            MessageKind::User { images, .. } => images,
+            _ => &[],
+        }
     }
 }
 
@@ -282,11 +339,13 @@ pub fn strip_incompatible_images(messages: &mut [ChatMessage], model: &Model) {
         return;
     }
     for message in messages.iter_mut() {
-        if message.images.is_empty() {
+        if message.images().is_empty() {
             continue;
         }
-        let count = message.images.len();
-        message.images.clear();
+        let count = message.images().len();
+        if let MessageKind::User { images, .. } = &mut message.kind {
+            images.clear();
+        }
         message.content.push_str(&format!(
             "\n\n[{count} image{} omitted: {} is not declared image-capable]",
             if count == 1 { "" } else { "s" },
@@ -700,7 +759,8 @@ pub fn with_attribution(
 /// aborts the request (esc).
 pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(64);
-    let handle = tokio::spawn(async move {
+    let home = crate::core::config::home::home();
+    let handle = tokio::spawn(crate::core::config::home::scope(home, async move {
         let result = match runtime::authorize(&request.model).await {
             Ok(authorization) => match request.model.api {
                 Api::Completions => api::completions::run(&request, &authorization, &tx).await,
@@ -718,7 +778,7 @@ pub fn stream(request: Request) -> (mpsc::Receiver<Event>, tokio::task::JoinHand
                 let _ = tx.send(Event::Error(err)).await;
             }
         }
-    });
+    }));
     (rx, handle)
 }
 
@@ -920,11 +980,13 @@ fn skip_separator(buf: &[u8], pos: usize) -> usize {
     }
 }
 
-/// The shared client: one pool for every request, so connections (and their
+/// The shared provider/auth client: one pool, so connections (and their
 /// TLS handshakes) are reused across turns and tool steps. Connect is bounded;
 /// the overall request is not — a live SSE stream can run for minutes. The
 /// wait for response headers is bounded in `send_request`, idle bodies
 /// per-chunk in `next_sse_chunk`.
+/// Redirects are disabled: custom credential headers and private bodies must
+/// stay at the configured endpoint. Release downloads use a separate client.
 ///
 /// A failed build (the TLS backend cannot initialize) is an environment
 /// state, not a code bug, so it surfaces as a network error at the point of
@@ -941,6 +1003,9 @@ pub fn http() -> Result<&'static reqwest::Client, ProviderError> {
 /// so the glue is testable without touching process-global state.
 fn build_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
+        // Credentials in custom headers and request bodies must never be
+        // forwarded to a redirect target. Downloads use their own client.
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(format!("e/{}", crate::VERSION))
         .connect_timeout(std::time::Duration::from_secs(30))
         // After a system sleep, pooled connections are dead but look
@@ -1250,9 +1315,9 @@ mod tests {
             ),
         ];
         strip_incompatible_images(&mut messages, &image_incapable_model());
-        assert!(messages[0].images.is_empty());
+        assert!(messages[0].images().is_empty());
         assert_eq!(messages[0].content, "plain text, no images");
-        assert!(messages[1].images.is_empty(), "the image must be removed");
+        assert!(messages[1].images().is_empty(), "the image must be removed");
         assert!(
             messages[1]
                 .content
@@ -1275,7 +1340,7 @@ mod tests {
         )];
         strip_incompatible_images(&mut messages, &model);
         assert_eq!(
-            messages[0].images.len(),
+            messages[0].images().len(),
             1,
             "capable models keep their images"
         );

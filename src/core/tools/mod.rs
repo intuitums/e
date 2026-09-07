@@ -14,6 +14,19 @@ mod diffview;
 mod edit;
 mod fs;
 
+/// Mutable tool state owned by one agent. File observations and background
+/// handles must not leak between independent conversations in one process.
+#[derive(Default)]
+pub struct ToolRuntime {
+    seen: std::sync::Mutex<std::collections::HashMap<PathBuf, (std::time::SystemTime, u64)>>,
+    background: std::sync::Arc<bash::BackgroundRegistry>,
+}
+
+fn default_runtime() -> &'static ToolRuntime {
+    static RUNTIME: std::sync::OnceLock<ToolRuntime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(ToolRuntime::default)
+}
+
 /// Terminal state of one tool execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -217,7 +230,7 @@ struct Spec {
     /// Project the transcript target out of the call arguments.
     target: fn(&Value) -> String,
     schema: fn() -> Value,
-    run: fn(&Value, &Path) -> ToolOutput,
+    run: fn(&Value, &Path, &ToolRuntime) -> ToolOutput,
 }
 
 static SPECS: &[Spec] = &[
@@ -304,40 +317,57 @@ pub fn run_streaming<F>(
 where
     F: FnMut(OutputStream, &str),
 {
-    // Broken argument JSON must be reported as exactly that: falling back to
-    // Null made every tool answer "missing <param>", sending the model off to
-    // fix a parameter it did send instead of the JSON framing it broke.
-    let args: Value = match serde_json::from_str(arguments) {
-        Ok(v) => v,
-        Err(_) if arguments.trim().is_empty() => Value::Null,
-        Err(e) => {
-            return ToolOutput {
-                content: format!("tool arguments were not valid JSON: {e}"),
-                outcome: ToolOutcome::Failed,
-                summary: "bad arguments".into(),
-                display: None,
+    default_runtime().run_streaming(name, arguments, cwd, cancel, on_output)
+}
+
+impl ToolRuntime {
+    /// Execute a call using only this agent's file observations and handles.
+    pub fn run_streaming<F>(
+        &self,
+        name: &str,
+        arguments: &str,
+        cwd: &Path,
+        cancel: &std::sync::atomic::AtomicBool,
+        on_output: F,
+    ) -> ToolOutput
+    where
+        F: FnMut(OutputStream, &str),
+    {
+        // Broken argument JSON must be reported as exactly that: falling back to
+        // Null made every tool answer "missing <param>", sending the model off to
+        // fix a parameter it did send instead of the JSON framing it broke.
+        let args: Value = match serde_json::from_str(arguments) {
+            Ok(v) => v,
+            Err(_) if arguments.trim().is_empty() => Value::Null,
+            Err(e) => {
+                return ToolOutput {
+                    content: format!("tool arguments were not valid JSON: {e}"),
+                    outcome: ToolOutcome::Failed,
+                    summary: "bad arguments".into(),
+                    display: None,
+                }
             }
-        }
-    };
-    if name == "bash" {
-        return bash::run_streaming(&args, cwd, cancel, on_output);
-    }
-    if cancel.load(std::sync::atomic::Ordering::SeqCst) {
-        return ToolOutput {
-            content: "tool cancelled".into(),
-            outcome: ToolOutcome::Cancelled,
-            summary: "cancelled".into(),
-            display: None,
         };
-    }
-    match SPECS.iter().find(|s| s.name == name) {
-        Some(spec) => (spec.run)(&args, cwd),
-        None => ToolOutput {
-            content: format!("unknown tool: {name}"),
-            outcome: ToolOutcome::Failed,
-            summary: "unknown".into(),
-            display: None,
-        },
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return ToolOutput {
+                content: "tool cancelled".into(),
+                outcome: ToolOutcome::Cancelled,
+                summary: "cancelled".into(),
+                display: None,
+            };
+        }
+        if name == "bash" {
+            return bash::run_streaming(&args, cwd, self, cancel, on_output);
+        }
+        match SPECS.iter().find(|s| s.name == name) {
+            Some(spec) => (spec.run)(&args, cwd, self),
+            None => ToolOutput {
+                content: format!("unknown tool: {name}"),
+                outcome: ToolOutcome::Failed,
+                summary: "unknown".into(),
+                display: None,
+            },
+        }
     }
 }
 
@@ -414,7 +444,98 @@ pub fn sanitize_display(text: &str) -> String {
 }
 
 fn sanitize_inline(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    sanitize_display(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Stage bytes before updating a file. Existing inodes retain metadata and
+/// aliases; a failure while copying staged bytes can leave a partial update.
+fn staged_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    staged_replace(path, |file| file.write_all(content))
+}
+
+/// Stage a replacement before committing it. The writer seam lets tests
+/// inject a partial write failure without depending on disk exhaustion.
+fn staged_replace(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    // A dangling symlink has no canonical target. Refuse it rather than
+    // replacing the link itself with an ordinary file.
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        path.canonicalize()?;
+    }
+    let target = stable_path_key(path);
+    let mut existing = match std::fs::OpenOptions::new().write(true).open(&target) {
+        Ok(file) => Some(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let metadata = existing.as_ref().map(std::fs::File::metadata).transpose()?;
+    if metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.permissions().readonly())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "file is read-only",
+        ));
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| std::io::Error::other("file has no parent"))?;
+    let temporary = parent.join(format!(".e-write-{}", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(if metadata.is_some() { 0o600 } else { 0o666 });
+    }
+    let mut file = options.open(&temporary)?;
+    let result = (|| {
+        write(&mut file)?;
+        file.sync_all()?;
+        if let Some(existing) = existing.as_mut() {
+            use std::io::Seek;
+            #[cfg(unix)]
+            verify_target_identity(existing, &target)?;
+            file.rewind()?;
+            let length = std::io::copy(&mut file, existing)?;
+            existing.set_len(length)?;
+            existing.sync_all()?;
+            #[cfg(unix)]
+            verify_target_identity(existing, &target)?;
+        } else {
+            // Publish without overwriting a file created during staging.
+            std::fs::hard_link(&temporary, &target)?;
+        }
+        std::fs::remove_file(&temporary)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// Refuse a pathname that was removed or replaced while its inode was open.
+#[cfg(unix)]
+fn verify_target_identity(file: &std::fs::File, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let opened = file.metadata()?;
+    let current = std::fs::metadata(target)?;
+    if (opened.dev(), opened.ino()) != (current.dev(), current.ino()) {
+        return Err(std::io::Error::other(
+            "file was replaced during write; read it again before retrying",
+        ));
+    }
+    Ok(())
 }
 
 /// Serializes the mutating filesystem tools' read-modify-write windows per
@@ -474,16 +595,7 @@ fn require_regular_file(path: &Path, tool: &str, shown: &str) -> Result<(), Tool
     }
 }
 
-/// The state of each file as e last saw it (after a read, write, or edit),
-/// keyed by canonical path. `edit` and `write` check against it so a file
-/// that changed under them — a user's editor, a bash `sed -i`, another
-/// process — fails with "changed on disk" instead of silently clobbering
-/// work built on a stale copy. A file e never saw carries no record and
-/// passes: the guard catches staleness, it does not impose read-before-edit.
-static FS_SEEN: std::sync::Mutex<
-    Option<std::collections::HashMap<PathBuf, (std::time::SystemTime, u64)>>,
-> = std::sync::Mutex::new(None);
-
+/// Metadata paired with a successful read or mutation in this tool runtime.
 fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.modified().ok()?, meta.len()))
@@ -493,7 +605,7 @@ fn freshness_key(path: &Path) -> PathBuf {
     stable_path_key(path)
 }
 
-fn stable_path_key(path: &Path) -> PathBuf {
+pub(crate) fn stable_path_key(path: &Path) -> PathBuf {
     let mut cursor = path;
     let mut tail = Vec::new();
     loop {
@@ -515,25 +627,28 @@ fn stable_path_key(path: &Path) -> PathBuf {
 }
 
 /// Record the file's current on-disk state as the one e has seen.
-fn note_seen(path: &Path) {
+fn note_seen(state: &ToolRuntime, path: &Path) {
     let Some(stamp) = file_stamp(path) else {
         return;
     };
-    note_seen_stamp(path, stamp);
+    note_seen_stamp(state, path, stamp);
 }
 
-fn note_seen_stamp(path: &Path, stamp: (std::time::SystemTime, u64)) {
-    let mut seen = FS_SEEN.lock().unwrap_or_else(|p| p.into_inner());
-    seen.get_or_insert_with(Default::default)
-        .insert(freshness_key(path), stamp);
+fn note_seen_stamp(state: &ToolRuntime, path: &Path, stamp: (std::time::SystemTime, u64)) {
+    let mut seen = state.seen.lock().unwrap_or_else(|p| p.into_inner());
+    seen.insert(freshness_key(path), stamp);
 }
 
 /// Fail when a recorded file changed on disk since e last saw it.
-fn check_fresh(path: &Path, tool: &str, shown: &str) -> Result<(), ToolOutput> {
+fn check_fresh(
+    state: &ToolRuntime,
+    path: &Path,
+    tool: &str,
+    shown: &str,
+) -> Result<(), ToolOutput> {
     let recorded = {
-        let seen = FS_SEEN.lock().unwrap_or_else(|p| p.into_inner());
-        seen.as_ref()
-            .and_then(|s| s.get(&freshness_key(path)).copied())
+        let seen = state.seen.lock().unwrap_or_else(|p| p.into_inner());
+        seen.get(&freshness_key(path)).copied()
     };
     let Some(recorded) = recorded else {
         return Ok(());
@@ -682,5 +797,136 @@ mod tests {
             assert_eq!(expected, stable_path_key(&root.join("alias/new.txt")));
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn partial_staging_failure_preserves_the_original() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("e-atomic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        std::fs::write(&path, "original").unwrap();
+        let result = super::staged_replace(&path, |file| {
+            file.write_all(b"partial")?;
+            Err(std::io::Error::other("injected disk failure"))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_write_rejects_a_target_replaced_during_staging() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("e-write-replaced-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("file");
+        let alias = dir.join("original");
+        let replacement = dir.join("replacement");
+        std::fs::write(&target, "original").unwrap();
+        std::fs::hard_link(&target, &alias).unwrap();
+        let result = super::staged_replace(&target, |file| {
+            std::fs::write(&replacement, "other writer")?;
+            std::fs::rename(&replacement, &target)?;
+            file.write_all(b"new")
+        });
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("replaced during write"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "other writer");
+        assert_eq!(std::fs::read_to_string(&alias).unwrap(), "original");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_write_preserves_links_created_during_staging() {
+        use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("e-write-links-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        let alias = dir.join("alias");
+        std::fs::write(&path, "original content").unwrap();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        super::staged_replace(&path, |file| {
+            std::fs::hard_link(&path, &alias)?;
+            file.write_all(b"new")
+        })
+        .unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(std::fs::read(&alias).unwrap(), b"new");
+        super::staged_write(&path, b"again").unwrap();
+        assert_eq!(std::fs::read(&alias).unwrap(), b"again");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn staged_write_preserves_extended_attributes() {
+        let path = std::env::temp_dir().join(format!("e-write-xattr-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "old").unwrap();
+        assert!(std::process::Command::new("xattr")
+            .args(["-w", "user.e-test", "metadata"])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        super::staged_write(&path, b"new").unwrap();
+        let result = std::process::Command::new("xattr")
+            .args(["-p", "user.e-test"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), "metadata");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn staged_creation_does_not_overwrite_a_concurrently_created_file() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("e-write-create-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        let result = super::staged_replace(&path, |file| {
+            std::fs::write(&path, "other writer")?;
+            file.write_all(b"new")
+        });
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "other writer");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_replacement_preserves_symlink_and_target_mode() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("e-atomic-link-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        let alias = dir.join("alias");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o751)).unwrap();
+        symlink("target", &alias).unwrap();
+        super::staged_write(&alias, b"new").unwrap();
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o751
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

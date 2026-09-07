@@ -129,6 +129,35 @@ fn rpc_saved_turn_returns_its_transcript_path() {
     );
 }
 
+#[test]
+fn rpc_waits_for_the_answer_after_automatic_compaction() {
+    let _lock = env_lock();
+    let home = Home::new("rpc-compaction");
+    let arguments = serde_json::json!({"path":home.dir.join("large.txt")}).to_string();
+    let call = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"read-1","function":{"name":"read","arguments":arguments}}]}}],"usage":{"prompt_tokens":25000,"completion_tokens":10}});
+    let first = format!("data: {call}\n\ndata: [DONE]\n\n");
+    let summary = "data: {\"choices\":[{\"delta\":{\"content\":\"File read; answer the original task.\"}}]}\n\ndata: [DONE]\n\n";
+    let (port, server) = serve_sse(&[&first, summary, OK_STREAM]);
+    home.auth(r#"{"mock":{"key":"k"}}"#);
+    home.write("models.json", format!(r#"{{"providers":{{"mock":{{"base_url":"http://127.0.0.1:{port}","api":"completions","models":[{{"id":"test","context_window":32000}}]}}}}}}"#));
+    home.write("large.txt", "execution details\n".repeat(8_000));
+    let prompt = format!(
+        "Read {} and report completion",
+        home.dir.join("large.txt").display()
+    );
+    let output = run_rpc(
+        &home,
+        &format!(
+            "{}\n",
+            serde_json::json!({"id":1,"prompt":prompt,"model":"mock/test"})
+        ),
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert!(response["error"].is_null(), "{response}");
+    assert_eq!(response["final_output"], "ok");
+    assert_eq!(server.join().unwrap().len(), 3);
+}
+
 /// The subagent watchdog sends SIGTERM to its `e rpc` child. RPC must kill
 /// the active bash process group before exiting, or a detached grandchild can
 /// wake later and keep changing the workspace.

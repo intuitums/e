@@ -434,7 +434,7 @@ async fn queue_review_edits_survive_concurrent_drain() {
         }
     }
     assert_eq!(steered, vec!["edited".to_string(), "late".to_string()]);
-    assert_eq!(agent.on_turn_end(), Vec::<String>::new());
+    assert!(!agent.is_streaming());
 
     // An edit keyed to an entry the turn already drained submits fresh —
     // the user's edited intent, not a resurrection of the original.
@@ -720,10 +720,10 @@ async fn a_sleep_under_the_window_resumes_over_the_committed_partial() {
     );
     // History is honest: partial reply, continuation message, completion.
     let history = agent.history_snapshot();
-    let user_messages = history.iter().filter(|m| m.role == "user").count();
+    let user_messages = history.iter().filter(|m| m.role() == "user").count();
     let partial = history
         .iter()
-        .any(|m| m.role == "assistant" && m.content.contains("half a reply"));
+        .any(|m| m.role() == "assistant" && m.content.contains("half a reply"));
     assert!(partial, "the watched partial stays in history");
     assert!(user_messages >= 2, "the continuation is a real user turn");
 }

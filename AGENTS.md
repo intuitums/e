@@ -20,13 +20,13 @@ test.
 
 ```
 src/core/    the harness, terminal-free
-  agent/          the turn loop (mod.rs): request → stream → run tools → repeat;
-                  steering · compact.rs (threshold, keep-recent cut, summarize)
+  agent/          mod.rs owns run lifecycle and session state;
+                  turn.rs: request → stream → tools → compact when needed → repeat;
+                  compact.rs (threshold, protected instructions, summarize)
                   · context.rs (system prompt, AGENTS.md, skills catalog)
   providers/      the seam (mod.rs) — one Request, one Event stream, the SSE
-                  splitter · openai_completions.rs · openai_responses.rs ·
-                  anthropic.rs · google.rs (the four wire dialects) ·
-                  registry.rs + registry/*.json (providers are data: gateway,
+                  splitter · api/{completions,responses,anthropic,google}.rs ·
+                  registry.rs + data/*.json (providers are data: gateway,
                   dialect, auth surface, seed models) · catalog/ (assembly,
                   availability, scope; remote.rs = the live /models sync)
   auth/           credentials (mod.rs) · login.rs (OAuth, device-code, API keys)
@@ -35,14 +35,14 @@ src/core/    the harness, terminal-free
                   keybindings.rs (composer chord overrides)
   resources/      skills.rs · prompts.rs (/name templates) · docs.rs (the
                   embedded guides behind `e docs`)
-  api/            the extension host: subprocesses over a JSONL line
+  extensions/     the extension host: subprocesses over a JSONL line
                   protocol (docs/extensions.md) — tools, commands, hooks
   tools/          read · write · edit · grep (optional `glob` filter) · bash
                   (optional `background`/`handle` for long-lived processes)
                   — the whole surface; directory listing and file-finding go
                   through bash, and skills load through read (the catalog
                   carries their paths)
-  session.rs · output.rs · workspace.rs — session.rs is a tree, not just a
+  session.rs · output.rs · workspace.rs — SessionLog is a tree, not just a
                   line: id/parent per message, `/tree` branches in place
 src/tui/     the frontend (short paths re-export from the groups)
   paint/          render · screen · theme · background · highlight
@@ -51,7 +51,7 @@ src/tui/     the frontend (short paths re-export from the groups)
   app/            mod.rs (App state, keys, the frame loop) · events.rs
                   (session-event handling) · menus.rs (footer menus) ·
                   login.rs (sign-in flows)
-src/main.rs  CLI entry — flags, ask/docs/auth/update, then tui::app::run
+src/main.rs  CLI entry — flags, rpc/docs/auth/update, then tui::app::run
 ```
 
 ## Running one thing, not everything
@@ -60,7 +60,7 @@ Each `tests/*.rs` file is its own binary; the fast loops are:
 
 ```sh
 cargo test --test stream            # agent turn loop against a mock provider
-cargo test --test providers         # the three wire dialects' request/stream shapes
+cargo test --test providers         # the four wire dialects' request/stream shapes
 cargo test --test parity            # byte-pinned rendering (run after any look change)
 cargo test --test toolloop          # end-to-end tool execution
 cargo test name_of_one_test         # any single test, by name substring
@@ -95,7 +95,8 @@ surface? Route it through `panel.rs` so it can't diverge.
 ## Conventions
 
 - One event stream. The frontend subscribes once; text, tools, usage, errors all
-  arrive on it in order (`SessionEvent`). Don't add side channels.
+  arrive on it in order (`SessionEvent`). Compaction and continuation belong
+  to the core. Frontends never reset running state or resubmit stranded prompts.
 - Keep the harness small. Prefer a spawned process over a daemon and a gate
   over a pipeline. Add complexity only when the feature requires it.
 - `~/.e/` is the only home e reads. Never reach into another tool's directory.
@@ -104,7 +105,7 @@ surface? Route it through `panel.rs` so it can't diverge.
   themes from `~/.e/themes/`, and skills, prompts, instructions, the system
   prompt the same way. When you add something user-facing, make it a file-backed
   override, not a constant. When data isn't enough there is the extension API
-  (`core/api/`, docs/extensions.md) — grow its protocol by need, never by
+  (`core/extensions/`, docs/extensions.md) — grow its protocol by need, never by
   symmetry, and keep hooks fail-open.
 - Verify UI changes with a real frame, not by reasoning about bytes. `scripts/`
   has a pty capture-and-replay harness; that is how the look gets checked.
