@@ -155,6 +155,65 @@ fn nodes_reject_corruption_on_an_inactive_branch() {
 }
 
 #[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn cancellation_does_not_launch_later_tool_waves() {
+    let _lock = env_lock();
+    let home = Home::new("review-cancel-waves");
+    home.auth(r#"{"mock":{"key":"test"}}"#);
+    home.write("settings.json", r#"{"tool_concurrency":1}"#);
+    let first = batch(vec![
+        call(0, "bash", json!({"command":"printf ready; sleep 30"})),
+        call(
+            1,
+            "bash",
+            json!({"command":"touch must-not-exist", "background":true}),
+        ),
+    ]);
+    let (port, server) = serve_sse(&[&first]);
+    let (mut agent, mut events) = Agent::with_options(
+        test_model("mock", port, Api::Completions),
+        AgentOptions {
+            home: Some(home.dir.clone()),
+            cwd: Some(home.dir.clone()),
+            save_session: false,
+            ..AgentOptions::default()
+        },
+    );
+    agent.submit("run".into(), "system".into());
+    let mut started = Vec::new();
+    let mut interrupted = false;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = events.recv().await {
+            match event {
+                SessionEvent::ToolStart { id } => started.push(id),
+                SessionEvent::ToolOutput { .. } => {
+                    agent.interrupt();
+                    interrupted = true;
+                }
+                SessionEvent::TurnEnd { aborted } => {
+                    assert!(aborted);
+                    break;
+                }
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(interrupted);
+    assert_eq!(started, [1]);
+    let history = agent.history_snapshot();
+    let unstarted = history
+        .iter()
+        .find(|message| message.tool_call_id().is_some_and(|id| id == "c1"))
+        .unwrap();
+    assert_eq!(unstarted.content, "tool cancelled before execution");
+    assert!(!home.dir.join("must-not-exist").exists());
+    server.join().unwrap();
+}
+
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn oversized_usage_reaches_the_context_guard_without_overflowing() {
     let _lock = env_lock();

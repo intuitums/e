@@ -1231,7 +1231,7 @@ impl App {
                         "{} does not accept image input — sending the text without the screenshot",
                         model::slug(&self.agent.model)
                     ));
-                    self.submit_direct(prompt.to_string());
+                    self.prompt(prompt.to_string());
                 }
                 return;
             }
@@ -3528,6 +3528,58 @@ mod tests {
 
         assert!(app.queue_review.is_none());
         assert!(app.editor.is_empty());
+    }
+
+    #[test]
+    fn rejected_image_suffixes_remain_literal_prompts() {
+        let image =
+            std::env::temp_dir().join(format!("e-image-command-{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&image, b"image placeholder").unwrap();
+        for suffix in ["/new", "/quit", "!touch should-not-run"] {
+            let mut app = session_app();
+            app.agent
+                .load_history(vec![crate::core::providers::ChatMessage::user(
+                    "keep history",
+                )]);
+            // Hold literal prompts locally without starting a provider request.
+            app.reloading = true;
+            app.submit_direct(format!("{} {suffix}", image.display()));
+            assert_eq!(app.held_prompts, [suffix]);
+            assert!(!app.should_quit);
+            assert!(app.shell_block.is_none());
+            assert_eq!(app.agent.history_snapshot()[0].content, "keep history");
+        }
+        std::fs::remove_file(image).unwrap();
+    }
+
+    #[test]
+    fn stale_tool_lifecycle_does_not_change_the_current_turn() {
+        let mut app = session_app();
+        app.on_session_event(SessionEvent::TurnStart);
+        app.on_session_event(SessionEvent::ToolStart { id: 99 });
+        assert!(matches!(
+            app.active.as_ref().unwrap().turn.phase,
+            TurnPhase::Waiting
+        ));
+        app.on_session_event(SessionEvent::ToolBatchStart {
+            calls: vec![crate::core::agent::ToolCallPresentation {
+                id: 2,
+                category: "command".into(),
+                running: "Running".into(),
+                completed: "Ran".into(),
+                target: "current".into(),
+            }],
+        });
+        app.on_session_event(SessionEvent::ToolEnd {
+            id: 99,
+            outcome: crate::core::tools::ToolOutcome::Completed,
+            summary: "late".into(),
+            content: "old output".into(),
+        });
+        let active = app.active.as_ref().unwrap();
+        assert_eq!(active.pending_tools, 1);
+        assert!(matches!(active.turn.phase, TurnPhase::Tool));
+        assert!(app.outputs.is_empty());
     }
 
     #[test]

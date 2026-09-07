@@ -18,6 +18,10 @@ defaults to 8 and accepts values from 1 to 64. Calls naming the same file run
 in provider order, including symlinks and Unix hard links. Bash and extension
 tools have opaque effects; dependent commands should be sent in separate
 batches or combined into one command.
+Cancellation skips waves that have not started and records their calls as
+cancelled. A checkpoint is installed only if its source history still matches;
+messages committed during summarization are preserved and compaction reports
+an error instead of replacing them with a stale summary.
 
 ```json
 {"id":"one","prompt":"summarize this repository","model":"openai/gpt-5.5","effort":"high","tool_mode":"none","save":false,"images":[]}

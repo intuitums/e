@@ -56,6 +56,9 @@ targets, hard-link aliases, ACLs, and extended attributes. Staging failures
 leave the original intact; an I/O failure during the in-place copy can leave
 a partial update. New files are published without overwriting a concurrent
 creator. On Unix, the parent directory is synced before success is reported.
+Unix writes also check that the target still names the opened inode before
+and after copying. A detected external replacement fails the write so the
+caller can reread and retry; external writers still need their own coordination.
 
 ## Not a supported contract
 

@@ -128,8 +128,8 @@ impl App {
             }
             SessionEvent::ToolStart { id } => {
                 if let Some(s) = &mut self.active {
-                    s.turn.phase = TurnPhase::Tool;
                     if let Some(&idx) = s.tool_blocks.get(&id) {
+                        s.turn.phase = TurnPhase::Tool;
                         if let Some(block) = self.transcript.blocks.get_mut(idx) {
                             block.start_tool(id);
                         }
@@ -156,6 +156,15 @@ impl App {
                 summary,
                 content,
             } => {
+                // Detached tools can finish after a new turn has started.
+                // Their events must not change that turn or its saved outputs.
+                if !self
+                    .active
+                    .as_ref()
+                    .is_some_and(|s| s.tool_blocks.contains_key(&id))
+                {
+                    return;
+                }
                 let mut title = None;
                 if let Some(s) = &mut self.active {
                     if let Some(&idx) = s.tool_blocks.get(&id) {

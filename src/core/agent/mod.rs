@@ -84,10 +84,9 @@ impl TurnLog {
     }
 
     fn append_inner(&self, message: ChatMessage) -> std::io::Result<()> {
-        self.history
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(message.clone());
+        // Keep the history/session commit together relative to checkpoint swaps.
+        let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        history.push(message.clone());
         if !self.save_session {
             return Ok(());
         }
@@ -123,9 +122,16 @@ impl TurnLog {
     /// resumes into the complete pre-compaction conversation instead of a
     /// new file holding only an unanchored tail. Blocking session I/O —
     /// callers run it off the async task (`Agent::load_compacted`).
-    fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>, cancel: &AtomicBool) -> bool {
+    /// Installation requires the exact history supplied in `expected`.
+    fn load_compacted(
+        &self,
+        summary: &str,
+        kept: Vec<ChatMessage>,
+        cancel: &AtomicBool,
+        expected: &[ChatMessage],
+    ) -> bool {
         crate::core::config::home::with_home(self.home.clone(), || {
-            self.install_compacted(summary, kept, cancel)
+            self.install_compacted(summary, kept, cancel, expected)
         })
     }
 
@@ -135,23 +141,23 @@ impl TurnLog {
         summary: &str,
         kept: Vec<ChatMessage>,
         cancel: &AtomicBool,
+        expected: &[ChatMessage],
     ) -> bool {
         let seed_message = ChatMessage::user(crate::core::agent::compact::seed(summary));
         let mut fresh_history = Vec::with_capacity(kept.len() + 1);
         fresh_history.push(seed_message.clone());
         fresh_history.extend(kept);
 
-        if !self.save_session {
-            let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
-            if cancel.load(Ordering::SeqCst) {
-                return false;
-            }
-            *history = fresh_history;
-            return true;
-        }
-
         // Same lock order as `commit`: history before session.
         let mut history_guard = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        // A summary only describes its snapshot. Concurrent commits must survive.
+        if cancel.load(Ordering::SeqCst) || expected != history_guard.as_slice() {
+            return false;
+        }
+        if !self.save_session {
+            *history_guard = fresh_history;
+            return true;
+        }
         let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
         let result = match SessionLog::create(&self.cwd, &slug(&self.model)) {
             Ok(mut created) => {
@@ -245,7 +251,11 @@ async fn compact_log(
     if older.is_empty() {
         return Ok(false);
     }
-    let _ = log.events.send(SessionEvent::Compacting).await;
+    tokio::select! {
+        biased;
+        _ = wait_cancelled(cancel) => return Err("compaction cancelled; history was preserved".into()),
+        _ = log.events.send(SessionEvent::Compacting) => {}
+    }
     let session_id = log
         .session
         .lock()
@@ -272,7 +282,7 @@ async fn compact_log(
     let checkpoint = summary.clone();
     let installation_cancel = cancel.clone();
     let installed = tokio::task::spawn_blocking(move || {
-        writer.load_compacted(&checkpoint, kept, &installation_cancel)
+        writer.load_compacted(&checkpoint, kept, &installation_cancel, &history)
     })
     .await
     .map_err(|error| format!("compaction commit failed: {error}"))?;
@@ -280,7 +290,7 @@ async fn compact_log(
         if cancel.load(Ordering::SeqCst) {
             return Err("compaction cancelled; history was preserved".into());
         }
-        return Err("compaction could not be saved; history was preserved".into());
+        return Err("compaction could not be installed; history changed or could not be saved; history was preserved".into());
     }
     let _ = log
         .events
@@ -738,8 +748,9 @@ impl Agent {
     pub async fn load_compacted(&self, summary: &str, kept: Vec<ChatMessage>) -> bool {
         let log = self.log();
         let summary = summary.to_string();
+        let expected = self.history_snapshot();
         tokio::task::spawn_blocking(move || {
-            log.load_compacted(&summary, kept, &AtomicBool::new(false))
+            log.load_compacted(&summary, kept, &AtomicBool::new(false), &expected)
         })
         .await
         .unwrap_or(false)
@@ -1072,6 +1083,14 @@ async fn run_tool(context: ToolRunContext, name: &str, arguments: &str) -> tools
         id,
         events,
     } = context;
+    if cancel.load(Ordering::SeqCst) {
+        return tools::ToolOutput {
+            content: "tool cancelled before execution".into(),
+            outcome: tools::ToolOutcome::Cancelled,
+            summary: "cancelled".into(),
+            display: None,
+        };
+    }
     if !tool_mode.allows() {
         return tools::ToolOutput {
             content: format!("tool blocked by no-tools mode: {name}"),
@@ -1213,6 +1232,83 @@ async fn forward_extension_update(
 mod option_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn compaction_cancels_while_its_start_event_is_backpressured() {
+        let (mut agent, _events) = Agent::with_options(
+            crate::core::providers::catalog::builtin_catalog().remove(0),
+            AgentOptions {
+                save_session: false,
+                ..AgentOptions::default()
+            },
+        );
+        agent.load_history(vec![
+            ChatMessage::user("x".repeat(10_000)),
+            ChatMessage::user("recent"),
+        ]);
+        let mut log = agent.log();
+        log.model.context_window = 8192;
+        let (events, _receiver) = mpsc::channel(1);
+        events.try_send(SessionEvent::TurnStart).unwrap();
+        log.events = events;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let compaction = compact_log(&log, "system", &cancel);
+        tokio::pin!(compaction);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut compaction)
+                .await
+                .is_err()
+        );
+        cancel.store(true, Ordering::SeqCst);
+        let result = tokio::time::timeout(Duration::from_secs(1), compaction)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.unwrap_err(),
+            "compaction cancelled; history was preserved"
+        );
+        assert_eq!(agent.history_snapshot().len(), 2);
+    }
+
+    #[test]
+    fn checkpoint_installation_rejects_a_snapshot_missing_a_concurrent_commit() {
+        let root = std::env::temp_dir().join(format!("e-compact-stale-{}", uuid::Uuid::new_v4()));
+        for save_session in [false, true] {
+            let home = root.join(save_session.to_string());
+            let (agent, _events) = Agent::with_options(
+                crate::core::providers::catalog::builtin_catalog().remove(0),
+                AgentOptions {
+                    home: Some(home.clone()),
+                    cwd: Some(home),
+                    save_session,
+                    ..AgentOptions::default()
+                },
+            );
+            let log = agent.log();
+            log.append(ChatMessage::user("original")).unwrap();
+            let snapshot = agent.history_snapshot();
+            let original_path = agent.session_path();
+            agent.record_user("shell output committed during summary".into());
+            assert!(!log.load_compacted(
+                "stale summary",
+                vec![],
+                &AtomicBool::new(false),
+                &snapshot
+            ));
+            assert_eq!(
+                agent.history_snapshot()[1].content,
+                "shell output committed during summary"
+            );
+            assert_eq!(agent.session_path(), original_path);
+            if let Some(path) = original_path {
+                assert_eq!(
+                    SessionLog::load(&path).unwrap()[1].content,
+                    "shell output committed during summary"
+                );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cancellation_during_checkpoint_preparation_keeps_the_original_session() {
         let home = std::env::temp_dir().join(format!("e-compact-cancel-{}", uuid::Uuid::new_v4()));
@@ -1227,14 +1323,16 @@ mod option_tests {
         let log = agent.log();
         log.append(ChatMessage::user("original")).unwrap();
         let original = agent.session_path().unwrap();
+        let expected = agent.history_snapshot();
         let directory = original.parent().unwrap();
         // Hold preparation after the new log is created, before it can commit.
         let name = log.session_name.lock().unwrap();
         let worker = log.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
-        let task =
-            std::thread::spawn(move || worker.load_compacted("summary", vec![], &worker_cancel));
+        let task = std::thread::spawn(move || {
+            worker.load_compacted("summary", vec![], &worker_cancel, &expected)
+        });
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let logs = std::fs::read_dir(directory)

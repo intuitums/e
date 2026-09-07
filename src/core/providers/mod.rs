@@ -21,7 +21,7 @@ const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_IMAGE_COUNT: usize = 10;
 const MAX_TOTAL_IMAGE_BYTES: u64 = 40 * 1024 * 1024;
 
-#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, Serialize)]
 pub struct ImageInput {
     pub media_type: String,
     /// Base64 without a data-URL prefix. Sessions retain the bytes so resume
@@ -124,7 +124,7 @@ impl ImageInput {
 }
 
 /// One requested tool invocation, as the model asked for it.
-#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, Serialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -139,7 +139,7 @@ pub struct ToolCall {
 
 /// Presentation metadata persisted beside a tool result, ignored by provider
 /// dialects and used to reconstruct the transcript on resume.
-#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct ToolResultMeta {
     pub outcome: crate::core::tools::ToolOutcome,
     pub summary: String,
@@ -149,7 +149,7 @@ pub struct ToolResultMeta {
 /// session file can answer "where did the time and tokens go" without the
 /// provider. `input` is the request's full context (cached tokens included,
 /// matching the dialects' Usage event), `output` what the step generated.
-#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct MessageUsage {
     pub input: u64,
     pub output: u64,
@@ -158,7 +158,7 @@ pub struct MessageUsage {
 
 /// A conversation record. The tagged payload makes tool results, assistant
 /// calls, and user attachments distinct while retaining the JSONL wire shape.
-#[derive(Clone, Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     pub content: String,
     #[serde(flatten)]
@@ -167,7 +167,7 @@ pub struct ChatMessage {
 
 /// Fields that are valid for each message role. Provider-owned reasoning
 /// remains opaque and is replayed only by the dialect that recognizes it.
-#[derive(Clone, Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Serialize, serde::Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum MessageKind {
     User {

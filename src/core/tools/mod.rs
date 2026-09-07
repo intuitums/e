@@ -348,9 +348,6 @@ impl ToolRuntime {
                 }
             }
         };
-        if name == "bash" {
-            return bash::run_streaming(&args, cwd, self, cancel, on_output);
-        }
         if cancel.load(std::sync::atomic::Ordering::SeqCst) {
             return ToolOutput {
                 content: "tool cancelled".into(),
@@ -358,6 +355,9 @@ impl ToolRuntime {
                 summary: "cancelled".into(),
                 display: None,
             };
+        }
+        if name == "bash" {
+            return bash::run_streaming(&args, cwd, self, cancel, on_output);
         }
         match SPECS.iter().find(|s| s.name == name) {
             Some(spec) => (spec.run)(&args, cwd, self),
@@ -501,10 +501,14 @@ fn staged_replace(
         file.sync_all()?;
         if let Some(existing) = existing.as_mut() {
             use std::io::Seek;
+            #[cfg(unix)]
+            verify_target_identity(existing, &target)?;
             file.rewind()?;
             let length = std::io::copy(&mut file, existing)?;
             existing.set_len(length)?;
             existing.sync_all()?;
+            #[cfg(unix)]
+            verify_target_identity(existing, &target)?;
         } else {
             // Publish without overwriting a file created during staging.
             std::fs::hard_link(&temporary, &target)?;
@@ -518,6 +522,20 @@ fn staged_replace(
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+/// Refuse a pathname that was removed or replaced while its inode was open.
+#[cfg(unix)]
+fn verify_target_identity(file: &std::fs::File, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let opened = file.metadata()?;
+    let current = std::fs::metadata(target)?;
+    if (opened.dev(), opened.ino()) != (current.dev(), current.ino()) {
+        return Err(std::io::Error::other(
+            "file was replaced during write; read it again before retrying",
+        ));
+    }
+    Ok(())
 }
 
 /// Serializes the mutating filesystem tools' read-modify-write windows per
@@ -795,6 +813,32 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_write_rejects_a_target_replaced_during_staging() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("e-write-replaced-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("file");
+        let alias = dir.join("original");
+        let replacement = dir.join("replacement");
+        std::fs::write(&target, "original").unwrap();
+        std::fs::hard_link(&target, &alias).unwrap();
+        let result = super::staged_replace(&target, |file| {
+            std::fs::write(&replacement, "other writer")?;
+            std::fs::rename(&replacement, &target)?;
+            file.write_all(b"new")
+        });
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("replaced during write"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "other writer");
+        assert_eq!(std::fs::read_to_string(&alias).unwrap(), "original");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

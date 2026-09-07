@@ -674,6 +674,19 @@ pub(super) async fn run(context: Context, compact_only: bool) -> Outcome {
             .clamp(1, 64) as usize;
         let mut remaining = batch.into_iter().peekable();
         while remaining.peek().is_some() {
+            if cancel.load(Ordering::SeqCst) {
+                // Every advertised call needs a result, even if it never ran.
+                for (_, call, _) in remaining.by_ref() {
+                    log.commit_async(ChatMessage::tool_result_with_meta(
+                        call.id,
+                        "tool cancelled before execution",
+                        tools::ToolOutcome::Cancelled,
+                        "cancelled",
+                    ))
+                    .await;
+                }
+                break;
+            }
             let mut paths = std::collections::HashSet::new();
             let mut wave = Vec::new();
             while wave.len() < concurrency {
