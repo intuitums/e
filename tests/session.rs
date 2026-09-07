@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use e::core::agent::Agent;
 use e::core::providers::catalog::{Api, Model};
 use e::core::providers::ChatMessage;
-use e::core::session::{self, Session};
+use e::core::session::{self, SessionLog};
 
 // E_HOME is process-global, so tests that replace it must not overlap.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -19,7 +19,7 @@ fn released_session_fixtures_remain_readable() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/sessions")
             .join(name);
-        let messages = Session::load(&path).unwrap_or_else(|error| {
+        let messages = SessionLog::load(&path).unwrap_or_else(|error| {
             panic!("compatibility fixture {name} stopped loading: {error}")
         });
         assert_eq!(messages.len(), 1);
@@ -41,7 +41,9 @@ fn future_session_format_fails_with_an_actionable_error() {
 "#,
     )
     .unwrap();
-    let error = Session::load(&path).err().expect("future format must fail");
+    let error = SessionLog::load(&path)
+        .err()
+        .expect("future format must fail");
     assert!(error.to_string().contains("newer than this e supports"));
     let _ = std::fs::remove_file(path);
 }
@@ -57,7 +59,7 @@ fn session_round_trips_and_lists() {
     let cwd = std::env::temp_dir().join("e-proj");
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let mut s = Session::create(&cwd, "opencode-go/deepseek-v4-flash").unwrap();
+    let mut s = SessionLog::create(&cwd, "opencode-go/deepseek-v4-flash").unwrap();
     s.append(&ChatMessage::user("count the files here please"))
         .unwrap();
     s.append(&ChatMessage::assistant("There are three.", Vec::new()))
@@ -72,14 +74,11 @@ fn session_round_trips_and_lists() {
     let path = s.path().to_path_buf();
     drop(s);
 
-    let loaded = Session::load(&path).unwrap();
+    let loaded = SessionLog::load(&path).unwrap();
     assert_eq!(loaded.len(), 3);
-    assert_eq!(loaded[0].role, "user");
+    assert_eq!(loaded[0].role(), "user");
     assert_eq!(loaded[1].content, "There are three.");
-    let meta = loaded[2]
-        .tool_meta
-        .as_ref()
-        .expect("tool metadata persisted");
+    let meta = loaded[2].tool_meta().expect("tool metadata persisted");
     assert_eq!(meta.outcome, e::core::tools::ToolOutcome::Failed);
     assert_eq!(meta.summary, "exit 7");
 
@@ -104,7 +103,7 @@ fn session_id_is_stable_across_reopen() {
     let cwd = std::env::temp_dir().join("e-id-proj");
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let mut s = Session::create(&cwd, "test/model").unwrap();
+    let mut s = SessionLog::create(&cwd, "test/model").unwrap();
     let id = s.id().to_string();
     // An opaque UUID (8-4-4-4-12 hex), not an identity-bearing value.
     let groups: Vec<&str> = id.split('-').collect();
@@ -123,7 +122,7 @@ fn session_id_is_stable_across_reopen() {
     let path = s.path().to_path_buf();
     drop(s);
 
-    let reopened = Session::reopen(&path).unwrap();
+    let reopened = SessionLog::reopen(&path).unwrap();
     assert_eq!(reopened.id(), id, "resume must not change the session id");
 }
 
@@ -193,21 +192,21 @@ fn opening_e_does_not_count_as_a_session() {
     let cwd = home.join("workspace");
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let session = Session::create(&cwd, "test/model").unwrap();
+    let session = SessionLog::create(&cwd, "test/model").unwrap();
     let path = session.path().to_path_buf();
     drop(session);
     assert!(path.exists(), "fixture should contain a header-only file");
     assert!(session::list(&cwd).is_empty());
     assert_eq!(session::most_recent(&cwd), None);
 
-    let mut session = Session::reopen(&path).unwrap();
+    let mut session = SessionLog::reopen(&path).unwrap();
     session
         .append(&ChatMessage::assistant("unsolicited", Vec::new()))
         .unwrap();
     drop(session);
     assert!(session::list(&cwd).is_empty());
 
-    let mut session = Session::reopen(&path).unwrap();
+    let mut session = SessionLog::reopen(&path).unwrap();
     session
         .append(&ChatMessage::user("now this is a session"))
         .unwrap();
@@ -223,8 +222,8 @@ fn opening_e_does_not_count_as_a_session() {
 fn old_tool_messages_without_metadata_still_load() {
     let old = r#"{"role":"tool","content":"ok","tool_call_id":"c1"}"#;
     let message: ChatMessage = serde_json::from_str(old).unwrap();
-    assert_eq!(message.role, "tool");
-    assert!(message.tool_meta.is_none());
+    assert_eq!(message.role(), "tool");
+    assert!(message.tool_meta().is_none());
 }
 
 #[test]
@@ -244,7 +243,7 @@ fn path_separator_and_hyphen_do_not_collide() {
     std::fs::create_dir_all(&first).unwrap();
     std::fs::create_dir_all(&second).unwrap();
 
-    let mut saved = Session::create(&first, "test/model").unwrap();
+    let mut saved = SessionLog::create(&first, "test/model").unwrap();
     saved
         .append(&ChatMessage::user("first workspace only"))
         .unwrap();
@@ -327,7 +326,7 @@ fn session_keys_preserve_non_utf8_path_bytes() {
         .join("workspaces")
         .join(std::ffi::OsString::from_vec(b"project-\xff".to_vec()));
     std::fs::create_dir_all(&cwd).unwrap();
-    let mut saved = Session::create(&cwd, "test/model").unwrap();
+    let mut saved = SessionLog::create(&cwd, "test/model").unwrap();
     saved
         .append(&ChatMessage::user("non utf8 workspace"))
         .unwrap();
@@ -351,29 +350,29 @@ fn a_session_open_in_one_place_cannot_be_appended_to_from_another() {
     let cwd = home.join("workspace");
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let mut owner = Session::create(&cwd, "test/model").unwrap();
+    let mut owner = SessionLog::create(&cwd, "test/model").unwrap();
     owner.append(&ChatMessage::user("owned here")).unwrap();
     let path = owner.path().to_path_buf();
 
-    let second = Session::reopen(&path).err().unwrap();
+    let second = SessionLog::reopen(&path).err().unwrap();
     assert_eq!(second.kind(), std::io::ErrorKind::AlreadyExists);
     assert!(
         second.to_string().contains("already active"),
         "the error must name the conflict: {second}"
     );
 
-    // Releasing the first Session releases the lock.
+    // Releasing the first SessionLog releases the lock.
     drop(owner);
-    let mut resumed = Session::reopen(&path).unwrap();
+    let mut resumed = SessionLog::reopen(&path).unwrap();
     resumed.append(&ChatMessage::user("back in")).unwrap();
     drop(resumed);
-    assert_eq!(Session::load(&path).unwrap().len(), 2);
+    assert_eq!(SessionLog::load(&path).unwrap().len(), 2);
 
     let _ = std::fs::remove_dir_all(home);
 }
 
 #[test]
-fn a_stale_lock_from_a_crashed_e_is_stolen_not_worshipped() {
+fn lock_contents_cannot_override_a_live_owner() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = std::env::temp_dir().join(format!(
         "e-session-stale-{}-{}",
@@ -386,25 +385,53 @@ fn a_stale_lock_from_a_crashed_e_is_stolen_not_worshipped() {
     let cwd = home.join("workspace");
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let s = Session::create(&cwd, "test/model").unwrap();
+    let s = SessionLog::create(&cwd, "test/model").unwrap();
     let path = s.path().to_path_buf();
     let lock_path = path.with_extension("lock");
     assert!(lock_path.exists());
 
-    // A crashed writer leaves its PID behind; that process is gone now if
-    // we write one that cannot exist. The lock must yield.
+    // Ownership belongs to the open handle, regardless of sidecar contents.
     std::fs::write(&lock_path, b"4194304\n").unwrap();
     assert!(std::path::Path::new(&lock_path).exists());
-    let _ = Session::reopen(&path).unwrap();
+    assert!(SessionLog::reopen(&path).is_err());
 
-    // An empty or unparseable lock (crashed between create and PID write)
-    // must not wedge the session shut either.
     std::fs::write(&lock_path, b"").unwrap();
-    let _ = Session::reopen(&path).unwrap();
+    assert!(SessionLog::reopen(&path).is_err());
 
     drop(s);
+    let _ = SessionLog::reopen(&path).unwrap();
 
     let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn simultaneous_resumes_have_exactly_one_owner() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("e-lock-race-{}", uuid::Uuid::new_v4()));
+    let saved =
+        e::core::config::home::with_home(home.clone(), || SessionLog::create(&home, "mock/test"))
+            .unwrap();
+    let path = saved.path().to_path_buf();
+    drop(saved);
+    let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let acquired = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let workers: Vec<_> = (0..8)
+        .map(|_| {
+            let (path, start, acquired) = (path.clone(), start.clone(), acquired.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                let owner = SessionLog::reopen(&path);
+                acquired.wait();
+                owner.is_ok()
+            })
+        })
+        .collect();
+    let owners = workers
+        .into_iter()
+        .map(|worker| usize::from(worker.join().unwrap()))
+        .sum::<usize>();
+    assert_eq!(owners, 1);
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
@@ -421,7 +448,7 @@ fn a_corrupted_record_is_surfaced_not_silently_dropped() {
     let cwd = home.join("workspace");
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let mut s = Session::create(&cwd, "test/model").unwrap();
+    let mut s = SessionLog::create(&cwd, "test/model").unwrap();
     s.append(&ChatMessage::user("first")).unwrap();
     s.append(&ChatMessage::assistant("second", Vec::new()))
         .unwrap();
@@ -439,7 +466,7 @@ fn a_corrupted_record_is_surfaced_not_silently_dropped() {
     lines.insert(2, tail.to_string());
     std::fs::write(&path, lines.join("\n") + "\n").unwrap();
 
-    let err = Session::load(&path).err().unwrap();
+    let err = SessionLog::load(&path).err().unwrap();
     assert!(
         err.to_string().contains("corrupt session record"),
         "load must report corruption: {err}"
@@ -466,7 +493,7 @@ fn a_torn_final_line_costs_the_record_not_the_session() {
     let cwd = home.join("workspace");
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let mut s = Session::create(&cwd, "test/model").unwrap();
+    let mut s = SessionLog::create(&cwd, "test/model").unwrap();
     s.append(&ChatMessage::user("first")).unwrap();
     s.append(&ChatMessage::assistant("second", Vec::new()))
         .unwrap();
@@ -478,7 +505,7 @@ fn a_torn_final_line_costs_the_record_not_the_session() {
     raw.push_str("{\"type\":\"message\",\"message\":{\"role\":\"user\",\"con");
     std::fs::write(&path, raw).unwrap();
 
-    let messages = Session::load(&path).unwrap();
+    let messages = SessionLog::load(&path).unwrap();
     assert_eq!(messages.len(), 2, "the complete records survive");
     assert_eq!(messages[1].content, "second");
 
@@ -501,7 +528,7 @@ fn a_dangling_tool_call_is_repaired_on_load() {
     let cwd = home.join("workspace");
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let mut s = Session::create(&cwd, "test/model").unwrap();
+    let mut s = SessionLog::create(&cwd, "test/model").unwrap();
     s.append(&ChatMessage::user("task")).unwrap();
     s.append(&ChatMessage::assistant(
         "working",
@@ -516,10 +543,10 @@ fn a_dangling_tool_call_is_repaired_on_load() {
     let path = s.path().to_path_buf();
     drop(s);
 
-    let messages = Session::load(&path).unwrap();
+    let messages = SessionLog::load(&path).unwrap();
     let last = messages.last().unwrap();
-    assert_eq!(last.role, "tool", "a synthetic result closes the batch");
-    assert_eq!(last.tool_call_id.as_deref(), Some("call-1"));
+    assert_eq!(last.role(), "tool", "a synthetic result closes the batch");
+    assert_eq!(last.tool_call_id().map(String::as_str), Some("call-1"));
     assert!(last.content.contains("not executed"));
 
     let _ = std::fs::remove_dir_all(home);
@@ -583,14 +610,14 @@ fn nodes_chain_linearly_when_nothing_rewound() {
     let cwd = std::env::temp_dir().join("e-tree-linear-proj");
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let mut s = Session::create(&cwd, "test/model").unwrap();
+    let mut s = SessionLog::create(&cwd, "test/model").unwrap();
     s.append(&ChatMessage::user("first")).unwrap();
     s.append(&ChatMessage::assistant("reply", Vec::new()))
         .unwrap();
     let path = s.path().to_path_buf();
     drop(s);
 
-    let nodes = Session::nodes(&path).unwrap();
+    let nodes = SessionLog::nodes(&path).unwrap();
     assert_eq!(nodes.len(), 2);
     assert!(nodes[0].parent.is_none(), "the first message is a root");
     assert_eq!(nodes[1].parent.as_deref(), Some(nodes[0].id.as_str()));
@@ -615,20 +642,20 @@ fn set_head_grows_a_branch_without_touching_the_old_tail() {
     let cwd = std::env::temp_dir().join("e-tree-branch-proj");
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let mut s = Session::create(&cwd, "test/model").unwrap();
+    let mut s = SessionLog::create(&cwd, "test/model").unwrap();
     s.append(&ChatMessage::user("root")).unwrap();
     s.append(&ChatMessage::assistant("branch A reply", Vec::new()))
         .unwrap();
     let path = s.path().to_path_buf();
 
-    let root_id = Session::nodes(&path).unwrap()[0].id.clone();
+    let root_id = SessionLog::nodes(&path).unwrap()[0].id.clone();
     s.set_head(Some(root_id.clone()));
     s.append(&ChatMessage::user("branch B")).unwrap();
     s.append(&ChatMessage::assistant("branch B reply", Vec::new()))
         .unwrap();
     drop(s);
 
-    let nodes = Session::nodes(&path).unwrap();
+    let nodes = SessionLog::nodes(&path).unwrap();
     assert_eq!(nodes.len(), 4, "both branches persist in the one file");
     let children_of_root = nodes
         .iter()
@@ -641,7 +668,7 @@ fn set_head_grows_a_branch_without_touching_the_old_tail() {
     // Plain load follows the durable active head (the last appended node)
     // back through its parents. The abandoned branch remains available to
     // /tree through nodes(), but must not be replayed into the resumed model.
-    let loaded = Session::load(&path).unwrap();
+    let loaded = SessionLog::load(&path).unwrap();
     assert_eq!(loaded.len(), 3);
     assert_eq!(loaded[1].content, "branch B");
     assert!(!loaded
@@ -665,21 +692,21 @@ fn reopen_continues_the_branch_that_was_active() {
     let cwd = std::env::temp_dir().join("e-tree-reopen-proj");
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let mut s = Session::create(&cwd, "test/model").unwrap();
+    let mut s = SessionLog::create(&cwd, "test/model").unwrap();
     s.append(&ChatMessage::user("root")).unwrap();
-    let root_id = Session::nodes(s.path()).unwrap()[0].id.clone();
+    let root_id = SessionLog::nodes(s.path()).unwrap()[0].id.clone();
     s.set_head(Some(root_id.clone()));
     s.append(&ChatMessage::user("chosen branch")).unwrap();
     let path = s.path().to_path_buf();
     drop(s);
 
-    let mut resumed = Session::reopen(&path).unwrap();
+    let mut resumed = SessionLog::reopen(&path).unwrap();
     resumed
         .append(&ChatMessage::assistant("continues here", Vec::new()))
         .unwrap();
     drop(resumed);
 
-    let nodes = Session::nodes(&path).unwrap();
+    let nodes = SessionLog::nodes(&path).unwrap();
     let tail = nodes.last().unwrap();
     assert_eq!(tail.message.content, "continues here");
     let parent = nodes
@@ -709,7 +736,7 @@ fn legacy_records_synthesize_a_linear_chain() {
     std::fs::create_dir_all(&cwd).unwrap();
 
     // Hand-write a pre-branching-format log: no id/parent on the records.
-    let s = Session::create(&cwd, "test/model").unwrap();
+    let s = SessionLog::create(&cwd, "test/model").unwrap();
     let path = s.path().to_path_buf();
     drop(s);
     let legacy = format!(
@@ -720,18 +747,18 @@ fn legacy_records_synthesize_a_linear_chain() {
     );
     std::fs::write(&path, legacy).unwrap();
 
-    let nodes = Session::nodes(&path).unwrap();
+    let nodes = SessionLog::nodes(&path).unwrap();
     assert_eq!(nodes.len(), 2);
     assert!(nodes[0].parent.is_none());
     assert_eq!(nodes[1].parent.as_deref(), Some(nodes[0].id.as_str()));
 
     // A session reopened from a legacy tail keeps growing that same line.
-    let mut resumed = Session::reopen(&path).unwrap();
+    let mut resumed = SessionLog::reopen(&path).unwrap();
     resumed
         .append(&ChatMessage::user("new turn after legacy tail"))
         .unwrap();
     drop(resumed);
-    let nodes = Session::nodes(&path).unwrap();
+    let nodes = SessionLog::nodes(&path).unwrap();
     assert_eq!(nodes.len(), 3);
     assert_eq!(nodes[2].parent.as_deref(), Some(nodes[1].id.as_str()));
 
@@ -750,7 +777,7 @@ fn the_latest_persisted_name_is_readable_for_resume() {
     let cwd = std::env::temp_dir().join("e-name-proj");
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let mut s = Session::create(&cwd, "mock/m").unwrap();
+    let mut s = SessionLog::create(&cwd, "mock/m").unwrap();
     s.append(&ChatMessage::user("hello")).unwrap();
     s.set_name("alpha").unwrap();
     s.set_name("beta").unwrap();

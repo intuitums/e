@@ -23,7 +23,7 @@ pub async fn run(
     // Responses-API items: messages, function calls, and their outputs.
     let mut input: Vec<serde_json::Value> = Vec::new();
     for m in &request.messages {
-        match m.role.as_str() {
+        match m.role() {
             "assistant" => {
                 if !m.content.is_empty() {
                     input.push(json!({
@@ -31,7 +31,7 @@ pub async fn run(
                         "content": [{"type": "output_text", "text": m.content}],
                     }));
                 }
-                for call in &m.tool_calls {
+                for call in m.tool_calls() {
                     input.push(json!({
                         "type": "function_call",
                         "call_id": call.id,
@@ -51,7 +51,7 @@ pub async fn run(
             }
             "tool" => input.push(json!({
                 "type": "function_call_output",
-                "call_id": m.tool_call_id.clone().unwrap_or_default(),
+                "call_id": m.tool_call_id().cloned().unwrap_or_default(),
                 "output": m.content,
             })),
             role => {
@@ -60,7 +60,7 @@ pub async fn run(
                     content.push(json!({"type": "input_text", "text": m.content}));
                 }
                 content.extend(
-                    m.images
+                    m.images()
                         .iter()
                         .map(|image| json!({"type": "input_image", "image_url": image.data_url()})),
                 );

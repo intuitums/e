@@ -7,6 +7,51 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Cancellation skips queued tool waves, and late tool events cannot change a
+  newer turn. Rejected-image text stays a literal prompt, even when it starts
+  with a command.
+- Compaction rejects stale history snapshots and observes cancellation while
+  reserving its start and completion events. File writes detect inode replacement
+  during staging and copying on Unix.
+- Session resume locks the log before loading history, and tree readers reject
+  corrupt parent links on inactive branches too.
+- Tool batches have bounded concurrency and execute calls naming the same file
+  in provider order. Completed commands replace partial streaming previews with
+  their retained output.
+- The TUI and its background tasks inherit the selected configuration home.
+  Compaction checks cancellation after staging its checkpoint, before replacing
+  history. Provider usage totals saturate instead of overflowing.
+- Provider and OAuth requests refuse redirects so API-key headers and private
+  request bodies cannot reach another origin. Release downloads retain a
+  separate redirect policy that rejects HTTPS downgrades.
+- Credential staging files are private from creation. On Unix, state writes
+  secure the e home to `0700`, new session files use `0600`, and reopening an
+  older session tightens that file's permissions.
+- Tool labels, targets, and live previews strip terminal control sequences.
+- OAuth callback requests are size-limited and deadline-bounded. Idle or
+  malformed connections no longer terminate login; cancellation interrupts
+  accepted connections too.
+
+- Core now owns run completion, steering, and compaction. RPC continues
+  through context checkpoints and returns the final answer. `/compact`
+  uses the same core path at the next provider boundary.
+- Checkpoints preserve user instructions and previous summaries in the
+  summarization request. Truncated or ineffective summaries leave history
+  intact and report an error.
+- Session writers use OS-held locks. Stop older processes before resuming
+  their sessions; JSONL itself needs no migration. Empty lock sidecars remain.
+- Each run has a permanent cancellation token. Bash output queues are bounded
+  and continuous output cannot starve timeout checks. Slow viewers may miss
+  live preview chunks, but the final tool result retains the output tail.
+- File edits and writes stage content before updating existing inodes, preserving
+  symlink targets, hard-link aliases, ACLs, and extended attributes. A failure
+  during the final in-place copy can leave a partial update. Grep no longer
+  skips the line immediately following an oversized line.
+- Independent agents can select explicit configuration homes and workspaces.
+  File observations and background handles belong to each agent. Unstable
+  Rust names are now `core::extensions`, `SessionLog`, and tagged `MessageKind`
+  payloads, with accessors replacing role-specific message fields.
+
 - Running tools stay connected to their tool tree. Command branches remain
   open while output streams beneath them, then close on completion. OpenAI
   reasoning summaries preserve paragraph breaks and stay hidden unless Show

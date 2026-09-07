@@ -1,6 +1,6 @@
 #![no_main]
 
-use e::core::api::parse_incoming;
+use e::core::extensions::parse_incoming;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

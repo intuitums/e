@@ -45,13 +45,13 @@ pub async fn run(
     let mut messages: Vec<serde_json::Value> = Vec::new();
     let mut pending_thinking: Vec<serde_json::Value> = Vec::new();
     for m in &request.messages {
-        match m.role.as_str() {
+        match m.role() {
             "assistant" => {
                 let mut content = std::mem::take(&mut pending_thinking);
                 if !m.content.is_empty() {
                     content.push(json!({"type": "text", "text": m.content}));
                 }
-                for call in &m.tool_calls {
+                for call in m.tool_calls() {
                     let input: serde_json::Value =
                         serde_json::from_str(&call.arguments).unwrap_or(json!({}));
                     content.push(json!({
@@ -65,7 +65,7 @@ pub async fn run(
             "tool" => messages.push(json!({
                 "role": "user",
                 "content": [{"type": "tool_result",
-                             "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                             "tool_use_id": m.tool_call_id().cloned().unwrap_or_default(),
                              "content": m.content}],
             })),
             "reasoning" => {
@@ -89,7 +89,7 @@ pub async fn run(
                 if !m.content.is_empty() {
                     content.push(json!({"type": "text", "text": m.content}));
                 }
-                content.extend(m.images.iter().map(|image| {
+                content.extend(m.images().iter().map(|image| {
                     json!({
                         "type": "image",
                         "source": {

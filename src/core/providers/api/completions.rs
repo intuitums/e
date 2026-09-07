@@ -71,10 +71,10 @@ pub async fn run(
 ) -> Result<StreamEnd, ProviderError> {
     let mut messages = vec![json!({"role": "system", "content": request.system})];
     for m in &request.messages {
-        match m.role.as_str() {
-            "assistant" if !m.tool_calls.is_empty() => {
+        match m.role() {
+            "assistant" if !m.tool_calls().is_empty() => {
                 let calls: Vec<_> = m
-                    .tool_calls
+                    .tool_calls()
                     .iter()
                     .map(|c| {
                         json!({"id": c.id, "type": "function",
@@ -89,20 +89,20 @@ pub async fn run(
             }
             "tool" => messages.push(json!({
                 "role": "tool",
-                "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
+                "tool_call_id": m.tool_call_id().cloned().unwrap_or_default(),
                 "content": m.content,
             })),
             // Responses-dialect reasoning items mean nothing here.
             "reasoning" => {}
             role => {
-                if m.images.is_empty() {
+                if m.images().is_empty() {
                     messages.push(json!({"role": role, "content": m.content}));
                 } else {
                     let mut content = Vec::new();
                     if !m.content.is_empty() {
                         content.push(json!({"type": "text", "text": m.content}));
                     }
-                    content.extend(m.images.iter().map(|image| {
+                    content.extend(m.images().iter().map(|image| {
                         json!({
                             "type": "image_url",
                             "image_url": {"url": image.data_url()},

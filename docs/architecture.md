@@ -25,6 +25,16 @@ extract a module, not a crate.
 
 - The frontend receives text, tools, usage, warnings, and errors through one
   ordered event stream. There are no state side channels.
+- The core owns run completion, steering, and compaction. `TurnEnd` means
+  the run has stopped; a context checkpoint emits `Compacting` and
+  `Compacted` without ending the run. RPC and the TUI share this lifecycle.
+- Each agent captures its working directory and configuration home and owns
+  file observations and background handles. Explicit `AgentOptions` paths
+  allow concurrent callers without changing process environment variables.
+- `SessionLog` stores the conversation tree. An OS-held sidecar lock excludes
+  other writers. The sidecar stays on disk; ownership ends when the handle closes.
+- `ChatMessage` carries a tagged `MessageKind`. Only assistant records hold
+  tool calls; tool records require a call id. Existing JSONL formats still load.
 - `core/` is terminal-free. Terminal behavior stays in `tui/`.
 - Provider differences terminate at the dialect seam; the agent loop consumes
   one request and event vocabulary.

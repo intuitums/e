@@ -36,7 +36,7 @@ pub fn read_schema() -> Value {
     )
 }
 
-pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
+pub fn read(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput {
     let Some(path) = args["path"].as_str() else {
         return err("read: missing path".into(), "read", "");
     };
@@ -69,7 +69,7 @@ pub fn read(args: &Value, cwd: &Path) -> ToolOutput {
             path,
         );
     };
-    super::note_seen_stamp(&full, stamp);
+    super::note_seen_stamp(state, &full, stamp);
     let count = text.lines().count();
     ok(truncate(text), format!("{count} lines"))
 }
@@ -97,7 +97,9 @@ fn bounded_line<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
             // caller that keeps scanning (grep) can move past an oversized
             // one instead of aborting the whole file. Bounded: we never hold
             // more than the current buffer chunk.
-            drain_line_remainder(reader);
+            if end.is_none() {
+                drain_line_remainder(reader);
+            }
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("line exceeds {MAX_LINE_BYTES} bytes"),
@@ -188,7 +190,7 @@ pub fn write_schema() -> Value {
     )
 }
 
-pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
+pub fn write(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput {
     let Some(path) = args["path"].as_str() else {
         return err("write: missing path".into(), "write", "");
     };
@@ -202,7 +204,7 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
     // Same per-path lock as edit: a concurrent mutation through any spelling
     // of this path must finish before this overwrite starts.
     let _guard = super::fs_write_lock(&full);
-    if let Err(output) = super::check_fresh(&full, "write", path) {
+    if let Err(output) = super::check_fresh(state, &full, "write", path) {
         return output;
     }
     // Capture the previous content while it still exists, so the detail
@@ -231,9 +233,9 @@ pub fn write(args: &Value, cwd: &Path) -> ToolOutput {
             return err(format!("write {path}: {error}"), "write", path);
         }
     }
-    match std::fs::write(&full, content) {
+    match super::staged_write(&full, content.as_bytes()) {
         Ok(()) => {
-            super::note_seen(&full);
+            super::note_seen(state, &full);
             let additions = content.lines().count();
             let deletions = before_lines;
             // The model wrote this content one message ago — echoing it back
@@ -339,7 +341,7 @@ pub fn grep_schema() -> Value {
     )
 }
 
-pub fn grep(args: &Value, cwd: &Path) -> ToolOutput {
+pub fn grep(args: &Value, cwd: &Path, _state: &super::ToolRuntime) -> ToolOutput {
     let Some(pattern) = args["pattern"].as_str() else {
         return err("grep: missing pattern".into(), "grep", "");
     };
@@ -497,7 +499,7 @@ fn truncate_match_line(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{glob_regex, write};
+    use super::{bounded_line, glob_regex, write, BufReader, MAX_LINE_BYTES};
     use serde_json::json;
 
     #[test]
@@ -518,7 +520,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("kept.txt");
         std::fs::write(&file, "keep me").unwrap();
-        let output = write(&json!({"path": "kept.txt"}), &dir);
+        let output = write(
+            &json!({"path": "kept.txt"}),
+            &dir,
+            &super::super::ToolRuntime::default(),
+        );
         assert!(output.is_error());
         assert_eq!(std::fs::read_to_string(file).unwrap(), "keep me");
         let _ = std::fs::remove_dir_all(dir);
@@ -530,9 +536,24 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("binary");
         std::fs::write(&file, [0xff, 0x00]).unwrap();
-        let output = write(&json!({"path": "binary", "content": "replacement"}), &dir);
+        let output = write(
+            &json!({"path": "binary", "content": "replacement"}),
+            &dir,
+            &super::super::ToolRuntime::default(),
+        );
         assert!(output.is_error());
         assert_eq!(std::fs::read(file).unwrap(), vec![0xff, 0x00]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn oversized_line_does_not_consume_the_next_line() {
+        let input = format!("{}\nneedle\n", "x".repeat(MAX_LINE_BYTES));
+        let mut reader = BufReader::new(input.as_bytes());
+        assert!(bounded_line(&mut reader).is_err());
+        assert_eq!(
+            bounded_line(&mut reader).unwrap().as_deref(),
+            Some("needle")
+        );
     }
 }

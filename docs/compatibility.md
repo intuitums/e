@@ -31,6 +31,35 @@ readers must continue to load them or intentionally document the migration.
 Regenerable caches such as `models-store.json` are internal and are not a
 persisted compatibility contract.
 
+Session sidecars now use OS-held locks. Stop older e processes before
+resuming their sessions with the new writer; mixed PID-lock and OS-lock
+writers must not open the same session concurrently. Existing JSONL needs
+no migration. Empty `.lock` sidecars are expected and should not be deleted.
+
+On Unix, e creates its state directories with `0700` and session logs with
+`0600`. Configuration writes and session creation or reopening also tighten
+the e home directory to `0700`, protecting older files underneath it without
+rewriting their contents. Reopening an older session sets its file to `0600`.
+Stricter owner permissions are preserved, including read-only directories.
+Use a dedicated directory for `E_HOME`; it is private application state, not a
+shared workspace. Files copied outside that directory are not migrated.
+Credential staging files start at `0600`, before any secret is written.
+
+Provider and OAuth endpoints must be final URLs: authenticated requests no
+longer follow HTTP redirects, including same-origin redirects. Update any
+custom gateway URL that relied on one. Release asset downloads still follow
+redirects, without provider credentials, and reject HTTPS-to-HTTP downgrades.
+
+Filesystem `write` and `edit` stage and sync content before committing it.
+Existing files are updated through their original inode, preserving symlink
+targets, hard-link aliases, ACLs, and extended attributes. Staging failures
+leave the original intact; an I/O failure during the in-place copy can leave
+a partial update. New files are published without overwriting a concurrent
+creator. On Unix, the parent directory is synced before success is reported.
+Unix writes also check that the target still names the opened inode before
+and after copying. A detected external replacement fails the write so the
+caller can reread and retry; external writers still need their own coordination.
+
 ## Not a supported contract
 
 The Cargo library target lets the binary, the integration tests, and the

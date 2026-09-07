@@ -170,7 +170,7 @@ impl App {
         // the gateways in the background (60s floor), and pop new rows into
         // the open picker when the answer lands.
         let results = self.results.clone();
-        tokio::spawn(async move {
+        crate::core::config::home::spawn(async move {
             crate::core::providers::catalog::refresh_remote_within(60_000).await;
             let _ = results.send(AppJob::CatalogRefreshed).await;
         });

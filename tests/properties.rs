@@ -1,7 +1,7 @@
 //! Cross-cutting properties for parsers and render sanitizers. Fixed examples
 //! live with their subsystem tests; these vary boundaries and arbitrary text.
 
-use e::core::api::{parse_incoming, Incoming};
+use e::core::extensions::{parse_incoming, Incoming};
 use e::core::providers::SseSplitter;
 use e::core::tools::sanitize_display;
 use e::tui::markdown::{visible_width, wrap_styled};

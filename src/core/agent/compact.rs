@@ -1,9 +1,8 @@
 //! Compaction: summarize the older part of the session so work continues in a
 //! fresh context, keeping the recent messages verbatim.
 //!
-//! The shape follows the reference harness: compaction only ever runs between
-//! turns — the frontend checks at TurnEnd (auto, when context usage crosses
-//! the reserve threshold) or defers a mid-turn /compact until the turn ends.
+//! The core compacts between provider requests, after every tool result has
+//! been committed. Both interactive and headless runs use the same path.
 //! The cut keeps roughly the most recent `KEEP_RECENT_TOKENS` of messages and
 //! never lands on a tool result (a result must follow its call) or between a
 //! signed thinking block and the assistant turn it precedes; everything
@@ -71,16 +70,16 @@ pub fn should_compact(context_tokens: u64, context_window: u64) -> bool {
         && context_tokens > context_window.saturating_sub(reserve_tokens(context_window))
 }
 
-/// chars/4, the reference heuristic — conservative, and only used to place
-/// the cut; the threshold itself works on real provider usage.
+/// Approximate tokens for cut placement and providers that omit usage.
+/// This heuristic is not a tokenizer; real provider usage takes precedence.
 pub fn estimate_message_tokens(message: &ChatMessage) -> u64 {
     let mut chars = message.content.chars().count();
-    for call in &message.tool_calls {
+    for call in message.tool_calls() {
         chars += call.name.chars().count() + call.arguments.chars().count();
     }
     (chars as u64)
         .div_ceil(4)
-        .saturating_add(message.images.len() as u64 * 1_000)
+        .saturating_add(message.images().len() as u64 * 1_000)
 }
 
 /// Provider-independent fallback for gateways that omit usage. It is visibly
@@ -95,7 +94,7 @@ pub fn estimate_request_tokens(system: &str, history: &[ChatMessage]) -> u64 {
 
 /// Split history into (to_summarize, kept): walk backwards accumulating
 /// estimated tokens until the keep budget (window-relative) is reached, then
-/// cut at the nearest valid boundary at or after that point — a tool result
+/// cut at the nearest valid boundary after the over-budget message. A tool result
 /// always stays with its call, and a signed thinking block ("reasoning")
 /// always stays with the assistant turn it precedes; replaying either apart
 /// from its partner fails the request. Returns an empty `to_summarize` when
@@ -107,15 +106,18 @@ pub fn split(history: &[ChatMessage], context_window: u64) -> (Vec<ChatMessage>,
     for (i, message) in history.iter().enumerate().rev() {
         accumulated += estimate_message_tokens(message);
         if accumulated >= keep {
-            // The nearest valid cut at or after the overrun point: not on a
+            // Exclude the message that exceeded the budget. Never cut on a
             // tool result, and not between a reasoning block and the
             // assistant message whose signature it carries.
-            cut = (i..history.len())
+            cut = (i + 1..history.len())
                 .find(|&c| {
-                    history[c].role != "tool"
-                        && !(history[c].role == "assistant"
+                    history[c].role() != "tool"
+                        && !(history[c].role() == "reasoning"
                             && c > 0
-                            && history[c - 1].role == "reasoning")
+                            && history[c - 1].role() == "reasoning")
+                        && !(history[c].role() == "assistant"
+                            && c > 0
+                            && history[c - 1].role() == "reasoning")
                 })
                 .unwrap_or(history.len());
             break;
@@ -133,33 +135,7 @@ pub async fn summarize(
     history: &[ChatMessage],
     session_id: String,
 ) -> Result<String, String> {
-    // The transcript itself must fit the model being asked to summarize it —
-    // the history that triggered compaction by definition nearly filled the
-    // window, so an unbudgeted flatten could fail with a context overflow at
-    // the only moment compaction is needed. Budget to half the window
-    // (chars/4 heuristic), dropping the oldest segments first: the recent
-    // ones carry the state the continuation depends on.
-    let budget_chars = (model.context_window.saturating_mul(4) / 2).max(4_096) as usize;
-    let segments = transcript_segments(history);
-    let mut kept: Vec<String> = Vec::new();
-    let mut used = 0usize;
-    for segment in segments.iter().rev() {
-        if used + segment.len() > budget_chars && !kept.is_empty() {
-            break;
-        }
-        let segment = fit_segment(segment, budget_chars.saturating_sub(used));
-        used += segment.len();
-        kept.push(segment);
-    }
-    let dropped = segments.len() - kept.len();
-    kept.reverse();
-    let mut flattened = String::new();
-    if dropped > 0 {
-        flattened.push_str(&format!(
-            "[{dropped} earlier messages omitted — they no longer fit the summarization request]\n\n"
-        ));
-    }
-    flattened.push_str(&kept.join(""));
+    let flattened = budget_transcript(history, model.context_window)?;
     let request = Request {
         model,
         system: SYSTEM.into(),
@@ -168,20 +144,86 @@ pub async fn summarize(
         session_id,
         tools: Vec::new(),
     };
-    let (mut rx, _handle) = providers::stream(request);
+    let (mut rx, handle) = providers::stream(request);
+    let _stream = StreamGuard(handle);
     let mut summary = String::new();
+    let mut complete = false;
     while let Some(event) = rx.recv().await {
         match event {
             Event::TextDelta(d) => summary.push_str(&d),
             Event::Error(err) => return Err(err.message),
-            Event::Done(_) => break,
+            Event::Done(end) => {
+                if !matches!(end.finish, providers::FinishReason::Normal) || end.malformed > 0 {
+                    return Err("compaction did not produce a complete, valid response".into());
+                }
+                complete = true;
+                break;
+            }
             _ => {}
         }
+    }
+    if !complete {
+        return Err("compaction stream closed before completion".into());
     }
     if summary.trim().is_empty() {
         return Err("the model returned an empty summary".into());
     }
     Ok(summary.trim().to_string())
+}
+
+/// Cancel the provider task when a summarization future is dropped.
+struct StreamGuard(tokio::task::JoinHandle<()>);
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Preserve every user instruction and previous checkpoint before spending
+/// remaining space on recent execution details. Refuse to compact when the
+/// protected text alone cannot fit; silently deleting instructions is worse.
+fn budget_transcript(history: &[ChatMessage], window: u64) -> Result<String, String> {
+    let budget = usize::try_from(window.saturating_mul(2))
+        .unwrap_or(usize::MAX)
+        .saturating_sub(SYSTEM.len() + INSTRUCTION.len() + 512);
+    let segments: Vec<(bool, String)> = history
+        .iter()
+        .flat_map(|message| {
+            transcript_segments(std::slice::from_ref(message))
+                .into_iter()
+                .map(move |text| (message.role() == "user" || message.role() == "system", text))
+        })
+        .collect();
+    let protected: usize = segments
+        .iter()
+        .filter(|(keep, _)| *keep)
+        .map(|(_, text)| text.len())
+        .sum();
+    if protected > budget {
+        return Err("user instructions and previous checkpoints exceed the compaction budget; history was preserved".into());
+    }
+    let mut remaining = budget - protected;
+    let mut selected = vec![false; segments.len()];
+    for (index, (protected, text)) in segments.iter().enumerate().rev() {
+        if *protected {
+            selected[index] = true;
+        } else if text.len() <= remaining {
+            selected[index] = true;
+            remaining -= text.len();
+        }
+    }
+    let mut out = if selected.iter().any(|selected| !selected) {
+        "[Some execution details omitted to fit; user instructions and checkpoints are intact.]\n\n"
+            .to_string()
+    } else {
+        String::new()
+    };
+    for ((_, text), selected) in segments.into_iter().zip(selected) {
+        if selected {
+            out.push_str(&text);
+        }
+    }
+    Ok(out)
 }
 
 /// The first message of the fresh session, carrying the summary forward.
@@ -198,10 +240,10 @@ fn transcript_segments(history: &[ChatMessage]) -> Vec<String> {
     let mut out = Vec::new();
     for message in history {
         let content = message.content.trim();
-        if message.role == "reasoning" {
+        if message.role() == "reasoning" {
             continue; // encrypted provider state, not conversation
         }
-        if message.role == "tool" {
+        if message.role() == "tool" {
             let kept: String = content.chars().take(TOOL_RESULT_KEEP).collect();
             let marker = if content.chars().count() > TOOL_RESULT_KEEP {
                 "\n[trimmed]"
@@ -211,18 +253,18 @@ fn transcript_segments(history: &[ChatMessage]) -> Vec<String> {
             out.push(format!("tool result:\n{kept}{marker}\n\n"));
             continue;
         }
-        if content.is_empty() && message.tool_calls.is_empty() {
+        if content.is_empty() && message.tool_calls().is_empty() {
             continue;
         }
-        let mut segment = format!("{}:\n{content}\n", message.role);
-        if !message.images.is_empty() {
+        let mut segment = format!("{}:\n{content}\n", message.role());
+        if !message.images().is_empty() {
             segment.push_str(&format!(
                 "[{} image attachment{}]\n",
-                message.images.len(),
-                if message.images.len() == 1 { "" } else { "s" }
+                message.images().len(),
+                if message.images().len() == 1 { "" } else { "s" }
             ));
         }
-        for call in &message.tool_calls {
+        for call in message.tool_calls() {
             let arguments: String = call.arguments.chars().take(TOOL_CALL_KEEP).collect();
             let marker = if call.arguments.chars().count() > TOOL_CALL_KEEP {
                 "… [arguments trimmed]"
@@ -237,17 +279,31 @@ fn transcript_segments(history: &[ChatMessage]) -> Vec<String> {
     out
 }
 
-fn fit_segment(segment: &str, limit: usize) -> String {
-    const MARKER: &str = "\n[segment trimmed to fit the summarization request]\n";
-    if segment.len() <= limit {
-        return segment.to_string();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_preserves_original_constraints_and_previous_checkpoint() {
+        let history = vec![
+            ChatMessage::user(seed(
+                "The original checkpoint: keep public APIs compatible.",
+            )),
+            ChatMessage::user("Never change the database schema."),
+            ChatMessage::assistant("noise".repeat(20_000), Vec::new()),
+            ChatMessage::assistant("Recent work finished.", Vec::new()),
+        ];
+        let text = budget_transcript(&history, 4_000).unwrap();
+        assert!(text.contains("keep public APIs compatible"));
+        assert!(text.contains("Never change the database schema"));
+        assert!(text.contains("Recent work finished"));
+        assert!(text.len() < 8_000);
     }
-    if limit <= MARKER.len() {
-        return MARKER[..limit].to_string();
+
+    #[test]
+    fn oversized_instructions_fail_instead_of_being_trimmed() {
+        assert!(
+            budget_transcript(&[ChatMessage::user("constraint".repeat(2_000))], 4_000).is_err()
+        );
     }
-    let mut cut = limit - MARKER.len();
-    while cut > 0 && !segment.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}{MARKER}", &segment[..cut])
 }

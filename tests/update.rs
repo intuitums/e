@@ -3,6 +3,8 @@
 //! download, verify, unpack, atomic swap — and the update check: a repo
 //! with no published release reads as already current, never as an error.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
@@ -109,9 +111,15 @@ fn fake_release(binary_contents: &str, poison_checksum: bool) -> (Vec<(String, V
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn install_swaps_the_binary_atomically() {
+async fn install_follows_asset_redirects_and_swaps_the_binary_atomically() {
     let (files, contents) = fake_release("#!/bin/sh\necho new-e\n", false);
     let (base, server) = serve_release(files);
+    let responses = [format!("e-{}.tar.gz", e::core::update::target()), "checksums.txt".into()]
+        .into_iter()
+        .map(|name| format!("HTTP/1.1 302 Found\r\nLocation: {base}/{name}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+        .collect();
+    let (port, redirector) = common::serve_raw(responses);
+    let base = format!("http://127.0.0.1:{port}");
     let dest_dir = std::env::temp_dir().join(format!("e-update-dest-{}", std::process::id()));
     std::fs::create_dir_all(&dest_dir).unwrap();
     let dest = dest_dir.join("e");
@@ -123,6 +131,7 @@ async fn install_swaps_the_binary_atomically() {
     assert_eq!(version, "9.9.9");
     assert_eq!(std::fs::read_to_string(&dest).unwrap(), contents);
     server.join().unwrap();
+    redirector.join().unwrap();
     let _ = std::fs::remove_dir_all(&dest_dir);
 }
 

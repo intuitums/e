@@ -43,13 +43,13 @@ pub async fn run(
     let mut call_names: std::collections::HashMap<String, String> = Default::default();
     let mut pending_thoughts: Vec<serde_json::Value> = Vec::new();
     for m in &request.messages {
-        match m.role.as_str() {
+        match m.role() {
             "assistant" => {
                 let mut parts = std::mem::take(&mut pending_thoughts);
                 if !m.content.is_empty() {
                     parts.push(json!({"text": m.content}));
                 }
-                for call in &m.tool_calls {
+                for call in m.tool_calls() {
                     call_names.insert(call.id.clone(), call.name.clone());
                     let args: serde_json::Value =
                         serde_json::from_str(&call.arguments).unwrap_or(json!({}));
@@ -67,13 +67,12 @@ pub async fn run(
             }
             "tool" => {
                 let name = m
-                    .tool_call_id
-                    .as_deref()
+                    .tool_call_id()
                     .and_then(|id| call_names.get(id))
                     .cloned()
                     .unwrap_or_default();
                 let part = json!({"functionResponse": {
-                    "id": m.tool_call_id.clone().unwrap_or_default(),
+                    "id": m.tool_call_id().cloned().unwrap_or_default(),
                     "name": name,
                     "response": {"output": m.content},
                 }});
@@ -113,7 +112,7 @@ pub async fn run(
                 if !m.content.is_empty() {
                     parts.push(json!({"text": m.content}));
                 }
-                parts.extend(m.images.iter().map(|image| {
+                parts.extend(m.images().iter().map(|image| {
                     json!({"inlineData": {
                         "mimeType": image.media_type,
                         "data": image.data,

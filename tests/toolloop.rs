@@ -90,7 +90,7 @@ async fn agent_runs_a_tool_then_replies() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
-async fn large_tool_result_is_counted_before_the_next_request() {
+async fn large_tool_result_compacts_and_continues_without_frontend_help() {
     let _lock = env_lock();
     let first = concat!(
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",",
@@ -98,7 +98,10 @@ async fn large_tool_result_is_counted_before_the_next_request() {
         "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":25000,\"completion_tokens\":10}}\n\n",
         "data: [DONE]\n\n",
     );
-    let (port, server) = serve_sse(&[first]);
+    let summary = "data: {\"choices\":[{\"delta\":{\"content\":\"The file was read. Finish the task.\"}}]}\n\ndata: [DONE]\n\n";
+    let last =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Task complete.\"}}]}\n\ndata: [DONE]\n\n";
+    let (port, server) = serve_sse(&[first, summary, last]);
     let home = Home::new("tool-context-guard");
     home.auth(r#"{"mock":{"key":"k"}}"#);
     let ws = std::env::temp_dir().join(format!("e-ws-context-{port}"));
@@ -111,11 +114,15 @@ async fn large_tool_result_is_counted_before_the_next_request() {
     agent.submit("read it".into(), "sys".into());
 
     let mut guarded = false;
+    let mut compacted = false;
+    let mut output = String::new();
     while let Some(event) = rx.recv().await {
         match event {
             SessionEvent::Warning(message) if message.contains("context nearly full") => {
                 guarded = true;
             }
+            SessionEvent::Compacted { .. } => compacted = true,
+            SessionEvent::TextDelta(text) => output.push_str(&text),
             SessionEvent::TurnEnd { .. } => break,
             _ => {}
         }
@@ -124,7 +131,12 @@ async fn large_tool_result_is_counted_before_the_next_request() {
         guarded,
         "large result did not trip the mid-turn context guard"
     );
-    assert_eq!(server.join().unwrap().len(), 1, "a second request escaped");
+    assert!(compacted);
+    assert_eq!(output, "Task complete.");
+    assert!(!agent.is_streaming());
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].contains("The file was read"));
     let _ = std::fs::remove_dir_all(&ws);
 }
 

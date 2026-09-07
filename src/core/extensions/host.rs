@@ -1,4 +1,4 @@
-//! The extension host: discovers extensions in `~/.e/extensions/` — a
+//! The extension process host: discovers extensions in `~/.e/extensions/` — a
 //! top-level executable file, or a subdirectory bundling its own files (its
 //! executable plus helpers like a scaffold or data) — keeps one long-lived
 //! process per extension, and routes tools, commands, hooks, and events over
@@ -218,7 +218,7 @@ impl ExtensionHost {
     /// tracks (`strip_typed_flags` just needs to know the shape matched, to
     /// skip the same number of tokens).
     fn match_flag(
-        flag: &crate::core::api::protocol::FlagDecl,
+        flag: &crate::core::extensions::protocol::FlagDecl,
         arg: &str,
         next: Option<&str>,
     ) -> Option<FlagMatch> {

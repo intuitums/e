@@ -42,7 +42,10 @@ frontend:
 - **Model and tool selection** — pick a model and thinking level; enable or
   disable built-in tools.
 - **Configuration injection** — an `E_HOME`-style override so embeddings run
-  fully isolated, the same seam the test suite uses.
+  with their own configuration without mutating the process environment.
+  The core now supports explicit `AgentOptions.home` and `AgentOptions.cwd`;
+  the SDK builder will expose them. Each agent owns its tool observations
+  and background handles, and runs through compaction without frontend help.
 
 The intended shape, not yet implemented:
 

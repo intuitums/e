@@ -22,7 +22,7 @@ fn report_is_redacted_and_local_only() {
     std::fs::write(home.join("settings.json"), r#"{"format_version":1}"#).unwrap();
     std::env::set_var("E_HOME", &home);
 
-    let host = e::core::api::ExtensionHost::empty();
+    let host = e::core::extensions::ExtensionHost::empty();
     let report = e::core::providers::diagnostics::report(&host);
     let rendered = e::core::providers::diagnostics::render(&report);
     assert!(rendered.contains("auth.json: valid, format 1"));
