@@ -30,6 +30,7 @@ use crate::tui::theme::Theme;
 use crate::tui::transcript::{Block, Kind, Transcript};
 use crate::tui::trustpanel::{self, TrustStage};
 
+mod clipboard;
 mod events;
 mod login;
 mod menus;
@@ -89,9 +90,9 @@ enum AppJob {
     /// A prompt an extension command asked to submit as the user.
     Prompt { text: String, epoch: u64 },
     /// An input hook's verdict on a submitted line: consume/replace/notice.
-    /// `images` rides along only for the initial launch prompt (`-i`); a
-    /// hook never sees or handles them, but they still attach once the
-    /// verdict lands on whatever text is actually submitted.
+    /// Images from `-i` or the composer clipboard ride through the text hook;
+    /// the hook never sees their bytes, but they still attach to whatever text
+    /// its verdict submits.
     InputVerdict {
         sequence: u64,
         text: String,
@@ -112,6 +113,11 @@ enum AppJob {
     Reloaded(std::sync::Arc<crate::core::extensions::ExtensionHost>),
     /// The background updater installed a new version.
     Updated(String),
+    /// Images read after ctrl+v, tied to the draft that requested them.
+    ClipboardImages {
+        generation: u64,
+        images: Result<Vec<crate::core::providers::ImageInput>, String>,
+    },
     /// A provider model-list refresh finished; rebuild an open picker.
     CatalogRefreshed,
 }
@@ -196,6 +202,10 @@ struct App {
     keymap: crate::core::config::keybindings::Keymap,
     transcript: Transcript,
     editor: Editor,
+    /// Images attached to the current composer draft by ctrl+v.
+    composer_images: Vec<crate::core::providers::ImageInput>,
+    /// Invalidates a clipboard read when its draft was submitted or cleared.
+    composer_generation: u64,
     agent: Agent,
     active: Option<ActiveTurn>,
     overlay: Option<String>,
@@ -877,14 +887,11 @@ impl App {
             match m.role() {
                 "user" => {
                     open_group = None;
-                    let mut content = m.content.clone();
-                    if !m.images().is_empty() {
-                        content.push_str(&format!(
-                            "\n[attached {} image{}]",
-                            m.images().len(),
-                            if m.images().len() == 1 { "" } else { "s" }
-                        ));
-                    }
+                    let content = if m.images().is_empty() {
+                        m.content.clone()
+                    } else {
+                        display_image_prompt(&m.content, m.images().len())
+                    };
                     self.transcript.push(Block::new(Kind::User, content));
                 }
                 "assistant" => {
@@ -1020,6 +1027,7 @@ impl App {
         self.shell_block = None;
         self.held_prompts.clear();
         self.compacting = false;
+        self.discard_composer_images();
         self.rebuild_transcript(&messages);
         self.agent.load_history(messages);
         self.agent.set_session(Some(session));
@@ -1111,6 +1119,7 @@ impl App {
         self.shell_block = None;
         self.held_prompts.clear();
         self.compacting = false;
+        self.discard_composer_images();
         self.rebuild_transcript(&messages);
         self.agent.rewind_to(head, messages);
         self.editor.set_text(&prompt);
@@ -1135,6 +1144,164 @@ impl App {
             "/resume" => self.open_resume_menu(),
             "/copy" => self.copy_last(),
             other => self.submit(other.to_string()),
+        }
+    }
+
+    /// Insert text normally, or turn a pasted list of image paths into attachments.
+    fn paste(&mut self, text: &str) {
+        let text = text.replace('\r', "\n");
+        let paths: Vec<String> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(String::from)
+            .collect();
+        let all_files = !paths.is_empty()
+            && paths
+                .iter()
+                .all(|path| std::path::Path::new(path).is_file());
+        if all_files && self.agent.model.image_input {
+            if let Ok(images) = crate::core::providers::ImageInput::from_paths(&paths) {
+                self.attach_clipboard_images(self.composer_generation, Ok(images));
+                return;
+            }
+        }
+        self.editor.insert_paste(&text);
+        self.sync_menu();
+    }
+
+    /// Forget attachments with a discarded or replaced composer draft.
+    fn discard_composer_images(&mut self) {
+        self.composer_images.clear();
+        self.composer_generation = self.composer_generation.wrapping_add(1);
+    }
+
+    /// Start a bounded clipboard read without blocking terminal input.
+    fn paste_clipboard_images(&mut self) {
+        if !self.agent.model.image_input {
+            self.notice(format!(
+                "{} does not accept image input",
+                model::slug(&self.agent.model)
+            ));
+            return;
+        }
+        let generation = self.composer_generation;
+        let results = self.results.clone();
+        crate::core::config::home::spawn(async move {
+            let images = tokio::task::spawn_blocking(clipboard::images)
+                .await
+                .unwrap_or_else(|_| Err("clipboard image reader panicked".into()));
+            let _ = results
+                .send(AppJob::ClipboardImages { generation, images })
+                .await;
+        });
+    }
+
+    /// Add clipboard images to the current draft and insert their visible labels.
+    fn attach_clipboard_images(
+        &mut self,
+        generation: u64,
+        images: Result<Vec<crate::core::providers::ImageInput>, String>,
+    ) {
+        if generation != self.composer_generation {
+            return;
+        }
+        let images = match images {
+            Ok(images) if !images.is_empty() => images,
+            Ok(_) => return,
+            Err(error) => {
+                self.notice(error);
+                return;
+            }
+        };
+        let mut batch = self.composer_images.clone();
+        batch.extend(images.iter().cloned());
+        if let Err(error) = crate::core::providers::ImageInput::validate_batch(&batch) {
+            self.notice(error);
+            return;
+        }
+        let first = self.composer_images.len() + 1;
+        let last = first + images.len();
+        let labels = (first..last)
+            .map(|index| format!("[Image {index}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = self.editor.text();
+        let cursor = self.editor.cursor();
+        let before = text.chars().nth(cursor.saturating_sub(1));
+        let after = text.chars().nth(cursor);
+        let prefix = if before.is_some_and(|ch| !ch.is_whitespace()) {
+            " "
+        } else {
+            ""
+        };
+        let suffix = if after.is_some_and(|ch| !ch.is_whitespace()) {
+            " "
+        } else {
+            ""
+        };
+        self.editor
+            .insert_paste(&format!("{prefix}{labels}{suffix}"));
+        self.composer_images.extend(images);
+        self.sync_menu();
+    }
+
+    /// Submit the visible draft with any clipboard images attached to it.
+    fn submit_composer(&mut self, text: String) {
+        if self.composer_images.is_empty() {
+            if !text.trim().is_empty() {
+                self.composer_generation = self.composer_generation.wrapping_add(1);
+            }
+            self.submit(text);
+            return;
+        }
+        if !self.agent.model.image_input {
+            self.editor.set_text(&text);
+            self.notice(format!(
+                "{} does not accept image input",
+                model::slug(&self.agent.model)
+            ));
+            return;
+        }
+        if self.agent.is_streaming()
+            || self.compacting
+            || self.reloading
+            || self.shell_block.is_some()
+        {
+            self.editor.set_text(&text);
+            self.notice("send image prompts between turns".into());
+            return;
+        }
+        self.composer_generation = self.composer_generation.wrapping_add(1);
+        let images = std::mem::take(&mut self.composer_images);
+        self.submit_images(text, images);
+    }
+
+    /// Submit attached images through the same ordered input-hook path as text.
+    fn submit_images(&mut self, text: String, images: Vec<crate::core::providers::ImageInput>) {
+        let text = self.editor.expand_pastes(&text);
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.editor.push_history(text);
+        if self.host.has_input_hook() {
+            let host = self.host.clone();
+            let results = self.results.clone();
+            let sequence = self.input_verdicts.reserve();
+            crate::core::config::home::spawn(async move {
+                let verdict = host.hook_input(&trimmed).await;
+                let _ = results
+                    .send(AppJob::InputVerdict {
+                        sequence,
+                        text: trimmed,
+                        images: Some(images),
+                        verdict,
+                    })
+                    .await;
+            });
+        } else {
+            self.submit_with_images(trimmed, images);
         }
     }
 
@@ -1185,23 +1352,20 @@ impl App {
             self.notice(notice);
         }
         if verdict.consume {
-            // Swallowed entirely — nothing reaches the agent. Images that
-            // rode along with a consumed initial prompt are dropped with
-            // it; there is no accepted text left to attach them to.
+            // Swallowed entirely. Any attached images are dropped with the
+            // text because there is no accepted prompt left to carry them.
         } else if let Some(replace) = verdict.replace {
             // The extension rewrote the line; it already saw the original, so
             // no second hook pass.
             match images {
-                Some(images) if !images.is_empty() => {
-                    self.submit_initial_with_images(replace, images)
-                }
+                Some(images) if !images.is_empty() => self.submit_with_images(replace, images),
                 _ => self.submit_direct(replace),
             }
         } else {
             // Allowed through — the hook already saw the text, so submit
             // directly. Re-running submit() here would loop through the hook.
             match images {
-                Some(images) if !images.is_empty() => self.submit_initial_with_images(text, images),
+                Some(images) if !images.is_empty() => self.submit_with_images(text, images),
                 _ => self.submit_direct(text),
             }
         }
@@ -1242,7 +1406,7 @@ impl App {
                     } else {
                         prompt.to_string()
                     };
-                    self.submit_initial_with_images(prompt, vec![image]);
+                    self.submit_with_images(prompt, vec![image]);
                 }
                 Err(error) => self.notice(format!("could not attach image: {error}")),
             }
@@ -1331,7 +1495,8 @@ impl App {
                 // they stay discoverable.
                 self.notice(
                     "! <cmd> runs a shell command (the model sees the output) · \
-                     shift+tab cycles reasoning effort · ctrl+o opens full tool detail"
+                     shift+tab cycles reasoning effort · ctrl+v attaches clipboard images · \
+                     ctrl+o opens full tool detail"
                         .into(),
                 );
                 self.menu = Some(
@@ -1358,6 +1523,7 @@ impl App {
                 self.shell_block = None;
                 self.reload_block = None;
                 self.context_tokens = 0;
+                self.discard_composer_images();
                 self.agent.clear();
                 self.agent.clear_session_name();
                 self.agent.set_session(None);
@@ -1463,10 +1629,10 @@ impl App {
             return;
         }
         let images = std::mem::take(&mut self.pending_initial_images);
-        self.submit_initial_with_images(text, images);
+        self.submit_with_images(text, images);
     }
 
-    fn submit_initial_with_images(
+    fn submit_with_images(
         &mut self,
         text: String,
         images: Vec<crate::core::providers::ImageInput>,
@@ -1477,13 +1643,8 @@ impl App {
             system_prompt(),
         );
         if !held {
-            self.transcript.push(Block::new(
-                Kind::User,
-                format!(
-                    "{text}\n[attached {count} image{}]",
-                    if count == 1 { "" } else { "s" }
-                ),
-            ));
+            self.transcript
+                .push(Block::new(Kind::User, display_image_prompt(&text, count)));
         }
     }
 
@@ -1796,6 +1957,27 @@ fn command_arg<'a>(input: &'a str, command: &str) -> Option<&'a str> {
     input
         .strip_prefix(command)
         .filter(|rest| rest.is_empty() || rest.starts_with(' '))
+}
+
+/// Stable labels used in the composer and transcript for attached images.
+fn image_labels(count: usize) -> String {
+    (1..=count)
+        .map(|index| format!("[Image {index}]"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Add attachment labels when the prompt text does not already carry them.
+fn display_image_prompt(text: &str, count: usize) -> String {
+    let labels = image_labels(count);
+    let already_labeled = (1..=count).all(|index| text.contains(&format!("[Image {index}]")));
+    if already_labeled {
+        text.to_string()
+    } else if text.trim().is_empty() {
+        labels
+    } else {
+        format!("{labels} {text}")
+    }
 }
 
 /// A screenshot tool commonly pastes an absolute temporary path followed by
@@ -2148,6 +2330,8 @@ async fn run_scoped(
         keymap,
         transcript: Transcript::default(),
         editor: Editor::new(),
+        composer_images: Vec::new(),
+        composer_generation: 0,
         agent,
         active: None,
         overlay: None,
@@ -2280,11 +2464,9 @@ async fn run_scoped(
                 let Some(Ok(event)) = maybe else { break };
                 match event {
                     TermEvent::Paste(text) => {
-                        // A paste is one unit; long or multiline pastes become
-                        // a placeholder token (the reference behavior) that
-                        // expands back on submit.
-                        app.editor.insert_paste(&text.replace('\r', "\n"));
-                        app.sync_menu();
+                        // A paste is one unit. Image paths become attachments;
+                        // long text becomes the editor's expandable placeholder.
+                        app.paste(&text);
                     }
                     TermEvent::Resize(c, r) => {
                         cols = c;
@@ -2293,7 +2475,18 @@ async fn run_scoped(
                     }
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                        if app.viewer.is_some() {
+                        let bare_composer = app.viewer.is_none()
+                            && app.menu.is_none()
+                            && app.settings.is_none()
+                            && app.auth.is_none()
+                            && app.trust.is_none();
+                        if ctrl
+                            && k.code == KeyCode::Char('v')
+                            && bare_composer
+                            && !app.editor.mask
+                        {
+                            app.paste_clipboard_images();
+                        } else if app.viewer.is_some() {
                             let close = k.code == KeyCode::Esc
                                 || (ctrl && k.code == KeyCode::Char('o'));
                             if close {
@@ -2572,8 +2765,9 @@ async fn run_scoped(
                             if app.agent.is_streaming() {
                                 app.agent.interrupt();
                                 arm(&mut app);
-                            } else if !app.editor.is_empty() {
+                            } else if !app.editor.is_empty() || !app.composer_images.is_empty() {
                                 app.editor.set_text("");
+                                app.discard_composer_images();
                                 arm(&mut app);
                             } else if app.armed_at.map(|t| t.elapsed() < Duration::from_millis(1500)).unwrap_or(false) {
                                 break;
@@ -2608,7 +2802,7 @@ async fn run_scoped(
                             // Consumed by the queued-prompt review.
                         } else if let Some(key) = key_of(&k, &app.keymap) {
                             if let EditorResult::Submit(text) = app.editor.key(key) {
-                                app.submit(text);
+                                app.submit_composer(text);
                             }
                             app.sync_menu();
                         }
@@ -2679,6 +2873,9 @@ async fn run_scoped(
                             "e {version} installed — /reload to switch to it now"
                         ));
                         app.update_installed = Some(version);
+                    }
+                    Some(AppJob::ClipboardImages { generation, images }) => {
+                        app.attach_clipboard_images(generation, images);
                     }
                     Some(AppJob::Reloaded(host)) => {
                         app.reloading = false;
@@ -3188,6 +3385,29 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_images_get_numbered_composer_and_chat_labels() {
+        let mut app = session_app();
+        app.agent.model.image_input = true;
+        let image = || crate::core::providers::ImageInput {
+            media_type: "image/png".into(),
+            data: std::sync::Arc::from("AA=="),
+        };
+
+        app.attach_clipboard_images(0, Ok(vec![image(), image()]));
+
+        assert_eq!(app.editor.text(), "[Image 1] [Image 2]");
+        assert_eq!(app.composer_images.len(), 2);
+        assert_eq!(
+            display_image_prompt("explain these", 2),
+            "[Image 1] [Image 2] explain these"
+        );
+        assert_eq!(
+            display_image_prompt("[Image 1] [Image 2] explain these", 2),
+            "[Image 1] [Image 2] explain these"
+        );
+    }
+
+    #[test]
     fn screenshot_paths_at_the_start_of_a_prompt_are_split_from_the_question() {
         let dir = std::env::temp_dir().join(format!("e-shot-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3314,6 +3534,8 @@ mod tests {
             keymap: crate::core::config::keybindings::Keymap::empty(),
             transcript: Transcript::default(),
             editor: Editor::new(),
+            composer_images: Vec::new(),
+            composer_generation: 0,
             agent,
             active: None,
             overlay: None,

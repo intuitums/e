@@ -34,6 +34,40 @@ impl ImageInput {
         Self::from_path_with_size(path).map(|(image, _)| image)
     }
 
+    /// Load image bytes supplied by the clipboard rather than a file path.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
+        Self::from_bytes_named(bytes, "clipboard").map(|(image, _)| image)
+    }
+
+    /// Check count and aggregate size when attachments arrive over several
+    /// clipboard pastes instead of one `from_paths` call.
+    pub fn validate_batch(images: &[Self]) -> Result<(), String> {
+        if images.len() > MAX_IMAGE_COUNT {
+            return Err(format!(
+                "at most {MAX_IMAGE_COUNT} image attachments are allowed"
+            ));
+        }
+        let total = images.iter().try_fold(0u64, |total, image| {
+            let padding = image
+                .data
+                .bytes()
+                .rev()
+                .take_while(|byte| *byte == b'=')
+                .count() as u64;
+            let bytes = (image.data.len() as u64 / 4)
+                .checked_mul(3)
+                .and_then(|size| size.checked_sub(padding))
+                .ok_or_else(|| "image attachment sizes overflowed".to_string())?;
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| "image attachment sizes overflowed".to_string())
+        })?;
+        if total > MAX_TOTAL_IMAGE_BYTES {
+            return Err("image attachments exceed 40 MiB in total".into());
+        }
+        Ok(())
+    }
+
     /// Load a bounded first-turn attachment batch. Keeping count, aggregate,
     /// file-type, and race-safe byte checks here gives the TUI, ask, and RPC
     /// paths one definition of a valid image batch.
@@ -69,7 +103,6 @@ impl ImageInput {
     }
 
     fn from_path_with_size(path: &std::path::Path) -> Result<(Self, u64), String> {
-        use base64::Engine as _;
         let metadata =
             std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
         if !metadata.is_file() {
@@ -89,8 +122,14 @@ impl ImageInput {
         file.take(MAX_IMAGE_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|error| format!("{}: {error}", path.display()))?;
+        Self::from_bytes_named(bytes, &path.display().to_string())
+    }
+
+    /// Validate, identify, and encode one already-read image.
+    fn from_bytes_named(bytes: Vec<u8>, source: &str) -> Result<(Self, u64), String> {
+        use base64::Engine as _;
         if bytes.len() as u64 > MAX_IMAGE_BYTES {
-            return Err(format!("{}: image exceeds 20 MiB", path.display()));
+            return Err(format!("{source}: image exceeds 20 MiB"));
         }
         let media_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
             "image/png"
@@ -102,8 +141,7 @@ impl ImageInput {
             "image/webp"
         } else {
             return Err(format!(
-                "{}: unsupported image data (use png, jpg, gif, or webp)",
-                path.display()
+                "{source}: unsupported image data (use png, jpg, gif, or webp)"
             ));
         };
         let size = bytes.len() as u64;

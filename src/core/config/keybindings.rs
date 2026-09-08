@@ -4,9 +4,10 @@
 //! left unset keeps e's built-in emacs-ish bindings.
 //!
 //! This covers editing only, not e's application-level shortcuts (ctrl+c,
-//! ctrl+p, tab, menu arrows, …): those are claimed earlier in the key
-//! dispatch (`tui/app/mod.rs`), so a chord already spoken for there never
-//! reaches this keymap regardless of what a user binds it to here.
+//! ctrl+p, ctrl+v for clipboard images, tab, menu arrows, …): those are
+//! claimed earlier in the key dispatch (`tui/app/mod.rs`), so a chord already
+//! spoken for there never reaches this keymap regardless of what a user binds
+//! it to here.
 //!
 //! Format: a flat JSON object, chord string to action name.
 //!
