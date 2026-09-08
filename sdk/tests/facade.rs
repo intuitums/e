@@ -34,3 +34,41 @@ fn builder_resolves_models_and_reports_a_bad_slug() {
 
     std::fs::remove_dir_all(&home).ok();
 }
+
+/// The builder's `.home()` method scopes model resolution and system prompt
+/// generation to the specified home — credentials, settings, and AGENTS.md are
+/// read from there, not from E_HOME or the default ~/.e.
+#[test]
+fn builder_home_isolates_construction() {
+    // Create an isolated home with a distinctive AGENTS.md.
+    let isolated = std::env::temp_dir().join(format!(
+        "e-sdk-home-isolate-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&isolated).unwrap();
+    let marker = "SDK_HOME_ISOLATION_MARKER_9f3a2c";
+    std::fs::write(isolated.join("AGENTS.md"), marker).unwrap();
+
+    // Build a session pointing at the isolated home.
+    let mut session = Session::builder()
+        .home(&isolated)
+        .save_session(false)
+        .build()
+        .unwrap();
+
+    // The agent's system_prompt() assembles from its stored home, so it should
+    // include the isolated AGENTS.md content. This verifies that with_home
+    // scoped the construction correctly and the agent received the home.
+    let prompt = session.agent_mut().system_prompt();
+    assert!(
+        prompt.contains(marker),
+        "system prompt should include the isolated home's AGENTS.md content, but got:\n{}",
+        &prompt[..prompt.len().min(500)]
+    );
+
+    std::fs::remove_dir_all(&isolated).ok();
+}
