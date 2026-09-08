@@ -7,6 +7,15 @@ the pipeline publishes.
 
 ## Unreleased
 
+- The composer stays visible when a scrolled frame shrinks, and large streamed
+  appends paint every new row even when earlier Markdown changes. Resize keeps
+  native scrollback and redraws only the visible tail. Later tool batches retain
+  expanded thinking instead of deleting it.
+- Painting takes ownership of pending frames and compares only visible content,
+  reducing repeated work in long sessions. PTY regressions cover streaming and
+  tool completion across resize; release benchmarks now budget long-session
+  frame rendering.
+
 - Cancellation skips queued tool waves, and late tool events cannot change a
   newer turn. Rejected-image text stays a literal prompt, even when it starts
   with a command.

@@ -3685,6 +3685,11 @@ mod tests {
             "a fresh burst opens its own block below the tools"
         );
 
+        // Continuing tools must not absorb expanded reasoning as though it
+        // were an old collapsed summary, shrinking the transcript mid-turn.
+        app.on_session_event(tool_batch());
+        assert_eq!(thinking_flags(&app).len(), 2);
+
         app.on_session_event(SessionEvent::TurnEnd { aborted: false });
         assert_eq!(
             thinking_flags(&app),
