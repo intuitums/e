@@ -59,7 +59,11 @@ fn run(program: &str, args: &[&str]) -> Result<RunOutput, RunError> {
 
     // Read (bounded) on a helper thread so the deadline can fire even when
     // the child never closes its pipe; the pipe dies with the kill below.
+    // A second channel carries the reader's exit, so a pathological process
+    // that escaped the group and still holds the pipe can only ever cost a
+    // bounded wait — never a hang, and never a bricked clipboard.
     let (sender, receiver) = std::sync::mpsc::channel();
+    let (done_sender, done_receiver) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         let mut buffer = Vec::new();
         let mut chunk = [0u8; 8192];
@@ -75,6 +79,7 @@ fn run(program: &str, args: &[&str]) -> Result<RunOutput, RunError> {
             }
         }
         let _ = sender.send(buffer);
+        let _ = done_sender.send(());
     });
 
     let stdout = match receiver.recv_timeout(READ_TIMEOUT) {
@@ -82,7 +87,7 @@ fn run(program: &str, args: &[&str]) -> Result<RunOutput, RunError> {
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             crate::core::tools::kill_group(child.id());
             let _ = child.wait();
-            let _ = reader.join();
+            await_reader(&done_receiver);
             return Err(RunError::Failed(format!(
                 "{program} did not finish within {}s",
                 READ_TIMEOUT.as_secs()
@@ -101,12 +106,43 @@ fn run(program: &str, args: &[&str]) -> Result<RunOutput, RunError> {
             MAX_IMAGE_BYTES / (1024 * 1024)
         )));
     }
-    let success = child.wait().map(|status| status.success()).unwrap_or(false);
-    // The leader exited, but a forked descendant may still hold the pipe
-    // and block the reader — take the whole group down before joining.
+    // Give the helper a bounded chance to exit on its own; kill the whole
+    // group while the child is unreaped either way — its pid is still the
+    // valid group id then, and cannot yet have been reused.
+    let deadline = std::time::Instant::now() + READ_TIMEOUT;
+    let success = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => {
+                crate::core::tools::kill_group(child.id());
+                let _ = child.wait();
+                await_reader(&done_receiver);
+                return Err(RunError::Failed(format!(
+                    "{program} did not finish within {}s",
+                    READ_TIMEOUT.as_secs()
+                )));
+            }
+        }
+    };
+    // The leader has exited, but a forked descendant may still hold the
+    // pipe and block the reader — take the group down before waiting for
+    // the reader's exit.
     crate::core::tools::kill_group(child.id());
+    let _ = child.wait();
+    await_reader(&done_receiver);
     let _ = reader.join();
     Ok(RunOutput { success, stdout })
+}
+
+/// Wait briefly for the reader thread to finish. A process that escaped
+/// the group and still holds the pipe would block a plain join forever;
+/// after the bounded wait the thread is left to die whenever the pipe
+/// finally closes, and the read reports its result regardless.
+fn await_reader(done: &std::sync::mpsc::Receiver<()>) {
+    let _ = done.recv_timeout(std::time::Duration::from_secs(2));
 }
 
 /// Read one clipboard payload. File-copy clipboards may contain several image
@@ -133,7 +169,7 @@ on run
         repeat with clipboardItem in clipboardItems
             set end of paths to POSIX path of clipboardItem
         end repeat
-        set AppleScript's text item delimiters to linefeed
+        set AppleScript's text item delimiters to (character id 0)
         return paths as text
     on error
         return ""
@@ -145,9 +181,10 @@ end run
         return None;
     }
     let text = String::from_utf8(output.stdout).ok()?;
-    // `lines` already drops the separators; trim nothing — a path is data.
+    // NUL-delimited — a NUL cannot occur in a POSIX path, so a filename
+    // containing a newline survives intact. Trim nothing: a path is data.
     let paths: Vec<String> = text
-        .lines()
+        .split('\0')
         .filter(|path| !path.is_empty())
         .map(String::from)
         .collect();
@@ -297,7 +334,16 @@ fn command_output(program: &str, args: &[&str]) -> Result<Option<Vec<u8>>, Strin
 fn paths_from_uri_list(text: &str) -> Vec<String> {
     text.lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter_map(|line| line.strip_prefix("file://"))
+        .filter_map(|line| {
+            let rest = line.strip_prefix("file://")?;
+            // `file://localhost/…` means the local host; an empty authority
+            // is already the leading slash. Remote authorities stay put.
+            let path = match rest.strip_prefix("localhost/") {
+                Some(local) => local,
+                None => rest,
+            };
+            (!path.is_empty()).then_some(path)
+        })
         .filter_map(percent_decode)
         .collect()
 }
@@ -332,7 +378,7 @@ mod tests {
     fn uri_lists_decode_multiple_file_paths() {
         assert_eq!(
             super::paths_from_uri_list(
-                "# copied files\nfile:///tmp/one%20shot.png\nfile:///tmp/two.jpg\n"
+                "# copied files\nfile:///tmp/one%20shot.png\nfile://localhost/tmp/two.jpg\n"
             ),
             ["/tmp/one shot.png", "/tmp/two.jpg"]
         );

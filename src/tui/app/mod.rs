@@ -117,6 +117,9 @@ enum AppJob {
     ClipboardImages {
         generation: u64,
         images: Result<Vec<crate::core::providers::ImageInput>, String>,
+        /// The pasted text to restore when a path attachment cannot load —
+        /// a clipboard read has nothing to restore, a paste does.
+        fallback: Option<String>,
     },
     /// A provider model-list refresh finished; rebuild an open picker.
     CatalogRefreshed,
@@ -1169,9 +1172,11 @@ impl App {
             if all_files && self.agent.model.image_input {
                 // The reads run off the event loop — a slow or networked
                 // file must not stall input and repaint. Stale results are
-                // dropped by the draft generation, like a clipboard read.
+                // dropped by the draft generation, like a clipboard read;
+                // a read that cannot attach restores the pasted text.
                 let generation = self.composer_generation;
                 let results = self.results.clone();
+                let fallback = Some(text.clone());
                 crate::core::config::home::spawn(async move {
                     let images = tokio::task::spawn_blocking(move || {
                         crate::core::providers::ImageInput::from_paths(&paths)
@@ -1179,7 +1184,11 @@ impl App {
                     .await
                     .unwrap_or_else(|_| Err("image attachment reader panicked".into()));
                     let _ = results
-                        .send(AppJob::ClipboardImages { generation, images })
+                        .send(AppJob::ClipboardImages {
+                            generation,
+                            images,
+                            fallback,
+                        })
                         .await;
                 });
                 return;
@@ -1205,6 +1214,15 @@ impl App {
         self.composer_generation = self.composer_generation.wrapping_add(1);
     }
 
+    /// Put a paste back into the composer when its images could not load —
+    /// the text is the user's, whether or not it turned into attachments.
+    fn restore_fallback(&mut self, fallback: Option<String>) {
+        if let Some(text) = fallback {
+            self.editor.insert_paste(&text);
+            self.sync_menu();
+        }
+    }
+
     /// Start a bounded clipboard read without blocking terminal input. One
     /// read at a time — a second ctrl+v while one is in flight is declined
     /// rather than stacked, so a slow helper cannot accumulate waiters.
@@ -1227,7 +1245,11 @@ impl App {
                 .await
                 .unwrap_or_else(|_| Err("clipboard image reader panicked".into()));
             let _ = results
-                .send(AppJob::ClipboardImages { generation, images })
+                .send(AppJob::ClipboardImages {
+                    generation,
+                    images,
+                    fallback: None,
+                })
                 .await;
         });
     }
@@ -1237,6 +1259,7 @@ impl App {
         &mut self,
         generation: u64,
         images: Result<Vec<crate::core::providers::ImageInput>, String>,
+        fallback: Option<String>,
     ) {
         if generation != self.composer_generation {
             self.clipboard_reading = false;
@@ -1248,6 +1271,7 @@ impl App {
             Ok(_) => return,
             Err(error) => {
                 self.notice(error);
+                self.restore_fallback(fallback);
                 return;
             }
         };
@@ -1255,6 +1279,7 @@ impl App {
         batch.extend(images.iter().cloned());
         if let Err(error) = crate::core::providers::ImageInput::validate_batch(&batch) {
             self.notice(error);
+            self.restore_fallback(fallback);
             return;
         }
         let first = self.composer_images.len() + 1;
@@ -1332,7 +1357,8 @@ impl App {
         if trimmed.is_empty() {
             return;
         }
-        self.editor.push_history(text);
+        // History is recorded where the prompt is actually accepted — the
+        // hook may consume or replace this text.
         if self.host.has_input_hook() {
             let host = self.host.clone();
             let results = self.results.clone();
@@ -1425,20 +1451,24 @@ impl App {
         if trimmed.is_empty() {
             return;
         }
-        self.editor.push_history(text);
 
         if let Some((path, prompt)) = leading_image_prompt(&trimmed) {
+            // The successful branch records history in submit_with_images,
+            // with the text that actually went to the model; these falls
+            // record the original line.
             if !self.agent.model.image_input {
                 // The image cannot ride along, but the question after the
                 // path is still the user's prompt — discarding it and
                 // stopping the turn would swallow the typed message along
                 // with the attachment.
                 if prompt.is_empty() {
+                    self.editor.push_history(text);
                     self.notice(format!(
                         "{} does not accept image input",
                         model::slug(&self.agent.model)
                     ));
                 } else {
+                    self.editor.push_history(text);
                     self.notice(format!(
                         "{} does not accept image input — sending the text without the screenshot",
                         model::slug(&self.agent.model)
@@ -1456,10 +1486,15 @@ impl App {
                     };
                     self.submit_with_images(prompt, vec![image]);
                 }
-                Err(error) => self.notice(format!("could not attach image: {error}")),
+                Err(error) => {
+                    self.editor.push_history(text);
+                    self.notice(format!("could not attach image: {error}"));
+                }
             }
             return;
         }
+
+        self.editor.push_history(text);
 
         // `!cmd` runs in the shell directly; the output lands in the
         // transcript and in history, so the model sees what the user did.
@@ -1685,6 +1720,7 @@ impl App {
         text: String,
         images: Vec<crate::core::providers::ImageInput>,
     ) {
+        self.editor.push_history(text.clone());
         let count = images.len();
         let held = self.agent.submit_message(
             crate::core::providers::ChatMessage::user_with_images(text.clone(), images),
@@ -2669,6 +2705,7 @@ async fn run_scoped(
                                     app.pending_key = None;
                                     app.editor.mask = false;
                                     app.editor.set_text("");
+                                    app.discard_composer_images();
                                     if waiting && cancelled {
                                         app.notice("login cancelled".into());
                                     }
@@ -2802,6 +2839,7 @@ async fn run_scoped(
                             app.pending_key = None;
                             app.editor.mask = false;
                             app.editor.set_text("");
+                            app.discard_composer_images();
                             app.notice("login cancelled".into());
                         } else if k.code == KeyCode::Esc && app.agent.is_streaming() {
                             app.agent.interrupt();
@@ -2921,8 +2959,12 @@ async fn run_scoped(
                         ));
                         app.update_installed = Some(version);
                     }
-                    Some(AppJob::ClipboardImages { generation, images }) => {
-                        app.attach_clipboard_images(generation, images);
+                    Some(AppJob::ClipboardImages {
+                        generation,
+                        images,
+                        fallback,
+                    }) => {
+                        app.attach_clipboard_images(generation, images, fallback);
                     }
                     Some(AppJob::Reloaded(host)) => {
                         app.reloading = false;
@@ -3479,7 +3521,7 @@ mod tests {
             data: std::sync::Arc::from("AA=="),
         };
 
-        app.attach_clipboard_images(0, Ok(vec![image(), image()]));
+        app.attach_clipboard_images(0, Ok(vec![image(), image()]), None);
 
         assert_eq!(app.editor.text(), "[Image 1] [Image 2]");
         assert_eq!(app.composer_images.len(), 2);
