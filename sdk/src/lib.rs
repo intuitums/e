@@ -120,9 +120,7 @@ impl SessionBuilder {
         // providers, AGENTS.md for project instructions), so run them inside
         // with_home for the effective home.
         let model = home::with_home(effective_home.clone(), || match &self.model {
-            Some(slug) => {
-                catalog::resolve(slug).ok_or_else(|| Error::ModelNotFound(slug.clone()))
-            }
+            Some(slug) => catalog::resolve(slug).ok_or_else(|| Error::ModelNotFound(slug.clone())),
             None => Ok(catalog::default_model()),
         })?;
 
