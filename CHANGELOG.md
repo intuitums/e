@@ -7,6 +7,9 @@ the pipeline publishes.
 
 ## Unreleased
 
+## 0.0.1 — 2026-09-08
+
+
 - ctrl+v attaches desktop-clipboard images to the composer draft: file copies
   become attachments by path, bitmaps are read directly (macOS via osascript,
   Linux via wl-paste/xclip). Helpers run with a timeout and a byte cap so a
@@ -147,7 +150,6 @@ the pipeline publishes.
   author wrote; a definition is an ordinary paragraph). The parity suite
   pins both retirements so they cannot creep back unnoticed.
 
-## 0.0.1 — 2026-08-29
 
 - Provider failures are classified by the error body's own wording, not
   just the HTTP status: a hard quota or billing wall (OpenCode Zen Go's

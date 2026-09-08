@@ -29,7 +29,7 @@ pub mod tui;
 /// The build's user-facing version, kept in sync with the `version` in
 /// `Cargo.toml` — `scripts/release-check.sh` requires both to equal the
 /// release tag before a `vX.Y.Z` tag can publish.
-pub const VERSION: &str = "0.0.0";
+pub const VERSION: &str = "0.0.1";
 
 /// The client name e identifies itself with to gateways that recognize their
 /// callers (sent as the provider's declared `client_header`, e.g. OpenCode's
