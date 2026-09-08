@@ -6,7 +6,7 @@ this script do it. Normal runs write a timestamped report. `--check` applies
 deliberately generous cross-runner budgets and writes nothing, making it a
 stable regression alarm rather than a microbenchmark contest.
 """
-import argparse, datetime, fcntl, json, os, platform, pty, select, shutil
+import argparse, datetime, fcntl, json, os, platform, pty, re, select, shutil
 import statistics, struct, subprocess, sys, termios, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,6 +21,18 @@ def build():
 
 def binary_size():
     return os.path.getsize(BINARY)
+
+
+def long_session_frame():
+    """Measure cached transcript assembly and dock painting into a sink."""
+    result = subprocess.run(
+        ["cargo", "test", "--release", "--locked", "--lib",
+         "long_session_frame_benchmark", "--", "--ignored", "--nocapture"],
+        cwd=ROOT, capture_output=True, text=True, check=True)
+    match = re.search(r"renderer 10000 blocks: ([0-9.]+) ms/frame", result.stderr)
+    if not match:
+        raise RuntimeError("renderer benchmark did not report its measurement")
+    return float(match.group(1))
 
 
 def cold_start_version(runs=20):
@@ -87,6 +99,7 @@ def main():
     size = binary_size()
     cold = cold_start_version()
     boot = boot_to_first_frame()
+    frame = long_session_frame()
 
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
     report = "\n".join([
@@ -96,6 +109,7 @@ def main():
         f"binary size:     {size} bytes ({size / 1024 / 1024:.2f} MiB)",
         f"cold start:      {cold:.1f} ms   (e --version, median of 20)",
         f"first frame:     {boot:.1f} ms   (spawn → banner on a bare home, median of 5)",
+        f"long session:    {frame:.3f} ms/frame   (10,000 cached reply blocks, mean of 100)",
         "",
     ])
     out = os.path.join(ROOT, "benchmarks", "results", f"{stamp}_{commit}.txt")
@@ -107,6 +121,7 @@ def main():
             "binary_size_bytes": size,
             "cold_start_ms": cold,
             "first_frame_ms": boot,
+            "long_session_frame_ms": frame,
         }
         failures = [
             f"{name}: {measurements[name]:.1f} > {limit}"
