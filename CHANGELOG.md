@@ -9,8 +9,12 @@ the pipeline publishes.
 
 - ctrl+v attaches desktop-clipboard images to the composer draft: file copies
   become attachments by path, bitmaps are read directly (macOS via osascript,
-  Linux via wl-paste/xclip), a stuck read surfaces as a notice instead of a
-  panic, and submitted labels `[Image 1] [Image 2]` match the transcript.
+  Linux via wl-paste/xclip). Helpers run with a timeout and a byte cap so a
+  hung or flooding clipboard cannot stall the session, and a failed read
+  surfaces as a notice. Attachments ride the same steering queue as text
+  (whole messages, images included), never attach over an open surface, and
+  commands submitted with a draft attached dispatch without them. Submitted
+  labels `[Image 1] [Image 2]` match the transcript.
 - The composer stays visible when a scrolled frame shrinks, and large streamed
   appends paint every new row even when earlier Markdown changes. Resize keeps
   native scrollback and redraws only the visible tail. Later tool batches retain

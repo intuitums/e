@@ -1,6 +1,94 @@
 //! Read image attachments from the desktop clipboard without a resident helper.
+//!
+//! Every subprocess run is bounded twice — a wall-clock deadline and a
+//! stdout cap — so a hung or flooding clipboard owner (or a PATH-replaced
+//! helper) can neither stall a ctrl+v forever nor balloon memory: the run
+//! is killed and the read surfaces as a notice.
 
-use crate::core::providers::ImageInput;
+use crate::core::providers::{ImageInput, MAX_IMAGE_BYTES};
+
+/// One clipboard read may take this long before its helpers are killed.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Bounded helpers are looked up at their system paths, not via `PATH`.
+#[cfg(target_os = "macos")]
+const OSASCRIPT: &str = "/usr/bin/osascript";
+#[cfg(target_os = "macos")]
+const SIPS: &str = "/usr/bin/sips";
+
+/// Run a helper, bounded. `Ok` carries the exit status and the capped
+/// stdout; `Err` is a spawn failure (`Missing` — try the next helper) or a
+/// timeout / over-cap read (give up, the payload is unusable either way).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(super) enum RunError {
+    Missing,
+    Failed(String),
+}
+
+struct RunOutput {
+    success: bool,
+    stdout: Vec<u8>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn run(program: &str, args: &[&str]) -> Result<RunOutput, RunError> {
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                RunError::Missing
+            } else {
+                RunError::Failed(format!("{program}: {error}"))
+            }
+        })?;
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(RunError::Failed(format!("{program}: no stdout pipe")));
+    };
+
+    // Read (bounded) on a helper thread so the deadline can fire even when
+    // the child never closes its pipe; the pipe dies with the kill below.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    buffer.extend_from_slice(&chunk[..read]);
+                    if buffer.len() as u64 > MAX_IMAGE_BYTES {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = sender.send(buffer);
+    });
+
+    let stdout = match receiver.recv_timeout(READ_TIMEOUT) {
+        Ok(buffer) => buffer,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RunError::Failed(format!(
+                "{program} did not finish within {}s",
+                READ_TIMEOUT.as_secs()
+            )));
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Vec::new(),
+    };
+    let success = child.wait().map(|status| status.success()).unwrap_or(false);
+    let _ = reader.join();
+    Ok(RunOutput { success, stdout })
+}
 
 /// Read one clipboard payload. File-copy clipboards may contain several image
 /// paths; bitmap clipboards produce one encoded image.
@@ -33,17 +121,14 @@ on run
     end try
 end run
 "#;
-    let output = std::process::Command::new("osascript")
-        .args(["-e", SCRIPT])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    let output = run(OSASCRIPT, &["-e", SCRIPT]).ok()?;
+    if !output.success {
         return None;
     }
     let text = String::from_utf8(output.stdout).ok()?;
+    // `lines` already drops the separators; trim nothing — a path is data.
     let paths: Vec<String> = text
         .lines()
-        .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(String::from)
         .collect();
@@ -83,47 +168,53 @@ on run argv
 end run
 "#;
 
-    let root = crate::core::config::home::home();
-    std::fs::create_dir_all(&root).map_err(|error| format!("clipboard: {error}"))?;
+    // The system temp dir, not the e home: the export is transient and is
+    // removed below, and osascript's write itself cannot be size-capped —
+    // the bound is enforced when the file is read back.
+    let dir = std::env::temp_dir();
     let id = uuid::Uuid::now_v7();
-    let raw = root.join(format!(".clipboard-{id}.image"));
-    let png = root.join(format!(".clipboard-{id}.png"));
+    let raw = dir.join(format!(".e-clipboard-{id}.image"));
+    let png = dir.join(format!(".e-clipboard-{id}.png"));
+    let (Some(raw), Some(png)) = (raw.to_str(), png.to_str()) else {
+        return Err("clipboard: temp path is not valid unicode".into());
+    };
+    let raw_path = std::path::PathBuf::from(raw);
+    let png_path = std::path::PathBuf::from(png);
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&raw)
+        .open(&raw_path)
         .map_err(|error| format!("clipboard: {error}"))?;
 
     let result = (|| {
-        let output = std::process::Command::new("osascript")
-            .args(["-e", SCRIPT])
-            .arg(&raw)
-            .output()
-            .map_err(|error| format!("clipboard: {error}"))?;
-        if !output.status.success() {
+        let output = run(OSASCRIPT, &["-e", SCRIPT, raw]).map_err(unusable)?;
+        if !output.success {
             return Err("clipboard does not contain an image".into());
         }
-        match ImageInput::from_path(&raw) {
+        match ImageInput::from_path(&raw_path) {
             Ok(image) => Ok(image),
             Err(_) => {
-                let converted = std::process::Command::new("sips")
-                    .args(["-s", "format", "png"])
-                    .arg(&raw)
-                    .arg("--out")
-                    .arg(&png)
-                    .output()
-                    .map_err(|error| format!("clipboard: {error}"))?;
-                if !converted.status.success() {
+                let converted =
+                    run(SIPS, &["-s", "format", "png", raw, "--out", png]).map_err(unusable)?;
+                if !converted.success {
                     return Err("clipboard image could not be converted to PNG".into());
                 }
-                ImageInput::from_path(&png)
+                ImageInput::from_path(&png_path)
             }
         }
     })();
-    let _ = std::fs::remove_file(raw);
-    let _ = std::fs::remove_file(png);
+    let _ = std::fs::remove_file(&raw_path);
+    let _ = std::fs::remove_file(&png_path);
     result
+}
+
+#[cfg(target_os = "macos")]
+fn unusable(error: RunError) -> String {
+    match error {
+        RunError::Missing => "osascript is not available".into(),
+        RunError::Failed(message) => message,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -135,46 +226,57 @@ fn platform_images() -> Result<Vec<ImageInput>, String> {
             vec!["-selection", "clipboard", "-t", "text/uri-list", "-o"],
         ),
     ] {
-        if let Some(bytes) = command_output(program, &args) {
-            if let Ok(text) = String::from_utf8(bytes) {
-                let paths = paths_from_uri_list(&text);
-                if !paths.is_empty() {
-                    if let Ok(images) = ImageInput::from_paths(&paths) {
-                        return Ok(images);
+        match command_output(program, &args) {
+            Ok(Some(bytes)) => {
+                if let Ok(text) = String::from_utf8(bytes) {
+                    let paths = paths_from_uri_list(&text);
+                    if !paths.is_empty() {
+                        if let Ok(images) = ImageInput::from_paths(&paths) {
+                            return Ok(images);
+                        }
                     }
                 }
             }
+            Ok(None) => {}
+            Err(error) => return Err(error),
         }
     }
     for mime in ["image/png", "image/jpeg", "image/webp", "image/gif"] {
-        if let Some(bytes) = command_output("wl-paste", &["--no-newline", "--type", mime]) {
-            if let Ok(image) = ImageInput::from_bytes(bytes) {
-                return Ok(vec![image]);
-            }
-        }
-        if let Some(bytes) = command_output("xclip", &["-selection", "clipboard", "-t", mime, "-o"])
-        {
-            if let Ok(image) = ImageInput::from_bytes(bytes) {
-                return Ok(vec![image]);
+        for program in ["wl-paste", "xclip"] {
+            let args: Vec<&str> = if program == "wl-paste" {
+                vec!["--no-newline", "--type", mime]
+            } else {
+                vec!["-selection", "clipboard", "-t", mime, "-o"]
+            };
+            match command_output(program, &args) {
+                Ok(Some(bytes)) => {
+                    if let Ok(image) = ImageInput::from_bytes(bytes) {
+                        return Ok(vec![image]);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => return Err(error),
             }
         }
     }
     Err("clipboard does not contain a supported image".into())
 }
 
+/// `Ok(None)`: the helper is absent or reported nothing — try the next one.
+/// `Err`: the read failed for a reason worth reporting (timeout, over-cap).
 #[cfg(target_os = "linux")]
-fn command_output(program: &str, args: &[&str]) -> Option<Vec<u8>> {
-    let output = std::process::Command::new(program)
-        .args(args)
-        .output()
-        .ok()?;
-    (output.status.success() && !output.stdout.is_empty()).then_some(output.stdout)
+fn command_output(program: &str, args: &[&str]) -> Result<Option<Vec<u8>>, String> {
+    match run(program, args) {
+        Ok(output) if output.success && !output.stdout.is_empty() => Ok(Some(output.stdout)),
+        Ok(_) => Ok(None),
+        Err(RunError::Missing) => Ok(None),
+        Err(RunError::Failed(message)) => Err(message),
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn paths_from_uri_list(text: &str) -> Vec<String> {
     text.lines()
-        .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter_map(|line| line.strip_prefix("file://"))
         .filter_map(percent_decode)
@@ -214,6 +316,14 @@ mod tests {
                 "# copied files\nfile:///tmp/one%20shot.png\nfile:///tmp/two.jpg\n"
             ),
             ["/tmp/one shot.png", "/tmp/two.jpg"]
+        );
+    }
+
+    #[test]
+    fn a_missing_helper_tries_the_next_one() {
+        assert_eq!(
+            super::command_output("e-definitely-not-installed", &[]),
+            Ok(None)
         );
     }
 }

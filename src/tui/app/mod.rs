@@ -206,6 +206,8 @@ struct App {
     composer_images: Vec<crate::core::providers::ImageInput>,
     /// Invalidates a clipboard read when its draft was submitted or cleared.
     composer_generation: u64,
+    /// One clipboard read at a time; cleared when its result lands.
+    clipboard_reading: bool,
     agent: Agent,
     active: Option<ActiveTurn>,
     overlay: Option<String>,
@@ -1147,27 +1149,42 @@ impl App {
         }
     }
 
-    /// Insert text normally, or turn a pasted list of image paths into attachments.
+    /// Insert text normally, or turn a pasted list of image paths into
+    /// attachments — but only into a free composer: over an open surface a
+    /// paste is plain text, so it cannot silently stack onto a draft the
+    /// user is not looking at.
     fn paste(&mut self, text: &str) {
         let text = text.replace('\r', "\n");
-        let paths: Vec<String> = text
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(String::from)
-            .collect();
-        let all_files = !paths.is_empty()
-            && paths
-                .iter()
-                .all(|path| std::path::Path::new(path).is_file());
-        if all_files && self.agent.model.image_input {
-            if let Ok(images) = crate::core::providers::ImageInput::from_paths(&paths) {
-                self.attach_clipboard_images(self.composer_generation, Ok(images));
-                return;
+        if self.composer_free() {
+            let paths: Vec<String> = text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(String::from)
+                .collect();
+            let all_files = !paths.is_empty()
+                && paths
+                    .iter()
+                    .all(|path| std::path::Path::new(path).is_file());
+            if all_files && self.agent.model.image_input {
+                if let Ok(images) = crate::core::providers::ImageInput::from_paths(&paths) {
+                    self.attach_clipboard_images(self.composer_generation, Ok(images));
+                    return;
+                }
             }
         }
         self.editor.insert_paste(&text);
         self.sync_menu();
+    }
+
+    /// True when nothing overlays the composer and a paste may attach to it.
+    fn composer_free(&self) -> bool {
+        self.viewer.is_none()
+            && self.menu.is_none()
+            && self.settings.is_none()
+            && self.auth.is_none()
+            && self.trust.is_none()
+            && self.queue_review.is_none()
     }
 
     /// Forget attachments with a discarded or replaced composer draft.
@@ -1176,7 +1193,9 @@ impl App {
         self.composer_generation = self.composer_generation.wrapping_add(1);
     }
 
-    /// Start a bounded clipboard read without blocking terminal input.
+    /// Start a bounded clipboard read without blocking terminal input. One
+    /// read at a time — a second ctrl+v while one is in flight is declined
+    /// rather than stacked, so a slow helper cannot accumulate waiters.
     fn paste_clipboard_images(&mut self) {
         if !self.agent.model.image_input {
             self.notice(format!(
@@ -1185,6 +1204,10 @@ impl App {
             ));
             return;
         }
+        if self.clipboard_reading {
+            return;
+        }
+        self.clipboard_reading = true;
         let generation = self.composer_generation;
         let results = self.results.clone();
         crate::core::config::home::spawn(async move {
@@ -1204,8 +1227,10 @@ impl App {
         images: Result<Vec<crate::core::providers::ImageInput>, String>,
     ) {
         if generation != self.composer_generation {
+            self.clipboard_reading = false;
             return;
         }
+        self.clipboard_reading = false;
         let images = match images {
             Ok(images) if !images.is_empty() => images,
             Ok(_) => return,
@@ -1240,8 +1265,9 @@ impl App {
         } else {
             ""
         };
-        self.editor
-            .insert_paste(&format!("{prefix}{labels}{suffix}"));
+        // The labels are e's own text, not user input: a literal insert,
+        // never the expandable paste placeholder.
+        self.editor.insert_str(&format!("{prefix}{labels}{suffix}"));
         self.composer_images.extend(images);
         self.sync_menu();
     }
@@ -1252,6 +1278,16 @@ impl App {
             if !text.trim().is_empty() {
                 self.composer_generation = self.composer_generation.wrapping_add(1);
             }
+            self.submit(text);
+            return;
+        }
+        // A command or shell line never carries images: route the text
+        // through the normal dispatch and drop the attachments — they were
+        // attached to a draft, and the dispatch owns what happens to it.
+        let trimmed = text.trim();
+        if trimmed.starts_with('/') || trimmed.starts_with('!') {
+            self.discard_composer_images();
+            self.notice("commands do not carry image attachments".into());
             self.submit(text);
             return;
         }
@@ -2332,6 +2368,7 @@ async fn run_scoped(
         editor: Editor::new(),
         composer_images: Vec::new(),
         composer_generation: 0,
+        clipboard_reading: false,
         agent,
         active: None,
         overlay: None,
@@ -2475,14 +2512,9 @@ async fn run_scoped(
                     }
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                        let bare_composer = app.viewer.is_none()
-                            && app.menu.is_none()
-                            && app.settings.is_none()
-                            && app.auth.is_none()
-                            && app.trust.is_none();
                         if ctrl
                             && k.code == KeyCode::Char('v')
-                            && bare_composer
+                            && app.composer_free()
                             && !app.editor.mask
                         {
                             app.paste_clipboard_images();
@@ -3385,6 +3417,45 @@ mod tests {
     }
 
     #[test]
+    fn a_command_submitted_with_attachments_dispatches_without_them() {
+        let mut app = session_app();
+        app.composer_images = vec![crate::core::providers::ImageInput {
+            media_type: "image/png".into(),
+            data: std::sync::Arc::from("AA=="),
+        }];
+
+        app.submit_composer("/effort high".into());
+
+        assert!(app.composer_images.is_empty(), "commands drop attachments");
+        // The command dispatched: this model has no effort levels, so the
+        // command's own notice replaces a model prompt.
+        let notice = app
+            .transcript
+            .blocks
+            .iter()
+            .rev()
+            .find(|block| block.kind == crate::tui::transcript::Kind::Notice)
+            .expect("the command dispatched");
+        assert_eq!(notice.text, "this model has no reasoning effort control");
+    }
+
+    #[test]
+    fn a_paste_over_an_open_surface_stays_text() {
+        let mut app = session_app();
+        app.viewer = Some(Viewer {
+            full: false,
+            scroll: 0,
+        });
+        let path = std::env::temp_dir().join("e-paste-gate-test.png");
+        std::fs::write(&path, b"png").unwrap();
+
+        app.paste(&path.display().to_string());
+
+        assert!(app.composer_images.is_empty(), "no attach over a surface");
+        assert_eq!(app.editor.text(), path.display().to_string());
+    }
+
+    #[test]
     fn clipboard_images_get_numbered_composer_and_chat_labels() {
         let mut app = session_app();
         app.agent.model.image_input = true;
@@ -3536,6 +3607,7 @@ mod tests {
             editor: Editor::new(),
             composer_images: Vec::new(),
             composer_generation: 0,
+            clipboard_reading: false,
             agent,
             active: None,
             overlay: None,

@@ -109,15 +109,21 @@ pub(super) async fn run(context: Context, compact_only: bool) -> Outcome {
         // Steer: fold any pending messages into this turn between
         // steps. The queue review edits these entries by key
         // concurrently; whatever the loop takes here is gone to it.
-        let steered: Vec<String> = {
+        let steered: Vec<ChatMessage> = {
             let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
-            pending.items.drain(..).map(|(_, text)| text).collect()
+            pending
+                .items
+                .drain(..)
+                .map(|(_, message)| message)
+                .collect()
         };
         for message in steered {
-            let _ = events.send(SessionEvent::Steered(message.clone())).await;
-            // Harness-authored: steering echoes and continuations
-            // fill the history but are not user turns.
-            let mut recorded = ChatMessage::user(message);
+            let _ = events
+                .send(SessionEvent::Steered(message.content.clone()))
+                .await;
+            // Queued whole, images included: a steering message is the
+            // user's intent, not a text-only echo.
+            let mut recorded = message;
             recorded.mark_internal();
             log.commit_async(recorded).await;
         }

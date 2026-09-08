@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::core::providers::catalog::{Api, Model};
 
-const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_IMAGE_COUNT: usize = 10;
 const MAX_TOTAL_IMAGE_BYTES: u64 = 40 * 1024 * 1024;
 
