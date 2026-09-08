@@ -70,8 +70,11 @@ jobs:
       - name: Measure release binary
         run: ./x bench
 
+      # A reviewer convenience, not a contract: GitHub's artifact service
+      # occasionally 403s at finalize, and that flake must not fail the job.
       - name: Upload pull-request binary
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e-${{ runner.os }}-${{ runner.arch }}-${{ github.event.pull_request.number }}
