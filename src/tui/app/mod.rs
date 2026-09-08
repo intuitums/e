@@ -1261,11 +1261,14 @@ impl App {
         images: Result<Vec<crate::core::providers::ImageInput>, String>,
         fallback: Option<String>,
     ) {
-        if generation != self.composer_generation {
+        // Only a clipboard job owns the in-flight flag; a path-paste read
+        // never set it.
+        if fallback.is_none() {
             self.clipboard_reading = false;
+        }
+        if generation != self.composer_generation {
             return;
         }
-        self.clipboard_reading = false;
         let images = match images {
             Ok(images) if !images.is_empty() => images,
             Ok(_) => return,
