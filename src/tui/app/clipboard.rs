@@ -338,9 +338,9 @@ fn paths_from_uri_list(text: &str) -> Vec<String> {
             let rest = line.strip_prefix("file://")?;
             // `file://localhost/…` means the local host; an empty authority
             // is already the leading slash. Remote authorities stay put.
-            let path = match rest.strip_prefix("localhost/") {
-                Some(local) => local,
-                None => rest,
+            let path = match rest.strip_prefix("localhost") {
+                Some(local) if local.starts_with('/') => local,
+                _ => rest,
             };
             (!path.is_empty()).then_some(path)
         })
