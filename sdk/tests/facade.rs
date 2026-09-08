@@ -2,20 +2,45 @@
 //! The turn loop the facade drives is pinned by the library's own integration
 //! tests (`tests/api.rs`, `tests/stream.rs`); this pins the wrapper's logic —
 //! that a bad slug is a typed error and a built session starts empty on the
-//! resolved model.
+//! resolved model. Both tests route through `.home()` so nothing here touches
+//! the process-global `E_HOME`, and they can run in parallel.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use e_sdk::{Error, Session};
 
-/// One test, so the process-global `E_HOME` is set once with no cross-test
-/// race: a fresh isolated home keeps resolution off the developer's config.
+/// A unique empty temporary home, removed even when an assertion panics.
+struct IsolatedHome(PathBuf);
+
+impl IsolatedHome {
+    fn new(label: &str) -> Self {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "e-sdk-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        IsolatedHome(dir)
+    }
+}
+
+impl Drop for IsolatedHome {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+/// An empty home with no credentials: an unknown slug is a typed error naming
+/// the slug asked for, and no model requested falls back to the catalog's
+/// shipped default — build succeeds, names a model, and starts empty.
 #[test]
 fn builder_resolves_models_and_reports_a_bad_slug() {
-    let home = std::env::temp_dir().join(format!("e-sdk-facade-{}", std::process::id()));
-    std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("E_HOME", &home);
+    let home = IsolatedHome::new("facade");
 
-    // An unknown slug is a typed error naming the slug asked for.
     match Session::builder()
+        .home(&home.0)
         .model("nope/not-a-model")
         .save_session(false)
         .build()
@@ -25,50 +50,38 @@ fn builder_resolves_models_and_reports_a_bad_slug() {
         Ok(_) => panic!("an unknown slug must not resolve"),
     }
 
-    // No model requested falls back to the catalog's shipped default: build
-    // succeeds, names a model, and the conversation starts empty.
-    let session = Session::builder().save_session(false).build().unwrap();
+    let session = Session::builder()
+        .home(&home.0)
+        .save_session(false)
+        .build()
+        .unwrap();
     assert!(!session.model_slug().is_empty());
     assert!(session.history().is_empty());
     assert!(session.model().context_window > 0);
-
-    std::fs::remove_dir_all(&home).ok();
 }
 
-/// The builder's `.home()` method scopes model resolution and system prompt
-/// generation to the specified home — credentials, settings, and AGENTS.md are
-/// read from there, not from E_HOME or the default ~/.e.
+/// The builder's `.home()` scopes construction to that home — the agent's
+/// system prompt is assembled from the isolated home's AGENTS.md, not from
+/// `E_HOME` or the default `~/.e`.
 #[test]
 fn builder_home_isolates_construction() {
-    // Create an isolated home with a distinctive AGENTS.md.
-    let isolated = std::env::temp_dir().join(format!(
-        "e-sdk-home-isolate-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&isolated).unwrap();
+    let home = IsolatedHome::new("home-isolate");
     let marker = "SDK_HOME_ISOLATION_MARKER_9f3a2c";
-    std::fs::write(isolated.join("AGENTS.md"), marker).unwrap();
+    std::fs::write(home.0.join("AGENTS.md"), marker).unwrap();
 
-    // Build a session pointing at the isolated home.
     let mut session = Session::builder()
-        .home(&isolated)
+        .home(&home.0)
         .save_session(false)
         .build()
         .unwrap();
 
-    // The agent's system_prompt() assembles from its stored home, so it should
-    // include the isolated AGENTS.md content. This verifies that with_home
-    // scoped the construction correctly and the agent received the home.
+    // The agent assembles from its stored home, so the prompt must carry the
+    // isolated AGENTS.md — proof that `.home()` reached both the catalog read
+    // at build time and the prompt assembly at turn time.
     let prompt = session.agent_mut().system_prompt();
     assert!(
         prompt.contains(marker),
         "system prompt should include the isolated home's AGENTS.md content, but got:\n{}",
         &prompt[..prompt.len().min(500)]
     );
-
-    std::fs::remove_dir_all(&isolated).ok();
 }

@@ -115,32 +115,18 @@ impl SessionBuilder {
         // configured home. All construction and later agent operations use it.
         let effective_home = self.home.unwrap_or_else(home::home);
 
-        // Model resolution and the default system prompt both read from the
-        // home (settings.json for the default model, auth.json for available
-        // providers, AGENTS.md for project instructions), so run them inside
-        // with_home for the effective home.
+        // Model resolution reads the home (settings.json for the default
+        // model, auth.json for signed-in providers), so it runs scoped to it.
         let model = home::with_home(effective_home.clone(), || match &self.model {
             Some(slug) => catalog::resolve(slug).ok_or_else(|| Error::ModelNotFound(slug.clone())),
             None => Ok(catalog::default_model()),
         })?;
 
-        let cwd = self
-            .cwd
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-        // An explicit system override is used as-is; the default prompt reads
-        // the home's AGENTS.md, so it too runs inside with_home.
-        let system = match self.system {
-            Some(s) => s,
-            None => home::with_home(effective_home.clone(), || {
-                e::core::agent::context::system_prompt(&cwd)
-            }),
-        };
-
         // cwd and home ride AgentOptions — the in-process-caller seam the core
-        // exposes for exactly this — so the facade needs no core changes.
+        // exposes for exactly this, including the relative-path and cwd
+        // defaults — so the facade needs no core changes.
         let options = AgentOptions {
-            cwd: Some(cwd),
+            cwd: self.cwd,
             home: Some(effective_home),
             save_session: self.save_session,
             ..AgentOptions::default()
@@ -149,7 +135,7 @@ impl SessionBuilder {
         Ok(Session {
             agent,
             events,
-            system,
+            system: self.system,
         })
     }
 }
@@ -160,7 +146,9 @@ impl SessionBuilder {
 pub struct Session {
     agent: Agent,
     events: tokio::sync::mpsc::Receiver<SessionEvent>,
-    system: String,
+    /// A caller-supplied system prompt; `None` means the agent assembles its
+    /// own from its workspace and home (the frontend's behavior).
+    system: Option<String>,
 }
 
 impl Session {
@@ -179,7 +167,13 @@ impl Session {
     /// running it steers into it at the next step. Events for the turn arrive
     /// on [`next_event`](Session::next_event).
     pub fn prompt(&mut self, text: impl Into<String>) {
-        self.agent.submit(text.into(), self.system.clone());
+        // The default prompt reassembles per turn — the frontend does the
+        // same — so cwd, date, and instruction changes land without a rebuild.
+        let system = self
+            .system
+            .clone()
+            .unwrap_or_else(|| self.agent.system_prompt());
+        self.agent.submit(text.into(), system);
     }
 
     /// The next event in the ordered stream, or `None` once the session is

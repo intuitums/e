@@ -45,8 +45,10 @@ Implemented today:
   simply prompt again after one.
 - **Prompting and steering** — `prompt()` starts a turn, or steers into a
   running one; `interrupt()` stops a turn at the next safe point.
-- **System prompt** — the builder uses the frontend's own prompt for the
-  working directory by default, or a `system()` override.
+- **System prompt** — the session assembles the same prompt the frontend
+  builds for the working directory — base instructions plus the skills
+  catalog and any AGENTS.md the directory trusts — fresh at each prompt, or
+  uses a `system()` override.
 - **Configuration isolation** — `home()` (or `E_HOME`) points a session at an
   isolated `~/.e`-style home so an embedding runs fully self-contained, the
   same seam the test suite uses.
