@@ -55,7 +55,7 @@ impl App {
                     s.turn.phase = TurnPhase::Waiting;
                 }
                 // The next assistant text opens a fresh block; the burst
-                // that was live collapses where it sat.
+                // that was live stays expanded where it sat.
                 self.end_thinking_burst();
                 self.end_assistant_burst();
             }
@@ -76,10 +76,8 @@ impl App {
                 }
             }
             // Reasoning streams live in thinkingText while the burst runs;
-            // when the burst ends — reply text, tools, retry, steer, turn
-            // commit — it collapses to a single dim row. Raw provider text
-            // is stripped before it can reach the paint stream, like
-            // assistant text.
+            // the completed burst stays expanded. Raw provider text is
+            // stripped before it can reach the paint stream, like reply text.
             SessionEvent::ReasoningDelta(delta) => {
                 if let Some(s) = &mut self.active {
                     s.turn.phase = TurnPhase::Thinking;
@@ -100,9 +98,9 @@ impl App {
                 }
             }
             SessionEvent::ToolBatchStart { calls } => {
-                // The pre-batch reasoning burst ends where it sits; the tree
-                // then continues if the agent has not spoken since the last
-                // batch — one tree per working stretch, not one per batch.
+                // End the pre-batch reasoning where it sits. A tool tree
+                // continues only when no reply or expanded thinking
+                // separates this batch from the previous one.
                 self.end_thinking_burst();
                 self.end_assistant_burst();
                 if let Some(s) = &mut self.active {

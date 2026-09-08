@@ -62,9 +62,8 @@ pub enum Kind {
     Banner,
     User,
     Assistant,
-    /// One assistant turn's streamed thinking — drawn live while the burst
-    /// runs, then collapsed to a single dim `Thought for Ns` row when the
-    /// burst ends (reply text, tools, retry, steer, turn commit).
+    /// Streamed thinking remains expanded after its burst ends. Legacy
+    /// summary blocks are marked done and may be absorbed by a tool tree.
     Thinking,
     Tool,
     /// One provider-issued batch: a tallied header over stable lifecycle
@@ -108,7 +107,8 @@ fn stream_render_interval(source_bytes: usize) -> std::time::Duration {
 pub struct Block {
     pub kind: Kind,
     pub text: String,
-    /// Tool rows carry extra state.
+    /// Tool completion, or a legacy collapsed thinking summary. Finishing a
+    /// live thinking burst does not mark it done or remove its source text.
     pub done: bool,
     pub is_error: bool,
     pub detail: Option<String>,
@@ -1001,11 +1001,12 @@ impl Transcript {
 
     /// The tree a new batch should continue: the last block, walking back
     /// over collapsed thinking summaries, when it is a live tool group.
-    /// Assistant text, the user, notices, and errors all separate trees.
+    /// Expanded thinking, replies, user messages, notices, and errors
+    /// separate trees.
     fn open_tool_group(&self) -> Option<usize> {
         for (index, block) in self.blocks.iter().enumerate().rev() {
             match block.kind {
-                Kind::Thinking => continue,
+                Kind::Thinking if block.done => continue,
                 Kind::ToolGroup if !block.done => return Some(index),
                 _ => return None,
             }
@@ -1013,10 +1014,9 @@ impl Transcript {
         None
     }
 
-    /// Continue the open tool tree with a new batch, or start one. Batches
-    /// with no assistant voice between them — only collapsed thinking, whose
-    /// summary rows the merge absorbs — are one tree, so a silently
-    /// tool-chaining agent reads as a single growing tree.
+    /// Continue the open tree when no reply or expanded thinking separates
+    /// batches. Only legacy collapsed summaries may be absorbed; live and
+    /// completed reasoning keep their own blocks and start a new tree.
     pub fn extend_tool_group(&mut self, children: Vec<ToolChild>) -> usize {
         if let Some(idx) = self.open_tool_group() {
             // Everything after the group is absorbed thinking: drop it so

@@ -617,7 +617,7 @@ fn running_write_and_edit_rows_stay_lean() {
 }
 
 #[test]
-fn silent_batches_continue_one_tree_and_long_trees_cap_rows() {
+fn silent_batches_continue_one_tree_and_long_trees_keep_rows() {
     use e::tui::transcript::{Block, Kind, ToolChild, Transcript};
     let theme = e::tui::theme::resolve("dark", false);
     let read = |id: u64, target: &str| {
@@ -635,7 +635,9 @@ fn silent_batches_continue_one_tree_and_long_trees_cap_rows() {
     // fragment it.
     let mut t = Transcript::default();
     t.extend_tool_group(vec![read(1, "a.rs")]);
-    t.push(Block::new(Kind::Thinking, "Thought for 2s"));
+    let mut summary = Block::new(Kind::Thinking, "Thought for 2s");
+    summary.done = true; // A legacy collapsed summary, not an expanded burst.
+    t.push(summary);
     t.extend_tool_group(vec![read(2, "b.rs")]);
     assert_eq!(t.blocks.len(), 1, "one tree across the silent batch");
     assert_eq!(t.blocks[0].text, "2 tool calls \u{b7} 2 read");
