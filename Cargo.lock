@@ -258,6 +258,8 @@ name = "e-sdk"
 version = "0.0.0"
 dependencies = [
  "e",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

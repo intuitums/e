@@ -5,9 +5,9 @@ from Rust: create a session, send prompts, subscribe to one ordered event
 stream, and run tools — the same harness the terminal frontend drives,
 without a terminal.
 
-**Status: scaffolded, not yet implemented.** The package exists and builds as
-part of the root workspace, but the facade below is the planned surface, not
-a shipped one. Until the first release, the SDK's surface is unstable (see
+**Status: minimal facade implemented; unstable.** A session builder, the
+event stream, and prompting/steering are in place. Until the first release
+declares a semantic-versioning policy, the surface may still change (see
 [compatibility.md](compatibility.md)).
 
 ## Why a separate package
@@ -28,43 +28,53 @@ cargo test -p e-sdk # once the SDK has tests
 The package is a member of the root workspace, so `./x check` and `./x test`
 cover it like the rest of the repository.
 
-## Planned surface
+## Surface
 
 The SDK mirrors what `main.rs` does before handing off to the terminal
-frontend:
+frontend.
 
-- **Session creation** — a session against a working directory, persistent or
-  in-memory, with resume of an existing session file.
-- **One event stream** — the same ordered `SessionEvent` vocabulary the
-  frontend consumes: text and thinking deltas, tool execution, usage, errors.
-  No side channels, matching the architecture invariant.
-- **Prompting and steering** — send a prompt, steer mid-run, queue follow-ups.
-- **Model and tool selection** — pick a model and thinking level; enable or
-  disable built-in tools.
-- **Configuration injection** — an `E_HOME`-style override so embeddings run
-  with their own configuration without mutating the process environment.
-  The core now supports explicit `AgentOptions.home` and `AgentOptions.cwd`;
-  the SDK builder will expose them. Each agent owns its tool observations
-  and background handles, and runs through compaction without frontend help.
+Implemented today:
 
-The intended shape, not yet implemented:
+- **Session creation** — `Session::builder()` against a working directory
+  (defaults to the process cwd), persistent or in-memory (`save_session`),
+  with a model chosen by slug or the catalog default.
+- **One event stream** — `next_event().await` yields the same ordered
+  `SessionEvent` vocabulary the frontend consumes: text and thinking deltas,
+  tool execution, usage, errors. No side channels, matching the architecture
+  invariant. It also does the per-turn `TurnEnd` bookkeeping, so a caller can
+  simply prompt again after one.
+- **Prompting and steering** — `prompt()` starts a turn, or steers into a
+  running one; `interrupt()` stops a turn at the next safe point.
+- **System prompt** — the session assembles the same prompt the frontend
+  builds for the working directory — base instructions plus the skills
+  catalog and any AGENTS.md the directory trusts — fresh at each prompt, or
+  uses a `system()` override.
+- **Configuration isolation** — `home()` (or `E_HOME`) points a session at an
+  isolated `~/.e`-style home so an embedding runs fully self-contained, the
+  same seam the test suite uses.
 
 ```rust
 use e_sdk::{Session, SessionEvent};
 
 let mut session = Session::builder()
     .cwd("/path/to/project")
-    .model("anthropic/claude-opus-4-5")
+    .model("anthropic/claude-opus-4-5") // optional; catalog default otherwise
+    .save_session(false)
     .build()?;
 
-session.subscribe(|event| {
-    if let SessionEvent::TextDelta(delta) = event {
-        print!("{delta}");
+session.prompt("What files are in the current directory?");
+while let Some(event) = session.next_event().await {
+    match event {
+        SessionEvent::TextDelta(delta) => print!("{delta}"),
+        SessionEvent::TurnEnd { .. } => break,
+        _ => {}
     }
-});
-
-session.prompt("What files are in the current directory?").await?;
+}
 ```
+
+Not yet on the stable facade — reach in through `agent_mut()` for now:
+attaching an extension host, resuming an existing session file, per-run tool
+allowlists, and thinking-level selection.
 
 ## What the SDK is not
 

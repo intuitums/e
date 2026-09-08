@@ -9,7 +9,8 @@ license = "MIT"
 description = "Programmatic access to e's coding-agent core"
 publish = false
 
-# The path dependency is wired now so the build graph carries the edge from
-# day one; the facade begins consuming it with the first real SDK commit.
+# The path dependency is the edge to the library target the facade consumes.
 [dependencies]
 e = { path = ".." }
+thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
