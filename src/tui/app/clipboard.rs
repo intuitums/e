@@ -33,12 +33,16 @@ struct RunOutput {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run(program: &str, args: &[&str]) -> Result<RunOutput, RunError> {
     use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
 
     let mut child = Command::new(program)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        // Its own process group, so the kill below reaches any forked
+        // descendant still holding the pipe (the bash tool's pattern).
+        .process_group(0)
         .spawn()
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -76,8 +80,9 @@ fn run(program: &str, args: &[&str]) -> Result<RunOutput, RunError> {
     let stdout = match receiver.recv_timeout(READ_TIMEOUT) {
         Ok(buffer) => buffer,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            let _ = child.kill();
+            crate::core::tools::kill_group(child.id());
             let _ = child.wait();
+            let _ = reader.join();
             return Err(RunError::Failed(format!(
                 "{program} did not finish within {}s",
                 READ_TIMEOUT.as_secs()
@@ -85,7 +90,21 @@ fn run(program: &str, args: &[&str]) -> Result<RunOutput, RunError> {
         }
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Vec::new(),
     };
+    if stdout.len() as u64 > MAX_IMAGE_BYTES {
+        // The reader stopped draining, so the child may be blocked on a
+        // full pipe and never exit on its own — kill the group first.
+        crate::core::tools::kill_group(child.id());
+        let _ = child.wait();
+        let _ = reader.join();
+        return Err(RunError::Failed(format!(
+            "{program} output exceeded the {} MiB image limit",
+            MAX_IMAGE_BYTES / (1024 * 1024)
+        )));
+    }
     let success = child.wait().map(|status| status.success()).unwrap_or(false);
+    // The leader exited, but a forked descendant may still hold the pipe
+    // and block the reader — take the whole group down before joining.
+    crate::core::tools::kill_group(child.id());
     let _ = reader.join();
     Ok(RunOutput { success, stdout })
 }

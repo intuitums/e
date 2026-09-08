@@ -394,8 +394,9 @@ fn query_background(registry: &BackgroundRegistry, id: &str, kill: bool) -> Tool
     }
 }
 
-/// Kill a process group whose child is its group leader.
-fn kill_group(pid: u32) {
+/// Kill a process group whose child is its group leader. The clipboard
+/// reader uses it too, for the same reason: descendants holding a pipe.
+pub(crate) fn kill_group(pid: u32) {
     #[cfg(unix)]
     unsafe {
         // The child creates this process group in `pre_exec`. ESRCH simply

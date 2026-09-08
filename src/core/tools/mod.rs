@@ -14,6 +14,10 @@ mod diffview;
 mod edit;
 mod fs;
 
+/// The clipboard reader terminates its helpers the same way the bash tool
+/// does: the whole process group, so descendants holding a pipe die too.
+pub(crate) use bash::kill_group;
+
 /// Mutable tool state owned by one agent. File observations and background
 /// handles must not leak between independent conversations in one process.
 #[derive(Default)]

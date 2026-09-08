@@ -1167,10 +1167,22 @@ impl App {
                     .iter()
                     .all(|path| std::path::Path::new(path).is_file());
             if all_files && self.agent.model.image_input {
-                if let Ok(images) = crate::core::providers::ImageInput::from_paths(&paths) {
-                    self.attach_clipboard_images(self.composer_generation, Ok(images));
-                    return;
-                }
+                // The reads run off the event loop — a slow or networked
+                // file must not stall input and repaint. Stale results are
+                // dropped by the draft generation, like a clipboard read.
+                let generation = self.composer_generation;
+                let results = self.results.clone();
+                crate::core::config::home::spawn(async move {
+                    let images = tokio::task::spawn_blocking(move || {
+                        crate::core::providers::ImageInput::from_paths(&paths)
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("image attachment reader panicked".into()));
+                    let _ = results
+                        .send(AppJob::ClipboardImages { generation, images })
+                        .await;
+                });
+                return;
             }
         }
         self.editor.insert_paste(&text);
@@ -2797,7 +2809,10 @@ async fn run_scoped(
                             if app.agent.is_streaming() {
                                 app.agent.interrupt();
                                 arm(&mut app);
-                            } else if !app.editor.is_empty() || !app.composer_images.is_empty() {
+                            } else if !app.editor.is_empty()
+                                || !app.composer_images.is_empty()
+                                || app.clipboard_reading
+                            {
                                 app.editor.set_text("");
                                 app.discard_composer_images();
                                 arm(&mut app);
