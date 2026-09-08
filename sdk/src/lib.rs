@@ -40,6 +40,7 @@
 use std::path::PathBuf;
 
 use e::core::agent::{Agent, AgentOptions};
+use e::core::config::home;
 use e::core::providers::catalog::{self, Model};
 
 // The core vocabulary is re-exported so a consumer depends only on `e_sdk`,
@@ -110,24 +111,39 @@ impl SessionBuilder {
 
     /// Resolve the model, build the agent, and open the event stream.
     pub fn build(self) -> Result<Session, Error> {
-        let model = match &self.model {
+        // Resolve the effective home once: explicit builder home or the normal
+        // configured home. All construction and later agent operations use it.
+        let effective_home = self.home.unwrap_or_else(home::home);
+
+        // Model resolution and the default system prompt both read from the
+        // home (settings.json for the default model, auth.json for available
+        // providers, AGENTS.md for project instructions), so run them inside
+        // with_home for the effective home.
+        let model = home::with_home(effective_home.clone(), || match &self.model {
             Some(slug) => {
-                catalog::resolve(slug).ok_or_else(|| Error::ModelNotFound(slug.clone()))?
+                catalog::resolve(slug).ok_or_else(|| Error::ModelNotFound(slug.clone()))
             }
-            None => catalog::default_model(),
-        };
+            None => Ok(catalog::default_model()),
+        })?;
+
         let cwd = self
             .cwd
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let system = self
-            .system
-            .unwrap_or_else(|| e::core::agent::context::system_prompt(&cwd));
+
+        // An explicit system override is used as-is; the default prompt reads
+        // the home's AGENTS.md, so it too runs inside with_home.
+        let system = match self.system {
+            Some(s) => s,
+            None => home::with_home(effective_home.clone(), || {
+                e::core::agent::context::system_prompt(&cwd)
+            }),
+        };
 
         // cwd and home ride AgentOptions — the in-process-caller seam the core
         // exposes for exactly this — so the facade needs no core changes.
         let options = AgentOptions {
             cwd: Some(cwd),
-            home: self.home,
+            home: Some(effective_home),
             save_session: self.save_session,
             ..AgentOptions::default()
         };
