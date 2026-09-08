@@ -13,6 +13,10 @@ wait_for = os.environ.get("CAP_WAIT_FOR", "").encode()
 exit_keys = os.environ.get("CAP_EXIT", "")
 exit_wait = float(os.environ.get("CAP_EXIT_WAIT", "1"))
 resize_after = os.environ.get("CAP_RESIZE_AFTER", "").encode()
+# CAP_RESIZE_COLS/ROWS are optional; default to the launch size so setting only
+# the trigger resizes to the same dimensions instead of raising KeyError.
+resize_cols = int(os.environ.get("CAP_RESIZE_COLS", cols))
+resize_rows = int(os.environ.get("CAP_RESIZE_ROWS", rows))
 
 pid, fd = pty.fork()
 if pid == 0:
@@ -50,10 +54,10 @@ while time.time() < end:
         os.write(fd, prompt.encode() + b"\r")
         typed = True
     if resize_after and not resized and resize_after in buf:
-        cols = int(os.environ["CAP_RESIZE_COLS"])
-        rows = int(os.environ["CAP_RESIZE_ROWS"])
-        sizes.append({"offset": len(buf), "cols": cols, "rows": rows})
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        sizes.append({"offset": len(buf), "cols": resize_cols, "rows": resize_rows})
+        fcntl.ioctl(
+            fd, termios.TIOCSWINSZ, struct.pack("HHHH", resize_rows, resize_cols, 0, 0)
+        )
         resized = True
     if typed and wait_for and wait_for in buf:
         break

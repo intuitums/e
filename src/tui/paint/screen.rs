@@ -159,14 +159,10 @@ impl Screen {
         self.redraw_pending = true;
     }
 
-    /// Paint a borrowed frame to stdout. The worker transfers ownership
-    /// directly to paint_to to avoid duplicating the transcript.
-    pub fn paint(&mut self, lines: &[String]) -> io::Result<()> {
-        self.paint_to(lines.to_vec(), &mut io::stdout().lock())
-    }
-
-    /// Paint through an injectable writer so transition tests inspect the
-    /// same terminal commands used by the interactive painter.
+    /// Paint a frame by taking ownership of its lines. The worker transfers
+    /// the transcript directly to avoid duplicating it; an injectable writer
+    /// lets transition tests inspect the same terminal commands the painter
+    /// emits interactively.
     fn paint_to(&mut self, frame: Vec<String>, out: &mut impl Write) -> io::Result<()> {
         let lines = frame.as_slice();
         // Changes to terminal-owned history are deliberately ignored. Only
@@ -197,9 +193,14 @@ impl Screen {
         let rows = self.rows as usize;
         let len = lines.len();
         let shrank = len < self.prev.len();
-        if shrank && self.viewport_top > 0 {
-            // Content and overlays can collapse by more than a screen. A
-            // monotonic logical window would leave the entire dock above it.
+        if shrank && self.anchor + len <= self.viewport_top {
+            // Content and overlays can collapse by more than a screen, leaving
+            // the dock above the logical window. Rebase only when the tail has
+            // actually fallen above the screen top — the tail (buffer row
+            // len-1) sits at screen row `anchor + len - 1 - viewport_top`, off
+            // the top exactly when `anchor + len <= viewport_top`. Rebasing on
+            // any shrink would repaint over the pre-launch rows still visible
+            // above a frame that launched near the bottom.
             self.anchor = 0;
             self.viewport_top = len.saturating_sub(rows);
         }
@@ -253,7 +254,6 @@ impl Screen {
                     .collect();
             }
             Route::Flow => {
-                let first_changed = first_changed.max(self.viewport_top.saturating_sub(anchor));
                 // Bring the first changed row to a paintable position: one
                 // past the bottom means it scrolls in with a single newline;
                 // otherwise it is already on screen where it was painted.
@@ -596,6 +596,43 @@ mod tests {
             "the composer disappeared: {output:?}"
         );
         assert_eq!(screen.viewport_top, 0);
+    }
+
+    #[test]
+    fn shrinking_a_near_bottom_frame_preserves_pre_launch_rows() {
+        // Launched near the bottom: a small overflow lifts viewport_top above
+        // zero while the dock is still reachable in place. A shrink must repaint
+        // in place, not rebase to the screen top and overwrite the pre-launch
+        // rows still visible above the frame.
+        let mut screen = Screen::new(80, 10, 8);
+        screen
+            .paint_to(lines(4, "history"), &mut Vec::new())
+            .unwrap();
+        assert!(
+            0 < screen.viewport_top && screen.viewport_top < screen.anchor,
+            "expected a small overflow: anchor {}, viewport_top {}",
+            screen.anchor,
+            screen.viewport_top
+        );
+        let before = (screen.anchor, screen.viewport_top);
+        let mut output = Vec::new();
+        screen
+            .paint_to(vec!["tool".into(), "composer".into()], &mut output)
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains("composer"),
+            "the composer disappeared: {output:?}"
+        );
+        assert!(
+            !output.contains("\x1b[1;1H"),
+            "the shrink repainted from the top, clobbering pre-launch rows: {output:?}"
+        );
+        assert_eq!(
+            (screen.anchor, screen.viewport_top),
+            before,
+            "the shrink rebased the window instead of repainting in place"
+        );
     }
 
     #[test]
