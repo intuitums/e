@@ -40,6 +40,15 @@ pub fn read(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput 
     let Some(path) = args["path"].as_str() else {
         return err("read: missing path".into(), "read", "");
     };
+    let (offset, limit) = match (
+        super::integer_arg(args, "offset"),
+        super::integer_arg(args, "limit"),
+    ) {
+        (Ok(offset), Ok(limit)) => (offset, limit),
+        (Err(message), _) | (_, Err(message)) => {
+            return err(format!("read {path}: {message}"), "read", path)
+        }
+    };
     let full = resolve(cwd, path);
     // Reads and mutations share the same stable path lock. Record the stamp
     // paired with the bytes we actually return, not a later independent stat.
@@ -50,7 +59,7 @@ pub fn read(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput 
     let mut stable = None;
     for _ in 0..2 {
         let before = super::file_stamp(&full);
-        let text = match read_window(&full, args["offset"].as_u64(), args["limit"].as_u64()) {
+        let text = match read_window(&full, offset, limit) {
             Ok(t) => t,
             Err(e) => return err(format!("read {path}: {e}"), "read", path),
         };

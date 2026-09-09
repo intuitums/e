@@ -740,6 +740,23 @@ fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path) -> bool) -> bool {
     true
 }
 
+/// Read an `integer` parameter the way lenient models send it: a JSON
+/// integer, an integral float (`2.0`), or a numeric string (`"2"`). Absent
+/// is `Ok(None)`; anything else names the parameter so the model can correct
+/// it — silently ignoring `limit: 50.0` used to dump the whole file.
+fn integer_arg(args: &Value, name: &str) -> Result<Option<u64>, String> {
+    let number = match &args[name] {
+        Value::Null => return Ok(None),
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    match number {
+        Some(n) if n >= 0.0 && n.fract() == 0.0 && n <= u64::MAX as f64 => Ok(Some(n as u64)),
+        _ => Err(format!("{name} must be a non-negative integer")),
+    }
+}
+
 /// Resolve a possibly-relative path against the workspace root.
 fn resolve(cwd: &Path, p: &str) -> PathBuf {
     let path = Path::new(p);

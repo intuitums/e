@@ -439,7 +439,10 @@ where
     if args["background"].as_bool().unwrap_or(false) {
         return start_background(command, cwd, &state.background);
     }
-    let timeout = args["timeout"].as_u64().unwrap_or(120).clamp(1, 600);
+    let timeout = match super::integer_arg(args, "timeout") {
+        Ok(timeout) => timeout.unwrap_or(120).clamp(1, 600),
+        Err(message) => return failure(&format!("bash: {message}")),
+    };
 
     let mut cmd = Command::new("bash");
     cmd.arg("-lc")

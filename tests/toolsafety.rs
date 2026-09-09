@@ -163,6 +163,28 @@ fn write_recreates_a_file_deleted_since_it_was_read() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// Integer parameters arrive as `2.0` or `"2"` from lenient models; they must
+/// window the read, and a value that is not an integer must say so rather
+/// than fall back to the whole file.
+#[test]
+fn read_accepts_integral_floats_and_numeric_strings_for_its_window() {
+    let ws = workspace("intargs");
+    std::fs::write(ws.join("f.txt"), "one\ntwo\nthree\n").unwrap();
+
+    let windowed = tools::run("read", r#"{"path":"f.txt","offset":2.0,"limit":"1"}"#, &ws);
+    assert!(!windowed.is_error(), "{}", windowed.content);
+    assert_eq!(windowed.content, "2\ttwo");
+
+    let fractional = tools::run("read", r#"{"path":"f.txt","limit":1.5}"#, &ws);
+    assert!(fractional.is_error());
+    assert!(
+        fractional.content.contains("limit must be"),
+        "{}",
+        fractional.content
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 /// `read` shows a CRLF file with plain newlines, so a multi-line old_string
 /// built from what the model saw must still match — and the file keeps its
 /// CRLF endings, new lines included.
