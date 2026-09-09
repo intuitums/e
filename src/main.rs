@@ -25,7 +25,7 @@ use e::tui::app;
 fn print_help(host: &e::core::extensions::ExtensionHost) {
     println!(
         "e — a coding agent for your terminal\n\n\
-usage:\n  e [message]           start a session (optionally with a first prompt;\n                        piped stdin counts as prompt text)\n  \
+usage:\n  e [message]           start a session (optionally with a first prompt;\n                        piped stdin is not read — use `e rpc` headless)\n  \
 e -c, --continue      continue this directory's most recent session\n  \
 e -r, --resume        pick a session to resume\n  \
 e rpc                 JSONL request/response protocol on stdin/stdout\n  \
