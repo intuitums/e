@@ -967,3 +967,78 @@ done
     );
     host.shutdown().await;
 }
+
+/// A guard that dies mid-session fails open by design — but silently was a
+/// bug. The exit is announced once, with a louder line for a hook-bearing
+/// extension, and the host knows it is gone.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_crashed_extension_is_reported_once() {
+    const GATE: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) printf '{"id":%s,"result":{"name":"gate","hooks":["tool_call"]}}\n' "$id" ;;
+    *'"hook.tool_call"'*) exit 3 ;;
+  esac
+done
+"#;
+    let _lock = env_lock();
+    let _home = tempdir::TempHome::with_extension("gate.sh", GATE);
+    let (notices, mut rx) = tokio::sync::mpsc::channel(8);
+    let host = start_host(notices).await;
+
+    assert_eq!(host.hook_tool_call("bash", r#"{"cmd":"rm"}"#).await, None);
+    assert_eq!(host.hook_tool_call("bash", r#"{"cmd":"rm"}"#).await, None);
+    let mut seen = Vec::new();
+    while let Ok(Some(msg)) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
+    {
+        seen.push(msg);
+    }
+    assert_eq!(
+        seen,
+        vec!["extension gate.sh: exited — its tool_call hook no longer applies".to_string()]
+    );
+    assert_eq!(
+        host.diagnostic_status(),
+        vec![("gate".to_string(), String::new(), false)]
+    );
+    host.shutdown().await;
+}
+
+/// shutdown kills and reaps: a child left as a zombie would survive the
+/// relaunch exec unreapable in the next e.
+#[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn shutdown_reaps_the_extension_process() {
+    const PIDDER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"method":"notify","params":{"message":"PID %s"}}\n' "$$"
+      printf '{"id":%s,"result":{"name":"pidder"}}\n' "$id" ;;
+  esac
+done
+"#;
+    let _lock = env_lock();
+    let _home = tempdir::TempHome::with_extension("pidder.sh", PIDDER);
+    let (notices, mut rx) = tokio::sync::mpsc::channel(8);
+    let host = start_host(notices).await;
+    let pid = rx
+        .recv()
+        .await
+        .and_then(|msg| msg.strip_prefix("PID ").map(str::to_string))
+        .expect("the extension reports its pid");
+
+    host.shutdown().await;
+    // Neither a live process nor a zombie: ps has no row for a reaped pid.
+    let stat = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid])
+        .output()
+        .expect("ps runs");
+    let stat = String::from_utf8_lossy(&stat.stdout).trim().to_string();
+    assert!(stat.is_empty(), "extension {pid} still has state {stat:?}");
+}
