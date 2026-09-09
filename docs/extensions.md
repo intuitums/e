@@ -245,6 +245,11 @@ configure the stdio server e should own in `~/.e/settings.json`:
 }
 ```
 
+`npx -y` downloads the server on first use, which routinely takes longer
+than the 5 s initialize budget — the bridge is then skipped with
+`initialize timed out` until the package is cached. Run the `npx` line once
+by hand first, or point `command` at an installed binary.
+
 The bridge intentionally maps only MCP tools. Prompts, resources, sampling,
 elicitation, and authorization stay out of e's core and out of this example.
 It uses the 2025-11-25 initialize/initialized stdio lifecycle supported by
