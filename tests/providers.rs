@@ -1087,6 +1087,60 @@ async fn signed_thinking_blocks_are_captured_and_replayed() {
     assert_eq!(content[1]["type"], "tool_use");
 }
 
+/// The results of one step's parallel tool calls go back to Anthropic in a
+/// single user message — one message per `tool_result` is accepted on the
+/// wire but trains the model out of parallel calls. The moving cache
+/// breakpoint still lands on the last block of that merged turn.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn anthropic_replays_parallel_tool_results_in_one_user_turn() {
+    let _lock = env_lock();
+    let sse = concat!(
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let (port, server) = serve_sse(&[sse]);
+    let home = Home::new("anthropic-parallel-results");
+    home.auth(r#"{"anthropic":{"key":"k"}}"#);
+    let call = |id: &str, path: &str| ToolCall {
+        id: id.into(),
+        name: "read".into(),
+        arguments: format!(r#"{{"path":"{path}"}}"#),
+        signature: None,
+    };
+    let request = Request {
+        model: test_model("anthropic", port, Api::Anthropic),
+        system: "sys".into(),
+        messages: vec![
+            ChatMessage::user("read both"),
+            ChatMessage::assistant("", vec![call("tu_a", "a.txt"), call("tu_b", "b.txt")]),
+            ChatMessage::tool_result("tu_a", "contents a"),
+            ChatMessage::tool_result("tu_b", "contents b"),
+        ],
+        effort: None,
+        session_id: String::new(),
+        tools: Vec::new(),
+    };
+    let _ = collect_stream(request).await;
+
+    let sent = server.join().unwrap();
+    let messages = request_json(&sent[0])["messages"].clone();
+    let roles: Vec<&str> = messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["user", "assistant", "user"]);
+    let results = messages[2]["content"].as_array().unwrap();
+    assert_eq!(results[0]["tool_use_id"], "tu_a");
+    assert_eq!(results[1]["tool_use_id"], "tu_b");
+    assert_eq!(results[1]["cache_control"]["type"], "ephemeral");
+    assert!(results[0].get("cache_control").is_none());
+}
+
 /// Gemini verifies a function call's thoughtSignature against the thought
 /// text that preceded it. A multi-step tool loop must replay that signed
 /// thought text ahead of the function call it signs, not just the

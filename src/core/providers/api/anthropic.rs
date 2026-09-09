@@ -38,10 +38,13 @@ pub async fn run(
     authorization: &Authorization,
     tx: &mpsc::Sender<Event>,
 ) -> Result<StreamEnd, ProviderError> {
-    // History → content blocks. Tool results ride user turns. Signed
-    // thinking blocks committed as "reasoning" messages replay verbatim at
-    // the head of the assistant turn they preceded — the API requires them
-    // back, complete with signatures, when continuing a tool loop.
+    // History → content blocks. Tool results ride user turns, and the
+    // results of one step's parallel calls share a single user turn: split
+    // across messages, the API still accepts them but the model learns to
+    // stop calling tools in parallel. Signed thinking blocks committed as
+    // "reasoning" messages replay verbatim at the head of the assistant
+    // turn they preceded — the API requires them back, complete with
+    // signatures, when continuing a tool loop.
     let mut messages: Vec<serde_json::Value> = Vec::new();
     let mut pending_thinking: Vec<serde_json::Value> = Vec::new();
     for m in &request.messages {
@@ -62,12 +65,27 @@ pub async fn run(
                     messages.push(json!({"role": "assistant", "content": content}));
                 }
             }
-            "tool" => messages.push(json!({
-                "role": "user",
-                "content": [{"type": "tool_result",
-                             "tool_use_id": m.tool_call_id().cloned().unwrap_or_default(),
-                             "content": m.content}],
-            })),
+            "tool" => {
+                let block = json!({
+                    "type": "tool_result",
+                    "tool_use_id": m.tool_call_id().cloned().unwrap_or_default(),
+                    "content": m.content,
+                });
+                match messages.last_mut() {
+                    Some(last)
+                        if last["role"] == "user"
+                            && last["content"][0]["type"] == "tool_result" =>
+                    {
+                        // The guard proves `content` is a non-empty array;
+                        // the else arm is the safe fallback, not a panic.
+                        match last["content"].as_array_mut() {
+                            Some(blocks) => blocks.push(block),
+                            None => messages.push(json!({"role": "user", "content": [block]})),
+                        }
+                    }
+                    _ => messages.push(json!({"role": "user", "content": [block]})),
+                }
+            }
             "reasoning" => {
                 // Only this dialect's own blocks; items from other dialects
                 // (Responses reasoning JSON) mean nothing here.
