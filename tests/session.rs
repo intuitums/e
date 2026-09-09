@@ -512,6 +512,53 @@ fn a_torn_final_line_costs_the_record_not_the_session() {
     let _ = std::fs::remove_dir_all(home);
 }
 
+/// The torn tail must not survive a resume either: appending behind it
+/// would fuse the next record onto the torn bytes, and that fused line —
+/// interior from then on — is the corruption `load` rightly refuses.
+/// `reopen` cuts the tail away and chains the new records onto the last
+/// intact one.
+#[test]
+fn reopen_truncates_a_torn_tail_before_appending() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!(
+        "e-session-torn-reopen-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("E_HOME", &home);
+    let cwd = home.join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut s = SessionLog::create(&cwd, "test/model").unwrap();
+    s.append(&ChatMessage::user("first")).unwrap();
+    s.append(&ChatMessage::assistant("second", Vec::new()))
+        .unwrap();
+    let path = s.path().to_path_buf();
+    drop(s);
+
+    let mut raw = std::fs::read_to_string(&path).unwrap();
+    raw.push_str("{\"type\":\"message\",\"message\":{\"role\":\"user\",\"con");
+    std::fs::write(&path, raw).unwrap();
+
+    let mut resumed = SessionLog::reopen(&path).unwrap();
+    resumed.append(&ChatMessage::user("third")).unwrap();
+    resumed
+        .append(&ChatMessage::assistant("fourth", Vec::new()))
+        .unwrap();
+    drop(resumed);
+
+    let messages = SessionLog::load(&path).unwrap();
+    let content: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(
+        content,
+        ["first", "second", "third", "fourth"],
+        "the resumed records chain onto the last intact one, not a second root"
+    );
+
+    let _ = std::fs::remove_dir_all(home);
+}
+
 /// A crash between a tool call and its result leaves a dangling tool_use
 /// every dialect rejects on replay; load repairs the tail with an honest
 /// synthetic result instead of handing the agent an unreplayable history.

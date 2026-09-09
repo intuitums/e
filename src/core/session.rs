@@ -414,10 +414,15 @@ impl SessionLog {
     }
 
     /// Re-open an existing session for appending. Fails while another
-    /// process owns the session's lock. The reopened handle picks up
-    /// exactly where the file's last branch left off — reading the file
-    /// once here is what lets a resumed session keep growing that branch
-    /// instead of quietly starting a second root next to it.
+    /// process owns the session's lock. A torn final record — what a crash
+    /// mid-append leaves — is truncated away first: `nodes` skips it on
+    /// read, but appending behind it would fuse the next record onto the
+    /// torn bytes, and that fused line becomes interior corruption that
+    /// turns one lost record into an unresumable session. The reopened
+    /// handle then picks up exactly where the file's last branch left off —
+    /// reading the file once here is what lets a resumed session keep
+    /// growing that branch instead of quietly starting a second root next
+    /// to it.
     pub fn reopen(path: &Path) -> std::io::Result<SessionLog> {
         home::ensure()?;
         let lock = LockGuard::acquire(path)?;
@@ -428,6 +433,7 @@ impl SessionLog {
             let mode = file.metadata()?.permissions().mode() & 0o600;
             file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         }
+        file.set_len(intact_len(path)?)?;
         let current = SessionLog::nodes(path)
             .ok()
             .and_then(|nodes| nodes.last().map(|n| n.id.clone()));
@@ -438,6 +444,24 @@ impl SessionLog {
             _lock: lock,
             current,
         })
+    }
+}
+
+/// The file's length up to the end of its last intact record: the whole
+/// file unless the last non-empty line fails to parse — the torn tail
+/// `nodes` tolerates, cut back to where it starts.
+fn intact_len(path: &Path) -> std::io::Result<u64> {
+    let bytes = std::fs::read(path)?;
+    let Some(end) = bytes.iter().rposition(|b| !b.is_ascii_whitespace()) else {
+        return Ok(bytes.len() as u64);
+    };
+    let start = bytes[..end]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |newline| newline + 1);
+    match serde_json::from_slice::<Entry>(&bytes[start..=end]) {
+        Ok(_) => Ok(bytes.len() as u64),
+        Err(_) => Ok(start as u64),
     }
 }
 
