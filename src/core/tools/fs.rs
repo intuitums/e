@@ -26,7 +26,7 @@ fn err(message: String, tool: &str, target: &str) -> ToolOutput {
 pub fn read_schema() -> Value {
     schema_object(
         "read",
-        "Read a UTF-8 text file. Each returned line is prefixed with its 1-based line number and a tab; the prefix is not part of the file. Use offset/limit to window large files.",
+        "Read a UTF-8 text file. Each returned line is prefixed with its 1-based line number and a tab; the prefix is not part of the file. CRLF line endings are shown as plain newlines. Output stops at 32 KiB of whole lines; a cut window ends with a notice giving the offset to continue from. Use offset/limit to window large files.",
         json!({
             "path": {"type": "string", "description": "File path, absolute or workspace-relative"},
             "offset": {"type": "integer", "description": "1-based first line"},
@@ -40,6 +40,15 @@ pub fn read(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput 
     let Some(path) = args["path"].as_str() else {
         return err("read: missing path".into(), "read", "");
     };
+    let (offset, limit) = match (
+        super::integer_arg(args, "offset"),
+        super::integer_arg(args, "limit"),
+    ) {
+        (Ok(offset), Ok(limit)) => (offset, limit),
+        (Err(message), _) | (_, Err(message)) => {
+            return err(format!("read {path}: {message}"), "read", path)
+        }
+    };
     let full = resolve(cwd, path);
     // Reads and mutations share the same stable path lock. Record the stamp
     // paired with the bytes we actually return, not a later independent stat.
@@ -50,19 +59,19 @@ pub fn read(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput 
     let mut stable = None;
     for _ in 0..2 {
         let before = super::file_stamp(&full);
-        let text = match read_window(&full, args["offset"].as_u64(), args["limit"].as_u64()) {
-            Ok(t) => t,
+        let window = match read_window(&full, offset, limit) {
+            Ok(w) => w,
             Err(e) => return err(format!("read {path}: {e}"), "read", path),
         };
         let after = super::file_stamp(&full);
         if let (Some(before), Some(after)) = (before, after) {
             if before == after {
-                stable = Some((text, after));
+                stable = Some((window, after));
                 break;
             }
         }
     }
-    let Some((text, stamp)) = stable else {
+    let Some(((text, next), stamp)) = stable else {
         return err(
             format!("read {path}: the file changed while it was being read"),
             "read",
@@ -71,7 +80,24 @@ pub fn read(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput 
     };
     super::note_seen_stamp(state, &full, stamp);
     let count = text.lines().count();
-    ok(truncate(text), format!("{count} lines"))
+    // A window cut by the byte cap says so with the real file size and where
+    // to pick up, and the row's count carries a `+` — "768 lines" alone read
+    // as the whole file.
+    match next {
+        Some(next) => {
+            let first = offset.unwrap_or(1).max(1);
+            let notice = format!(
+                "\n… [showing lines {first}–{} of a {} byte file; continue with offset {next}]",
+                next - 1,
+                stamp.1
+            );
+            ok(
+                truncate_with_notice(text, &notice),
+                format!("{count}+ lines"),
+            )
+        }
+        None => ok(truncate(text), format!("{count} lines")),
+    }
 }
 
 /// A line-oriented tool must never allocate an arbitrarily long input line.
@@ -147,19 +173,31 @@ fn drain_line_remainder<R: BufRead>(reader: &mut R) {
     }
 }
 
-fn read_window(path: &Path, offset: Option<u64>, limit: Option<u64>) -> io::Result<String> {
+/// Bytes of numbered lines a read returns before it stops: the output cap
+/// less room for the continuation notice, so the two together stay under it.
+const WINDOW_BYTES: usize = super::MAX_BYTES - 128;
+
+/// The numbered lines from `offset`, and — when the byte cap cut the window
+/// short — the number of the first line not shown. The cut falls between
+/// whole lines: a line split mid-way is unusable to the model, and a bare
+/// number prefix is worse than one line fewer.
+fn read_window(
+    path: &Path,
+    offset: Option<u64>,
+    limit: Option<u64>,
+) -> io::Result<(String, Option<u64>)> {
     let file = std::fs::File::open(path)?;
     let mut reader = BufReader::new(file);
-    let first = offset.unwrap_or(1).max(1) as usize;
-    let limit = limit.map(|n| n as usize).unwrap_or(usize::MAX);
+    let first = offset.unwrap_or(1).max(1);
+    let limit = limit.unwrap_or(u64::MAX);
     let mut output = String::new();
-    let mut line_number = 0usize;
-    let mut returned = 0usize;
+    let mut line_number = 0u64;
+    let mut returned = 0u64;
     loop {
-        // Stop before reading the next line once the window is full: a line
-        // past `limit` (or the 32 KiB output cap) may be oversized or invalid
-        // UTF-8, and reading it would turn a valid window into an error.
-        if returned >= limit || output.len() > 32 * 1024 {
+        // Stop before reading the next line once `limit` is met: a line past
+        // it may be oversized or invalid UTF-8, and reading it would turn a
+        // valid window into an error.
+        if returned >= limit {
             break;
         }
         let Some(line) = bounded_line(&mut reader)? else {
@@ -169,13 +207,17 @@ fn read_window(path: &Path, offset: Option<u64>, limit: Option<u64>) -> io::Resu
         if line_number < first {
             continue;
         }
-        if !output.is_empty() {
+        let entry = format!("{line_number}\t{line}");
+        if returned > 0 && output.len() + 1 + entry.len() > WINDOW_BYTES {
+            return Ok((output, Some(line_number)));
+        }
+        if returned > 0 {
             output.push('\n');
         }
-        output.push_str(&format!("{line_number}\t{line}"));
+        output.push_str(&entry);
         returned += 1;
     }
-    Ok(output)
+    Ok((output, None))
 }
 
 pub fn write_schema() -> Value {
@@ -331,7 +373,7 @@ fn count_text_lines(path: &Path) -> io::Result<usize> {
 pub fn grep_schema() -> Value {
     schema_object(
         "grep",
-        "Search file contents for a regular expression, workspace-wide. Traversal skips dotfiles and .git/target/node_modules/dist/.cache (an explicitly named file is always searched), and stops at 200 matches — the result says so when capped.",
+        "Search file contents for a regular expression, workspace-wide. Traversal skips dotfiles and .git/target/node_modules/dist/.cache (an explicitly named file is always searched; a path that does not exist is an error), and stops at 200 matches — the result says so when capped.",
         json!({
             "pattern": {"type": "string"},
             "path": {"type": "string", "description": "Directory or file to search (default: workspace root)"},
@@ -358,21 +400,30 @@ pub fn grep(args: &Value, cwd: &Path, _state: &super::ToolRuntime) -> ToolOutput
         },
         None => None,
     };
-    let root = resolve(cwd, args["path"].as_str().unwrap_or("."));
+    let shown = args["path"].as_str().unwrap_or(".");
+    let root = resolve(cwd, shown);
+    // A path that isn't there is an error, not an empty result: "0 matches"
+    // for a typo would have the model conclude the symbol doesn't exist.
+    let metadata = match std::fs::metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) => return err(format!("grep: {shown}: {error}"), "grep", ""),
+    };
     let mut hits = Vec::new();
     let mut count = 0usize;
-    if root.is_dir() {
+    if metadata.is_dir() {
         super::walk_files(&root, &mut |path| {
             if glob_allows(glob.as_ref(), path, cwd) {
-                search_file(path, cwd, &re, &mut hits, &mut count);
+                // The walk visits regular files only; one that vanished or
+                // turned unreadable mid-walk is skipped, not fatal.
+                let _ = search_file(path, cwd, &re, &mut hits, &mut count);
             }
             count < MATCH_CAP
         });
-    } else {
+    } else if let Err(error) = search_file(&root, cwd, &re, &mut hits, &mut count) {
         // An explicitly requested file is searched as asked — the dotfile
         // skip rule is a traversal heuristic, not a veto over `.env`, and
         // `glob` narrows a directory walk, not an explicit single-file ask.
-        search_file(&root, cwd, &re, &mut hits, &mut count);
+        return err(format!("grep: {shown}: {error}"), "grep", "");
     }
     if hits.is_empty() {
         return ok(String::new(), "0 matches".into());
@@ -444,25 +495,32 @@ fn glob_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
     regex::Regex::new(&re)
 }
 
+/// Search one file; the error is the stat or open failure, or a refusal of
+/// a non-regular file (a FIFO would block the scan forever).
 fn search_file(
     path: &Path,
     cwd: &Path,
     re: &regex::Regex,
     hits: &mut Vec<String>,
     count: &mut usize,
-) {
-    // Only regular files: a FIFO in the tree would block the walk forever.
-    if !std::fs::metadata(path)
-        .map(|m| m.is_file())
-        .unwrap_or(false)
-    {
-        return;
+) -> io::Result<()> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(io::Error::other("not a regular file"));
     }
-    let Ok(file) = std::fs::File::open(path) else {
-        return;
-    };
+    let file = std::fs::File::open(path)?;
     let rel = path.strip_prefix(cwd).unwrap_or(path).display().to_string();
-    let mut reader = BufReader::new(file);
+    search_lines(BufReader::new(file), &rel, re, hits, count);
+    Ok(())
+}
+
+/// Scan one file's lines for `re`, appending `rel:line: text` hits.
+fn search_lines<R: BufRead>(
+    mut reader: R,
+    rel: &str,
+    re: &regex::Regex,
+    hits: &mut Vec<String>,
+    count: &mut usize,
+) {
     let mut n = 0usize;
     loop {
         match bounded_line(&mut reader) {
@@ -480,7 +538,11 @@ fn search_file(
             Ok(None) => break,
             // Oversized or non-UTF-8 line: skip it (bounded_line advanced past
             // it) and keep scanning later lines instead of dropping them.
-            Err(_) => n += 1,
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => n += 1,
+            // An I/O error consumed nothing, so retrying would re-issue the
+            // same failing read forever (/proc/<pid>/mem, a bad block, a
+            // stale NFS handle). Give up on this file.
+            Err(_) => break,
         }
     }
 }
@@ -499,7 +561,9 @@ fn truncate_match_line(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_line, glob_regex, write, BufReader, MAX_LINE_BYTES};
+    use super::{
+        bounded_line, glob_regex, search_lines, write, BufRead, BufReader, MAX_LINE_BYTES,
+    };
     use serde_json::json;
 
     #[test]
@@ -544,6 +608,39 @@ mod tests {
         assert!(output.is_error());
         assert_eq!(std::fs::read(file).unwrap(), vec![0xff, 0x00]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A reader whose every read fails the way a bad block or
+    /// `/proc/<pid>/mem` does: persistently, consuming nothing.
+    struct FailingReader;
+
+    impl std::io::Read for FailingReader {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("input/output error"))
+        }
+    }
+
+    impl BufRead for FailingReader {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            Err(std::io::Error::other("input/output error"))
+        }
+        fn consume(&mut self, _: usize) {}
+    }
+
+    #[test]
+    fn grep_stops_scanning_a_file_whose_reads_keep_failing() {
+        let mut hits = Vec::new();
+        let mut count = 0;
+        // Returning at all is the pin: the buggy loop treated every error
+        // as "skip this line" and never terminated.
+        search_lines(
+            FailingReader,
+            "broken",
+            &regex::Regex::new("x").unwrap(),
+            &mut hits,
+            &mut count,
+        );
+        assert!(hits.is_empty());
     }
 
     #[test]

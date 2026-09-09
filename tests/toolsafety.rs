@@ -146,6 +146,108 @@ fn edit_fails_when_the_file_changed_on_disk_since_e_saw_it() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// A file that was read and then removed externally is not stale — there is
+/// nothing on disk to protect, and the "read it again" advice cannot be
+/// followed for a missing file.
+#[test]
+fn write_recreates_a_file_deleted_since_it_was_read() {
+    let ws = workspace("deleted");
+    let file = ws.join("gone.txt");
+    std::fs::write(&file, "old\n").unwrap();
+    assert!(!tools::run("read", r#"{"path":"gone.txt"}"#, &ws).is_error());
+    std::fs::remove_file(&file).unwrap();
+
+    let written = tools::run("write", r#"{"path":"gone.txt","content":"fresh\n"}"#, &ws);
+    assert!(!written.is_error(), "{}", written.content);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "fresh\n");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A read cut by the 32 KiB cap ends on a whole line and says where to pick
+/// up — not a mid-line cut with a "bytes total" that was really the window.
+#[test]
+fn read_cut_by_the_cap_ends_on_a_whole_line_and_says_where_to_continue() {
+    let ws = workspace("read-cap");
+    let body: String = (1..=20_000)
+        .map(|n| format!("line number {n} with some padding text\n"))
+        .collect();
+    std::fs::write(ws.join("big.txt"), &body).unwrap();
+
+    let out = tools::run("read", r#"{"path":"big.txt"}"#, &ws);
+    assert!(!out.is_error(), "{}", out.content);
+    assert!(out.content.len() <= 32 * 1024, "cap exceeded");
+    assert!(out.summary.ends_with("+ lines"), "{}", out.summary);
+    let (shown, notice) = out.content.rsplit_once('\n').unwrap();
+    let next: u64 = notice
+        .strip_prefix("… [showing lines 1–")
+        .and_then(|rest| rest.rsplit_once("continue with offset "))
+        .and_then(|(_, n)| n.trim_end_matches(']').parse().ok())
+        .unwrap_or_else(|| panic!("unexpected notice: {notice}"));
+    assert!(notice.contains(&format!(" of a {} byte file", body.len())));
+    let last = next - 1;
+    assert!(
+        shown.ends_with(&format!(
+            "{last}\tline number {last} with some padding text"
+        )),
+        "the window did not end on a whole line: {:?}",
+        &shown[shown.len().saturating_sub(80)..]
+    );
+
+    let resumed = tools::run(
+        "read",
+        &format!(r#"{{"path":"big.txt","offset":{next}}}"#),
+        &ws,
+    );
+    assert!(resumed
+        .content
+        .starts_with(&format!("{next}\tline number {next}")));
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// Integer parameters arrive as `2.0` or `"2"` from lenient models; they must
+/// window the read, and a value that is not an integer must say so rather
+/// than fall back to the whole file.
+#[test]
+fn read_accepts_integral_floats_and_numeric_strings_for_its_window() {
+    let ws = workspace("intargs");
+    std::fs::write(ws.join("f.txt"), "one\ntwo\nthree\n").unwrap();
+
+    let windowed = tools::run("read", r#"{"path":"f.txt","offset":2.0,"limit":"1"}"#, &ws);
+    assert!(!windowed.is_error(), "{}", windowed.content);
+    assert_eq!(windowed.content, "2\ttwo");
+
+    let fractional = tools::run("read", r#"{"path":"f.txt","limit":1.5}"#, &ws);
+    assert!(fractional.is_error());
+    assert!(
+        fractional.content.contains("limit must be"),
+        "{}",
+        fractional.content
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// `read` shows a CRLF file with plain newlines, so a multi-line old_string
+/// built from what the model saw must still match — and the file keeps its
+/// CRLF endings, new lines included.
+#[test]
+fn edit_matches_across_crlf_line_breaks_and_keeps_the_endings() {
+    let ws = workspace("crlf");
+    let file = ws.join("win.txt");
+    std::fs::write(&file, "alpha\r\nbeta\r\ngamma\r\n").unwrap();
+
+    let edit = tools::run(
+        "edit",
+        r#"{"path":"win.txt","old_string":"alpha\nbeta","new_string":"one\ntwo\nthree"}"#,
+        &ws,
+    );
+    assert!(!edit.is_error(), "{}", edit.content);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "one\r\ntwo\r\nthree\r\ngamma\r\n"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 #[cfg(unix)]
 #[test]
 fn search_tools_survive_a_symlink_cycle() {
@@ -172,6 +274,21 @@ fn grep_searches_an_explicitly_requested_dotfile() {
     // The traversal heuristic still skips dotfiles it merely walks past.
     let walked = tools::run("grep", r#"{"pattern":"needle"}"#, &ws);
     assert_eq!(walked.summary, "0 matches");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A `path` that does not exist is a failed call, not an empty search —
+/// "0 matches" for a typo reads as "the symbol is absent".
+#[test]
+fn grep_reports_a_missing_path_instead_of_zero_matches() {
+    let ws = workspace("grep-missing");
+    let out = tools::run(
+        "grep",
+        r#"{"pattern":"needle","path":"does/not/exist"}"#,
+        &ws,
+    );
+    assert!(out.is_error(), "{}", out.summary);
+    assert!(out.content.contains("does/not/exist"), "{}", out.content);
     let _ = std::fs::remove_dir_all(&ws);
 }
 

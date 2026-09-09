@@ -491,7 +491,6 @@ fn staged_replace(
     let parent = target
         .parent()
         .ok_or_else(|| std::io::Error::other("file has no parent"))?;
-    let temporary = parent.join(format!(".e-write-{}", uuid::Uuid::new_v4()));
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create_new(true);
     #[cfg(unix)]
@@ -499,7 +498,22 @@ fn staged_replace(
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(if metadata.is_some() { 0o600 } else { 0o666 });
     }
-    let mut file = options.open(&temporary)?;
+    let stage = |dir: &Path| {
+        let temporary = dir.join(format!(".e-write-{}", uuid::Uuid::new_v4()));
+        options.open(&temporary).map(|file| (temporary, file))
+    };
+    let (temporary, mut file) = match stage(parent) {
+        Ok(staged) => staged,
+        // A read-only directory still allows writing into an existing file's
+        // inode (a shell's `echo > f` does the same), only the staging file
+        // beside it is refused: stage in the system temp dir and copy in.
+        Err(error)
+            if existing.is_some() && error.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            stage(&std::env::temp_dir())?
+        }
+        Err(error) => return Err(error),
+    };
     let result = (|| {
         write(&mut file)?;
         file.sync_all()?;
@@ -514,8 +528,17 @@ fn staged_replace(
             #[cfg(unix)]
             verify_target_identity(existing, &target)?;
         } else {
-            // Publish without overwriting a file created during staging.
-            std::fs::hard_link(&temporary, &target)?;
+            // Publish without overwriting a file created during staging. A
+            // filesystem without hard links (exFAT, some network mounts)
+            // refuses the link; then create the target exclusively and copy
+            // the staged bytes in, which keeps the same guarantee.
+            match std::fs::hard_link(&temporary, &target) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(error)
+                }
+                Err(_) => copy_into_new(&mut file, &target)?,
+            }
         }
         std::fs::remove_file(&temporary)?;
         #[cfg(unix)]
@@ -526,6 +549,24 @@ fn staged_replace(
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+/// Publish a staged file where `hard_link` is unavailable: create `target`
+/// exclusively (a concurrent creator still wins with AlreadyExists) and copy
+/// the staged bytes in.
+fn copy_into_new(staged: &mut std::fs::File, target: &Path) -> std::io::Result<()> {
+    use std::io::Seek;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o666);
+    }
+    let mut created = options.open(target)?;
+    staged.rewind()?;
+    std::io::copy(staged, &mut created)?;
+    created.sync_all()
 }
 
 /// Refuse a pathname that was removed or replaced while its inode was open.
@@ -643,7 +684,10 @@ fn note_seen_stamp(state: &ToolRuntime, path: &Path, stamp: (std::time::SystemTi
     seen.insert(freshness_key(path), stamp);
 }
 
-/// Fail when a recorded file changed on disk since e last saw it.
+/// Fail when a recorded file changed on disk since e last saw it. A file
+/// that has since been removed passes: there is nothing left to clobber, and
+/// demanding a re-read of a missing file would wedge the path for the rest
+/// of the session.
 fn check_fresh(
     state: &ToolRuntime,
     path: &Path,
@@ -657,7 +701,8 @@ fn check_fresh(
     let Some(recorded) = recorded else {
         return Ok(());
     };
-    if file_stamp(path) == Some(recorded) {
+    let current = file_stamp(path);
+    if current.is_none() || current == Some(recorded) {
         return Ok(());
     }
     Err(ToolOutput {
@@ -707,6 +752,23 @@ fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path) -> bool) -> bool {
         }
     }
     true
+}
+
+/// Read an `integer` parameter the way lenient models send it: a JSON
+/// integer, an integral float (`2.0`), or a numeric string (`"2"`). Absent
+/// is `Ok(None)`; anything else names the parameter so the model can correct
+/// it — silently ignoring `limit: 50.0` used to dump the whole file.
+fn integer_arg(args: &Value, name: &str) -> Result<Option<u64>, String> {
+    let number = match &args[name] {
+        Value::Null => return Ok(None),
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    match number {
+        Some(n) if n >= 0.0 && n.fract() == 0.0 && n <= u64::MAX as f64 => Ok(Some(n as u64)),
+        _ => Err(format!("{name} must be a non-negative integer")),
+    }
 }
 
 /// Resolve a possibly-relative path against the workspace root.
@@ -907,6 +969,57 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "other writer");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The staging file normally sits beside the target; when the parent is
+    /// read-only but the target is writable, the update still goes through.
+    #[cfg(unix)]
+    #[test]
+    fn staged_write_updates_a_writable_file_in_a_read_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("e-write-rodir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = super::staged_write(&path, b"new");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        result.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "no staging file left behind"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The link-less publish path (exFAT and friends can't be made in a
+    /// test, so the fallback is exercised directly): the staged bytes land
+    /// in a fresh target, and a file that appeared meanwhile is left alone.
+    #[test]
+    fn link_free_publish_creates_exclusively_from_the_staged_bytes() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("e-write-nolink-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged_path = dir.join("staged");
+        let mut staged = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&staged_path)
+            .unwrap();
+        staged.write_all(b"published").unwrap();
+        let target = dir.join("new");
+        super::copy_into_new(&mut staged, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "published");
+        assert_eq!(
+            super::copy_into_new(&mut staged, &target)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

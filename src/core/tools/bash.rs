@@ -323,7 +323,16 @@ fn query_background(registry: &BackgroundRegistry, id: &str, kill: bool) -> Tool
     let Some(process) = find_background(registry, id) else {
         return failure(&format!("bash: no background process with handle {id}"));
     };
-    if kill {
+    // Only a still-running handle is signalled: once the reaper has waited
+    // the child its pid is free, and `-pid` could be a stranger's process
+    // group by now. (The reaper records the exit only after both pipes
+    // closed, so a live descendant holding the pipe is still killed.)
+    let running = process
+        .exit
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_none();
+    if kill && running {
         kill_group(process.pid);
         // Give the reaper a brief window to observe the exit and record it.
         let deadline = Instant::now() + Duration::from_millis(500);
@@ -439,7 +448,10 @@ where
     if args["background"].as_bool().unwrap_or(false) {
         return start_background(command, cwd, &state.background);
     }
-    let timeout = args["timeout"].as_u64().unwrap_or(120).clamp(1, 600);
+    let timeout = match super::integer_arg(args, "timeout") {
+        Ok(timeout) => timeout.unwrap_or(120).clamp(1, 600),
+        Err(message) => return failure(&format!("bash: {message}")),
+    };
 
     let mut cmd = Command::new("bash");
     cmd.arg("-lc")
@@ -806,6 +818,45 @@ mod tests {
             exit: Mutex::new(Some(ExitOutcome::Exited(0))),
             finished_sequence: AtomicU64::new(sequence),
         })
+    }
+
+    /// A finished handle's pid may already belong to someone else. Here an
+    /// unrelated group leader wears that pid; killing the handle must leave
+    /// it alone.
+    #[cfg(unix)]
+    #[test]
+    fn killing_a_finished_handle_does_not_signal_its_reused_pid() {
+        let mut bystander = Command::new("sleep");
+        bystander.arg("30").stdin(Stdio::null());
+        unsafe {
+            bystander.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut bystander = bystander.spawn().unwrap();
+        let registry = BackgroundRegistry::default();
+        let process = Arc::new(BackgroundProcess {
+            pid: bystander.id(),
+            command: String::new(),
+            output: Mutex::new(Vec::new()),
+            total_bytes: Mutex::new(0),
+            exit: Mutex::new(Some(ExitOutcome::Exited(0))),
+            finished_sequence: AtomicU64::new(1),
+        });
+        assert!(register_background(&registry, "done".into(), process));
+
+        let out = query_background(&registry, "done", true);
+        assert_eq!(out.summary, "exited 0");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "an unrelated process group was killed through a stale handle"
+        );
+        kill_group(bystander.id());
+        let _ = bystander.wait();
     }
 
     #[test]
