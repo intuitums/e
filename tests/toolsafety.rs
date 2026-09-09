@@ -163,6 +163,47 @@ fn write_recreates_a_file_deleted_since_it_was_read() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// A read cut by the 32 KiB cap ends on a whole line and says where to pick
+/// up — not a mid-line cut with a "bytes total" that was really the window.
+#[test]
+fn read_cut_by_the_cap_ends_on_a_whole_line_and_says_where_to_continue() {
+    let ws = workspace("read-cap");
+    let body: String = (1..=20_000)
+        .map(|n| format!("line number {n} with some padding text\n"))
+        .collect();
+    std::fs::write(ws.join("big.txt"), &body).unwrap();
+
+    let out = tools::run("read", r#"{"path":"big.txt"}"#, &ws);
+    assert!(!out.is_error(), "{}", out.content);
+    assert!(out.content.len() <= 32 * 1024, "cap exceeded");
+    assert!(out.summary.ends_with("+ lines"), "{}", out.summary);
+    let (shown, notice) = out.content.rsplit_once('\n').unwrap();
+    let next: u64 = notice
+        .strip_prefix("… [showing lines 1–")
+        .and_then(|rest| rest.rsplit_once("continue with offset "))
+        .and_then(|(_, n)| n.trim_end_matches(']').parse().ok())
+        .unwrap_or_else(|| panic!("unexpected notice: {notice}"));
+    assert!(notice.contains(&format!(" of a {} byte file", body.len())));
+    let last = next - 1;
+    assert!(
+        shown.ends_with(&format!(
+            "{last}\tline number {last} with some padding text"
+        )),
+        "the window did not end on a whole line: {:?}",
+        &shown[shown.len().saturating_sub(80)..]
+    );
+
+    let resumed = tools::run(
+        "read",
+        &format!(r#"{{"path":"big.txt","offset":{next}}}"#),
+        &ws,
+    );
+    assert!(resumed
+        .content
+        .starts_with(&format!("{next}\tline number {next}")));
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 /// Integer parameters arrive as `2.0` or `"2"` from lenient models; they must
 /// window the read, and a value that is not an integer must say so rather
 /// than fall back to the whole file.

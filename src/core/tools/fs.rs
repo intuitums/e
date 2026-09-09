@@ -26,7 +26,7 @@ fn err(message: String, tool: &str, target: &str) -> ToolOutput {
 pub fn read_schema() -> Value {
     schema_object(
         "read",
-        "Read a UTF-8 text file. Each returned line is prefixed with its 1-based line number and a tab; the prefix is not part of the file. CRLF line endings are shown as plain newlines. Use offset/limit to window large files.",
+        "Read a UTF-8 text file. Each returned line is prefixed with its 1-based line number and a tab; the prefix is not part of the file. CRLF line endings are shown as plain newlines. Output stops at 32 KiB of whole lines; a cut window ends with a notice giving the offset to continue from. Use offset/limit to window large files.",
         json!({
             "path": {"type": "string", "description": "File path, absolute or workspace-relative"},
             "offset": {"type": "integer", "description": "1-based first line"},
@@ -59,19 +59,19 @@ pub fn read(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput 
     let mut stable = None;
     for _ in 0..2 {
         let before = super::file_stamp(&full);
-        let text = match read_window(&full, offset, limit) {
-            Ok(t) => t,
+        let window = match read_window(&full, offset, limit) {
+            Ok(w) => w,
             Err(e) => return err(format!("read {path}: {e}"), "read", path),
         };
         let after = super::file_stamp(&full);
         if let (Some(before), Some(after)) = (before, after) {
             if before == after {
-                stable = Some((text, after));
+                stable = Some((window, after));
                 break;
             }
         }
     }
-    let Some((text, stamp)) = stable else {
+    let Some(((text, next), stamp)) = stable else {
         return err(
             format!("read {path}: the file changed while it was being read"),
             "read",
@@ -80,7 +80,24 @@ pub fn read(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput 
     };
     super::note_seen_stamp(state, &full, stamp);
     let count = text.lines().count();
-    ok(truncate(text), format!("{count} lines"))
+    // A window cut by the byte cap says so with the real file size and where
+    // to pick up, and the row's count carries a `+` — "768 lines" alone read
+    // as the whole file.
+    match next {
+        Some(next) => {
+            let first = offset.unwrap_or(1).max(1);
+            let notice = format!(
+                "\n… [showing lines {first}–{} of a {} byte file; continue with offset {next}]",
+                next - 1,
+                stamp.1
+            );
+            ok(
+                truncate_with_notice(text, &notice),
+                format!("{count}+ lines"),
+            )
+        }
+        None => ok(truncate(text), format!("{count} lines")),
+    }
 }
 
 /// A line-oriented tool must never allocate an arbitrarily long input line.
@@ -156,19 +173,31 @@ fn drain_line_remainder<R: BufRead>(reader: &mut R) {
     }
 }
 
-fn read_window(path: &Path, offset: Option<u64>, limit: Option<u64>) -> io::Result<String> {
+/// Bytes of numbered lines a read returns before it stops: the output cap
+/// less room for the continuation notice, so the two together stay under it.
+const WINDOW_BYTES: usize = super::MAX_BYTES - 128;
+
+/// The numbered lines from `offset`, and — when the byte cap cut the window
+/// short — the number of the first line not shown. The cut falls between
+/// whole lines: a line split mid-way is unusable to the model, and a bare
+/// number prefix is worse than one line fewer.
+fn read_window(
+    path: &Path,
+    offset: Option<u64>,
+    limit: Option<u64>,
+) -> io::Result<(String, Option<u64>)> {
     let file = std::fs::File::open(path)?;
     let mut reader = BufReader::new(file);
-    let first = offset.unwrap_or(1).max(1) as usize;
-    let limit = limit.map(|n| n as usize).unwrap_or(usize::MAX);
+    let first = offset.unwrap_or(1).max(1);
+    let limit = limit.unwrap_or(u64::MAX);
     let mut output = String::new();
-    let mut line_number = 0usize;
-    let mut returned = 0usize;
+    let mut line_number = 0u64;
+    let mut returned = 0u64;
     loop {
-        // Stop before reading the next line once the window is full: a line
-        // past `limit` (or the 32 KiB output cap) may be oversized or invalid
-        // UTF-8, and reading it would turn a valid window into an error.
-        if returned >= limit || output.len() > 32 * 1024 {
+        // Stop before reading the next line once `limit` is met: a line past
+        // it may be oversized or invalid UTF-8, and reading it would turn a
+        // valid window into an error.
+        if returned >= limit {
             break;
         }
         let Some(line) = bounded_line(&mut reader)? else {
@@ -178,13 +207,17 @@ fn read_window(path: &Path, offset: Option<u64>, limit: Option<u64>) -> io::Resu
         if line_number < first {
             continue;
         }
-        if !output.is_empty() {
+        let entry = format!("{line_number}\t{line}");
+        if returned > 0 && output.len() + 1 + entry.len() > WINDOW_BYTES {
+            return Ok((output, Some(line_number)));
+        }
+        if returned > 0 {
             output.push('\n');
         }
-        output.push_str(&format!("{line_number}\t{line}"));
+        output.push_str(&entry);
         returned += 1;
     }
-    Ok(output)
+    Ok((output, None))
 }
 
 pub fn write_schema() -> Value {
