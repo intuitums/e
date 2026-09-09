@@ -168,12 +168,15 @@ impl App {
 
     /// Ctrl+S on the scoped picker: commit the staging buffer as the saved
     /// scope. Empty commits as no scope at all — back to everything cycling.
+    /// A failed write keeps the draft and the picker, so a retry commits the
+    /// intended selection, never a cleared scope.
     pub(super) fn save_scope(&mut self) {
-        let ids = self.staged_scope.take().unwrap_or_default();
+        let ids = self.staged_scope.clone().unwrap_or_default();
         if let Err(error) = model::set_scope(&ids) {
             self.notice(format!("could not save model scope: {error}"));
             return;
         }
+        self.staged_scope = None;
         self.menu = None;
         self.notice(if ids.is_empty() {
             "scope cleared — ctrl+p cycles every model again".into()
