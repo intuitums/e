@@ -6,11 +6,21 @@
 	"responses_mount": "codex",
 	"tier": "native",
 	"image_input": true,
+	"catalog": "chatgpt",
 	"auth": {
 		"oauth": "codex",
 		"oauth_hint": "ChatGPT \u2014 opens the browser"
 	},
 	"models": [
+		{
+			"id": "gpt-6-astra",
+			"context_window": 272000,
+			"effort": [
+				"low",
+				"medium",
+				"high"
+			]
+		},
 		{
 			"id": "gpt-5.6-sol",
 			"context_window": 272000,
