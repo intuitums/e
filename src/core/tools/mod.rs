@@ -491,7 +491,6 @@ fn staged_replace(
     let parent = target
         .parent()
         .ok_or_else(|| std::io::Error::other("file has no parent"))?;
-    let temporary = parent.join(format!(".e-write-{}", uuid::Uuid::new_v4()));
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create_new(true);
     #[cfg(unix)]
@@ -499,7 +498,22 @@ fn staged_replace(
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(if metadata.is_some() { 0o600 } else { 0o666 });
     }
-    let mut file = options.open(&temporary)?;
+    let stage = |dir: &Path| {
+        let temporary = dir.join(format!(".e-write-{}", uuid::Uuid::new_v4()));
+        options.open(&temporary).map(|file| (temporary, file))
+    };
+    let (temporary, mut file) = match stage(parent) {
+        Ok(staged) => staged,
+        // A read-only directory still allows writing into an existing file's
+        // inode (a shell's `echo > f` does the same), only the staging file
+        // beside it is refused: stage in the system temp dir and copy in.
+        Err(error)
+            if existing.is_some() && error.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            stage(&std::env::temp_dir())?
+        }
+        Err(error) => return Err(error),
+    };
     let result = (|| {
         write(&mut file)?;
         file.sync_all()?;
@@ -955,6 +969,29 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "other writer");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The staging file normally sits beside the target; when the parent is
+    /// read-only but the target is writable, the update still goes through.
+    #[cfg(unix)]
+    #[test]
+    fn staged_write_updates_a_writable_file_in_a_read_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("e-write-rodir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = super::staged_write(&path, b"new");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        result.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "no staging file left behind"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
