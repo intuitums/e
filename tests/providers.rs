@@ -1855,7 +1855,8 @@ async fn provider_reported_models_appear_without_a_release() {
             {"id":"text-embedding-large"},
             {"id":"brand-new-model-20260101"},
             {"id":"fine-looking-embed","type":"embedding","context_length":8192},
-            {"id":"typed-chat","type":"language","context_window":8000}
+            {"id":"typed-chat","type":"language","context_window":8000},
+            {"id":"typed-instruct","type":"chat","context_window":9000}
         ]}"#;
         let _ = a.write_all(
             format!(
@@ -1905,6 +1906,12 @@ async fn provider_reported_models_appear_without_a_release() {
         .find(|m| m.provider == "mock" && m.id == "typed-chat")
         .expect("language type is kept");
     assert_eq!(typed.context_window, 8_000);
+    assert!(
+        catalog
+            .iter()
+            .any(|m| m.provider == "mock" && m.id == "typed-instruct"),
+        "`type` is a deny-list: Together's `chat` kind is a chat model"
+    );
     assert!(catalog::available()
         .iter()
         .any(|m| m.id == "brand-new-model"));
@@ -2111,8 +2118,8 @@ async fn anthropic_model_refresh_speaks_the_messages_dialect() {
         let n = a.read(&mut buf).unwrap();
         let sent = String::from_utf8_lossy(&buf[..n]).to_string();
         let body = r#"{"data":[
-            {"id":"claude-fresh-large","type":"language","context_length":1000000},
-            {"id":"claude-fresh","type":"language","context_length":200000},
+            {"id":"claude-fresh-large","type":"model","context_length":1000000},
+            {"id":"claude-fresh","type":"model","context_length":200000},
             {"id":"claude-embed-fresh","type":"embedding","context_length":1000}
         ]}"#;
         let _ = a.write_all(
