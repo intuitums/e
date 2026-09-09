@@ -305,6 +305,11 @@ async fn main() -> std::io::Result<()> {
             host.shutdown().await;
             return Ok(());
         }
+        if e::core::update::target().is_none() {
+            println!("{}", e::core::update::NO_RELEASE);
+            host.shutdown().await;
+            return Ok(());
+        }
         match e::core::update::self_update().await {
             Ok(Some(version)) => println!("updated to e {version} — restart to use it"),
             Ok(None) => println!("e {} is already the latest", e::VERSION),
