@@ -1912,6 +1912,84 @@ async fn provider_reported_models_appear_without_a_release() {
     catalog::refresh_remote().await;
 }
 
+/// The ChatGPT backend's /models is the ChatGPT model-picker payload, not
+/// an OpenAI `data` list: codex-usable models are the work-mode entries,
+/// their `-wm` slug suffix is the picker's marker, and `max_tokens` is the
+/// lane's context window. The request must name a client (originator), or
+/// the backend refuses it.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn chatgpt_backends_picklist_becomes_codex_models() {
+    use std::io::{Read, Write};
+    let _lock = env_lock();
+    clear_env_keys();
+    let home = Home::new("chatgpt-picklist");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut a, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let n = a.read(&mut buf).unwrap();
+        let sent = String::from_utf8_lossy(&buf[..n]).to_string();
+        let body = r#"{"models":[
+            {"slug":"gpt-6-astra-wm","is_work_mode_model":true,"max_tokens":262144,"title":"GPT-6 Astra"},
+            {"slug":"gpt-5.6-sol-wm","is_work_mode_model":true,"max_tokens":262144,"title":"GPT-5.6 Sol"},
+            {"slug":"brand-new-wm","is_work_mode_model":true,"title":"Brand New"},
+            {"slug":"gpt-6-pro","is_work_mode_model":false,"max_tokens":410000},
+            {"slug":"gpt-5-6-thinking","is_work_mode_model":false,"max_tokens":262144}
+        ]}"#;
+        let _ = a.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        sent
+    });
+
+    home.auth(r#"{"mock":{"key":"sk-live"}}"#);
+    home.write(
+        "models.json",
+        format!(
+            r#"{{"providers":{{"mock":{{"base_url":"http://127.0.0.1:{port}/backend-api","api":"openai-responses","catalog":"chatgpt","models":["gpt-5.6-sol"]}}}}}}"#
+        ),
+    );
+
+    catalog::refresh_remote().await;
+    let sent = server.join().unwrap();
+    assert!(sent.contains("GET /backend-api/models"));
+    assert!(sent.contains("originator: e"));
+    assert!(sent.to_lowercase().contains("openai-beta"));
+
+    let catalog = catalog::catalog();
+    let astra = catalog
+        .iter()
+        .find(|m| m.provider == "mock" && m.id == "gpt-6-astra")
+        .expect("work-mode entry becomes a codex model");
+    assert_eq!(astra.context_window, 262_144, "max_tokens is the window");
+    assert_eq!(
+        astra.base_url,
+        format!("http://127.0.0.1:{port}/backend-api")
+    );
+    let seeded = catalog
+        .iter()
+        .find(|m| m.provider == "mock" && m.id == "gpt-5.6-sol")
+        .expect("the seeded model stays listed");
+    assert_eq!(
+        seeded.context_window, 262_144,
+        "a gateway report corrects a seed"
+    );
+    let brand_new = catalog
+        .iter()
+        .find(|m| m.provider == "mock" && m.id == "brand-new")
+        .expect("suffix-less work-mode slugs keep their id");
+    assert_eq!(brand_new.id, "brand-new");
+    assert!(!catalog.iter().any(|m| m.id == "gpt-6-pro"));
+    assert!(!catalog.iter().any(|m| m.id == "gpt-5-6-thinking"));
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_model_refresh_keeps_the_cached_catalog() {

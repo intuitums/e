@@ -7,6 +7,15 @@ the pipeline publishes.
 
 ## Unreleased
 
+- GPT-6 Astra, OpenAI's new flagship, is seeded on both OpenAI providers: the
+  API (`openai`, 1.05M window, `xhigh`/`max` efforts included) and ChatGPT
+  Codex (`openai-codex`, 272k codex lane). The GPT-5.6 trio is seeded on the
+  API side too. Codex's live model discovery now works at all: its /models
+  is the ChatGPT model-picker payload, not an OpenAI `data` list, so it was
+  failing silently — the new `chatgpt` catalog strategy reads the picker
+  (work-mode entries, `-wm` suffix stripped, `max_tokens` as the window),
+  and a new Codex model appears in the picker with no e release.
+
 ## 0.0.1 — 2026-09-08
 
 
