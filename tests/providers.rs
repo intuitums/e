@@ -1732,6 +1732,29 @@ fn partial_override_inherits_the_builtin() {
     assert_eq!(sonnet.thinking, Thinking::Adaptive);
 }
 
+/// Provider-level defaults reach the built-in seed models without
+/// re-listing them, and a provider-level window is the user's final value —
+/// the live overlay must not put the gateway's report back.
+#[test]
+fn provider_level_defaults_apply_to_builtin_seed_models() {
+    let _lock = env_lock();
+    let home = Home::new("provider-level");
+    home.write(
+        "models.json",
+        r#"{"providers":{"anthropic":{"context_window":100000,"max_output":4096}}}"#,
+    );
+    home.write(
+        "models-store.json",
+        r#"{"anthropic":{"models":[{"id":"claude-opus-5","context_window":1000000}]}}"#,
+    );
+    let opus = catalog::catalog()
+        .into_iter()
+        .find(|m| m.provider == "anthropic" && m.id == "claude-opus-5")
+        .unwrap();
+    assert_eq!(opus.context_window, 100_000);
+    assert_eq!(opus.max_output, Some(4096));
+}
+
 #[test]
 fn a_custom_provider_without_base_url_is_rejected_with_a_warning() {
     let _lock = env_lock();
