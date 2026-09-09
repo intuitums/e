@@ -607,7 +607,9 @@ impl ExtensionHost {
 
     /// Ask every extension with the `input` hook. The first extension to
     /// consume or replace a line wins; transport failures and timeouts allow
-    /// (fail open — a slow extension never eats a user's message).
+    /// (fail open — a slow extension never eats a user's message). An
+    /// allowing extension may still attach a `notice`; those accumulate,
+    /// one per line, onto whichever verdict is finally returned.
     pub async fn hook_input(&self, text: &str) -> InputVerdict {
         // Fast path: no extension listens at all.
         if !self
@@ -617,6 +619,7 @@ impl ExtensionHost {
         {
             return InputVerdict::default();
         }
+        let mut notices: Vec<String> = Vec::new();
         for ext in &self.extensions {
             if !ext.manifest.hooks.iter().any(|h| h == "input") {
                 continue;
@@ -625,13 +628,18 @@ impl ExtensionHost {
                 .request(ext, "hook.input", json!({"text": text}), HOOK_TIMEOUT)
                 .await
             {
-                let verdict: InputVerdict = serde_json::from_value(value).unwrap_or_default();
+                let mut verdict: InputVerdict = serde_json::from_value(value).unwrap_or_default();
+                notices.extend(verdict.notice.take().filter(|n| !n.trim().is_empty()));
                 if verdict.consume || verdict.replace.as_deref().is_some_and(|r| !r.is_empty()) {
+                    verdict.notice = join_notices(notices);
                     return verdict;
                 }
             }
         }
-        InputVerdict::default()
+        InputVerdict {
+            notice: join_notices(notices),
+            ..InputVerdict::default()
+        }
     }
 
     /// Fire-and-forget lifecycle event to every extension. try_send: a child
@@ -725,6 +733,12 @@ impl ExtensionHost {
             Err(_) => Err("timed out".into()),
         }
     }
+}
+
+/// One transcript notice from several extensions' `hook.input` notices, or
+/// none when nobody said anything.
+fn join_notices(notices: Vec<String>) -> Option<String> {
+    (!notices.is_empty()).then(|| notices.join("\n"))
 }
 
 /// Removes a pending-map entry when its request ends by any path, including

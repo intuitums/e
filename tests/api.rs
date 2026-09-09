@@ -865,3 +865,50 @@ async fn dead_extension_fails_fast_instead_of_stalling() {
     }
     assert!(t1.elapsed() < std::time::Duration::from_millis(500));
 }
+
+/// An allowing input hook may still speak: `{"notice":"…"}` alone used to
+/// be dropped on the floor. Notices accumulate across allowing extensions
+/// and ride the verdict that finally settles the line.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn allowing_input_hooks_keep_their_notices() {
+    const NOTICER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) printf '{"id":%s,"result":{"name":"noticer","hooks":["input"]}}\n' "$id" ;;
+    *'"hook.input"'*) printf '{"id":%s,"result":{"notice":"heads up"}}\n' "$id" ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+done
+"#;
+    const EATER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) printf '{"id":%s,"result":{"name":"eater","hooks":["input"]}}\n' "$id" ;;
+    *'"hook.input"'*)
+      case "$line" in
+        *eat-me*) printf '{"id":%s,"result":{"consume":true,"notice":"eaten"}}\n' "$id" ;;
+        *) printf '{"id":%s,"result":{}}\n' "$id" ;;
+      esac ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+done
+"#;
+    let _lock = env_lock();
+    let _home = tempdir::TempHome::with_extensions(&[("a.sh", NOTICER), ("b.sh", EATER)]);
+    let (notices, _rx) = tokio::sync::mpsc::channel(4);
+    let host = start_host(notices).await;
+
+    // Everyone allows: the line passes with the notice intact.
+    let allowed = host.hook_input("ordinary").await;
+    assert!(!allowed.consume && allowed.replace.is_none());
+    assert_eq!(allowed.notice.as_deref(), Some("heads up"));
+
+    // The second extension consumes: both notices arrive with its verdict.
+    let eaten = host.hook_input("eat-me").await;
+    assert!(eaten.consume);
+    assert_eq!(eaten.notice.as_deref(), Some("heads up\neaten"));
+    host.shutdown().await;
+}

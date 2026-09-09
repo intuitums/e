@@ -124,8 +124,11 @@ order; the first extension to consume or replace wins:
 {"consume":false,"replace":null}
 ```
 
-An empty result allows the line through untouched. A pasted API key is
-handled before the hook and never reaches it.
+An empty result allows the line through untouched; `{"notice":"…"}` allows
+it and posts the notice. Notices from every extension that allowed the line
+reach the transcript, alongside the notice of whichever finally consumed or
+replaced it. A pasted API key is handled before the hook and never reaches
+it.
 
 **hook.startup** → rewritten arguments and optional process changes, given
 `{cwd, argv, flags}` where `flags` are the parsed values of every typed
