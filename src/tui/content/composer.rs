@@ -51,7 +51,9 @@ impl Default for Editor {
 /// (CJK counts two, combining marks zero — a terminal row is columns, not
 /// chars). Breaks at word boundaries whenever the row has one — a word
 /// that would cross the edge comes down whole; only space-less runs
-/// hard-break mid-word.
+/// hard-break mid-word. Whitespace at a seam hangs off the row it ends
+/// (belonging to no row's slice), so the next row starts on ink — never
+/// indented by the space that did not fit, never a rail-only row of spaces.
 fn layout_rows(chars: &[char], inner: usize) -> Vec<VisualRow> {
     let mut rows = Vec::new();
     let mut i = 0usize;
@@ -87,6 +89,12 @@ fn layout_rows(chars: &[char], inner: usize) -> Vec<VisualRow> {
             let end = brk.filter(|&b| b > i).unwrap_or(j).max(i + 1);
             rows.push(VisualRow { start: i, end });
             i = end;
+            while i < chars.len() && chars[i] != '\n' && chars[i].is_whitespace() {
+                i += 1;
+            }
+            if i < chars.len() && chars[i] == '\n' {
+                i += 1; // the line ended in hanging whitespace
+            }
         } else {
             rows.push(VisualRow { start: i, end: j });
             if j >= chars.len() {
@@ -98,15 +106,18 @@ fn layout_rows(chars: &[char], inner: usize) -> Vec<VisualRow> {
     rows
 }
 
-/// The row owning a cursor index. A wrap boundary index is shared by two
-/// adjacent rows; it belongs to the lower one (where the cell actually
-/// renders), so exactly one row ever claims the cursor.
+/// The row owning a cursor index: every index before the next row's start.
+/// A wrap boundary index belongs to the lower row (where the cell actually
+/// renders); an index in the hanging whitespace between two rows, or on a
+/// newline, belongs to the upper one — so exactly one row ever claims the
+/// cursor.
 fn row_of(rows: &[VisualRow], cursor: usize) -> Option<usize> {
     rows.iter().enumerate().position(|(index, row)| {
-        let wraps_on = rows
-            .get(index + 1)
-            .is_some_and(|next| next.start == row.end);
-        cursor >= row.start && (cursor < row.end || (cursor == row.end && !wraps_on))
+        cursor >= row.start
+            && match rows.get(index + 1) {
+                Some(next) => cursor < next.start,
+                None => cursor <= row.end,
+            }
     })
 }
 
@@ -525,7 +536,8 @@ impl Editor {
             } else if selection.is_some() {
                 slice.iter().collect()
             } else if cursor_here && !full_final_row {
-                let at = self.cursor - row.start;
+                // A cursor in hanging whitespace sits just past the slice.
+                let at = (self.cursor - row.start).min(slice.len());
                 let before: String = slice[..at].iter().collect();
                 let cursor_char = slice
                     .get(at)
@@ -583,7 +595,8 @@ impl Editor {
 }
 
 /// One visual row: an absolute char range in the buffer. Newline characters
-/// belong to no row — they are zero-width row terminators. Cursor ownership
+/// and whitespace hanging off a wrap seam belong to no row — they are
+/// zero-width row terminators. Cursor ownership
 /// is resolved by `row_of`, never per-row: a wrap boundary index would
 /// otherwise belong to two rows and paint two cursors.
 struct VisualRow {

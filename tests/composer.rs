@@ -65,6 +65,17 @@ fn words_wrap_whole() {
 }
 
 #[test]
+fn a_space_that_misses_the_edge_hangs_instead_of_starting_a_row() {
+    // "aaaa bbbb" at inner width 4: the word fills the row, the space has
+    // nowhere to go — it hangs off the seam, so the next row starts on
+    // "bbbb" (no indent) and no rail-only row of spaces appears.
+    let rendered = rows("aaaa bbbb", 6);
+    assert_eq!(rendered.len(), 1 + 2 + 1, "{rendered:?}"); // + trailing cursor row
+    assert!(rendered[1].ends_with(" aaaa"), "{:?}", rendered[1]);
+    assert!(rendered[2].ends_with(" bbbb"), "{:?}", rendered[2]);
+}
+
+#[test]
 fn up_down_move_between_visual_rows_and_fall_back_to_history() {
     let theme = theme::resolve("dark", false);
 
