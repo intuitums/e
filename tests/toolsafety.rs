@@ -277,6 +277,21 @@ fn grep_searches_an_explicitly_requested_dotfile() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// A `path` that does not exist is a failed call, not an empty search —
+/// "0 matches" for a typo reads as "the symbol is absent".
+#[test]
+fn grep_reports_a_missing_path_instead_of_zero_matches() {
+    let ws = workspace("grep-missing");
+    let out = tools::run(
+        "grep",
+        r#"{"pattern":"needle","path":"does/not/exist"}"#,
+        &ws,
+    );
+    assert!(out.is_error(), "{}", out.summary);
+    assert!(out.content.contains("does/not/exist"), "{}", out.content);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 #[test]
 fn grep_glob_restricts_the_search_to_matching_files() {
     let ws = workspace("grep-glob");

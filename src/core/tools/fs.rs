@@ -373,7 +373,7 @@ fn count_text_lines(path: &Path) -> io::Result<usize> {
 pub fn grep_schema() -> Value {
     schema_object(
         "grep",
-        "Search file contents for a regular expression, workspace-wide. Traversal skips dotfiles and .git/target/node_modules/dist/.cache (an explicitly named file is always searched), and stops at 200 matches — the result says so when capped.",
+        "Search file contents for a regular expression, workspace-wide. Traversal skips dotfiles and .git/target/node_modules/dist/.cache (an explicitly named file is always searched; a path that does not exist is an error), and stops at 200 matches — the result says so when capped.",
         json!({
             "pattern": {"type": "string"},
             "path": {"type": "string", "description": "Directory or file to search (default: workspace root)"},
@@ -400,21 +400,30 @@ pub fn grep(args: &Value, cwd: &Path, _state: &super::ToolRuntime) -> ToolOutput
         },
         None => None,
     };
-    let root = resolve(cwd, args["path"].as_str().unwrap_or("."));
+    let shown = args["path"].as_str().unwrap_or(".");
+    let root = resolve(cwd, shown);
+    // A path that isn't there is an error, not an empty result: "0 matches"
+    // for a typo would have the model conclude the symbol doesn't exist.
+    let metadata = match std::fs::metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) => return err(format!("grep: {shown}: {error}"), "grep", ""),
+    };
     let mut hits = Vec::new();
     let mut count = 0usize;
-    if root.is_dir() {
+    if metadata.is_dir() {
         super::walk_files(&root, &mut |path| {
             if glob_allows(glob.as_ref(), path, cwd) {
-                search_file(path, cwd, &re, &mut hits, &mut count);
+                // The walk visits regular files only; one that vanished or
+                // turned unreadable mid-walk is skipped, not fatal.
+                let _ = search_file(path, cwd, &re, &mut hits, &mut count);
             }
             count < MATCH_CAP
         });
-    } else {
+    } else if let Err(error) = search_file(&root, cwd, &re, &mut hits, &mut count) {
         // An explicitly requested file is searched as asked — the dotfile
         // skip rule is a traversal heuristic, not a veto over `.env`, and
         // `glob` narrows a directory walk, not an explicit single-file ask.
-        search_file(&root, cwd, &re, &mut hits, &mut count);
+        return err(format!("grep: {shown}: {error}"), "grep", "");
     }
     if hits.is_empty() {
         return ok(String::new(), "0 matches".into());
@@ -486,25 +495,22 @@ fn glob_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
     regex::Regex::new(&re)
 }
 
+/// Search one file; the error is the stat or open failure, or a refusal of
+/// a non-regular file (a FIFO would block the scan forever).
 fn search_file(
     path: &Path,
     cwd: &Path,
     re: &regex::Regex,
     hits: &mut Vec<String>,
     count: &mut usize,
-) {
-    // Only regular files: a FIFO in the tree would block the walk forever.
-    if !std::fs::metadata(path)
-        .map(|m| m.is_file())
-        .unwrap_or(false)
-    {
-        return;
+) -> io::Result<()> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(io::Error::other("not a regular file"));
     }
-    let Ok(file) = std::fs::File::open(path) else {
-        return;
-    };
+    let file = std::fs::File::open(path)?;
     let rel = path.strip_prefix(cwd).unwrap_or(path).display().to_string();
     search_lines(BufReader::new(file), &rel, re, hits, count);
+    Ok(())
 }
 
 /// Scan one file's lines for `re`, appending `rel:line: text` hits.
