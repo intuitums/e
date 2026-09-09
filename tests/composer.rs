@@ -76,6 +76,24 @@ fn a_space_that_misses_the_edge_hangs_instead_of_starting_a_row() {
 }
 
 #[test]
+fn up_down_follow_display_columns_over_wide_chars() {
+    // Row 1 is four CJK chars (8 cells), row 2 eight ASCII chars. From
+    // column 4 of row 2, Up lands on column 4 of row 1 — index 2, not 4.
+    let theme = theme::resolve("dark", false);
+    let mut editor = Editor::new();
+    editor.set_text("日本語日abcdefgh");
+    editor.render(&theme, 10, 24); // inner width 8
+    for _ in 0..4 {
+        editor.key(Key::Left);
+    }
+    assert_eq!(editor.cursor(), 8);
+    editor.key(Key::Up);
+    assert_eq!(editor.cursor(), 2, "column 4 of the CJK row");
+    editor.key(Key::Down);
+    assert_eq!(editor.cursor(), 8, "and back to column 4 of the ASCII row");
+}
+
+#[test]
 fn up_down_move_between_visual_rows_and_fall_back_to_history() {
     let theme = theme::resolve("dark", false);
 

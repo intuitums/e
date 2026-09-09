@@ -287,8 +287,10 @@ impl Editor {
         }
     }
 
-    /// Where a vertical motion would land: the same column in the visual
-    /// row above/below, None at the draft's edge.
+    /// Where a vertical motion would land: the same display column in the
+    /// visual row above/below (chars are not columns — a wide glyph is two
+    /// cells, so the target is the index whose cells reach the column), None
+    /// at the draft's edge.
     fn line_target(&self, direction: isize) -> Option<usize> {
         let inner = self.inner_width?;
         let rows = layout_rows(&self.text, inner);
@@ -298,8 +300,25 @@ impl Editor {
             1 if index + 1 < rows.len() => &rows[index + 1],
             _ => return None,
         };
-        let col = self.cursor.saturating_sub(rows[index].start);
-        Some((target.start + col).min(target.end))
+        let current = &rows[index];
+        let col = row_width(
+            &self.text,
+            &VisualRow {
+                start: current.start,
+                end: self.cursor.min(current.end),
+            },
+        );
+        let mut at = target.start;
+        let mut reached = 0usize;
+        while at < target.end {
+            let w = self.text[at].width().unwrap_or(0);
+            if reached + w > col {
+                break;
+            }
+            reached += w;
+            at += 1;
+        }
+        Some(at)
     }
 
     /// Vertical arrows: move between visual rows of the draft when there is
