@@ -514,8 +514,17 @@ fn staged_replace(
             #[cfg(unix)]
             verify_target_identity(existing, &target)?;
         } else {
-            // Publish without overwriting a file created during staging.
-            std::fs::hard_link(&temporary, &target)?;
+            // Publish without overwriting a file created during staging. A
+            // filesystem without hard links (exFAT, some network mounts)
+            // refuses the link; then create the target exclusively and copy
+            // the staged bytes in, which keeps the same guarantee.
+            match std::fs::hard_link(&temporary, &target) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(error)
+                }
+                Err(_) => copy_into_new(&mut file, &target)?,
+            }
         }
         std::fs::remove_file(&temporary)?;
         #[cfg(unix)]
@@ -526,6 +535,24 @@ fn staged_replace(
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+/// Publish a staged file where `hard_link` is unavailable: create `target`
+/// exclusively (a concurrent creator still wins with AlreadyExists) and copy
+/// the staged bytes in.
+fn copy_into_new(staged: &mut std::fs::File, target: &Path) -> std::io::Result<()> {
+    use std::io::Seek;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o666);
+    }
+    let mut created = options.open(target)?;
+    staged.rewind()?;
+    std::io::copy(staged, &mut created)?;
+    created.sync_all()
 }
 
 /// Refuse a pathname that was removed or replaced while its inode was open.
@@ -907,6 +934,34 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "other writer");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The link-less publish path (exFAT and friends can't be made in a
+    /// test, so the fallback is exercised directly): the staged bytes land
+    /// in a fresh target, and a file that appeared meanwhile is left alone.
+    #[test]
+    fn link_free_publish_creates_exclusively_from_the_staged_bytes() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("e-write-nolink-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged_path = dir.join("staged");
+        let mut staged = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&staged_path)
+            .unwrap();
+        staged.write_all(b"published").unwrap();
+        let target = dir.join("new");
+        super::copy_into_new(&mut staged, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "published");
+        assert_eq!(
+            super::copy_into_new(&mut staged, &target)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
