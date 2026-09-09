@@ -252,6 +252,23 @@ async fn main() -> std::io::Result<()> {
     };
     let args = &options.positional;
 
+    // Diagnostics were classified before extensions started (above); one
+    // arriving here rode in behind an extension flag the raw scan could not
+    // tell from a value-taking one. Refuse rather than send the word to the
+    // model as a prompt with extensions running.
+    if matches!(
+        leading_positional_subcommand(&options),
+        Some("doctor" | "providers")
+    ) {
+        usage_error(
+            &host,
+            json_requested,
+            "diagnostics cannot follow extension flags — run `e doctor` or `e providers` first"
+                .into(),
+        )
+        .await;
+    }
+
     // One isolated near-miss word is a mistyped command, not a prompt.
     if let Some(message) = unknown_command_hint(&options) {
         usage_error(&host, false, message).await;
