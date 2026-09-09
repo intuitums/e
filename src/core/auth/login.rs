@@ -24,6 +24,13 @@ const CALLBACK_ADDR: &str = "127.0.0.1:1455";
 /// is present and can abort them.
 const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// One OAuth refresh at a time, process-wide. The launch-time catalog sync
+/// and the first turn both reach for the same stale token; a refresh token
+/// is single-use, so two concurrent redemptions mean one loser and, under
+/// reuse detection, a revoked pair on disk. Holders re-read `auth.json`
+/// after acquiring and skip the POST when another task already refreshed.
+static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Shared cancellation for an interactive login. The TUI also aborts the
 /// async task, while this flag releases the blocking localhost callback wait.
 #[derive(Clone, Default)]
@@ -565,6 +572,7 @@ pub async fn xai_refresh(refresh: &str) -> Result<crate::core::auth::Credential,
 /// ChatGPT / Codex OAuth: refresh when within a minute of expiry; persist the
 /// rotated pair. Returns `(access_token, chatgpt_account_id)`.
 pub async fn codex_access(provider: &str) -> Result<(String, String), String> {
+    let _one_refresh_at_a_time = REFRESH_LOCK.lock().await;
     let Some(Credential::OAuth {
         access,
         refresh,
@@ -644,6 +652,27 @@ where
     Ok(access)
 }
 
+/// xAI OAuth: refresh when within a minute of expiry; persist the rotated
+/// pair. Serialized like `codex_access`, and re-checks the stored expiry once
+/// it holds the lock so a refresh another task just finished is reused.
+async fn xai_access(provider: &str) -> Result<String, String> {
+    let _one_refresh_at_a_time = REFRESH_LOCK.lock().await;
+    let Some(Credential::OAuth {
+        access,
+        refresh,
+        expires,
+        ..
+    }) = auth::load().get(provider).cloned()
+    else {
+        return Err(format!("no credentials for {provider} — run /login"));
+    };
+    if auth::now_ms() + 60_000 < expires {
+        return Ok(access);
+    }
+    let fresh = xai_refresh(&refresh).await?;
+    persist_xai_refresh(provider, fresh, auth::set)
+}
+
 /// A Bearer / x-api-key value for dialects that don't need an account header.
 /// API keys pass through; OAuth refreshes lazily via the provider's declared
 /// flow (`xai-device` or `codex`).
@@ -651,10 +680,7 @@ pub async fn access_token(provider: &str) -> Result<String, String> {
     match auth::load().get(provider).cloned() {
         Some(Credential::ApiKey { key }) => Ok(key),
         Some(Credential::OAuth {
-            access,
-            refresh,
-            expires,
-            ..
+            access, expires, ..
         }) => {
             if auth::now_ms() + 60_000 < expires {
                 return Ok(access);
@@ -662,10 +688,7 @@ pub async fn access_token(provider: &str) -> Result<String, String> {
             let flow =
                 crate::core::providers::registry::find(provider).and_then(|p| p.auth.oauth.clone());
             match flow.as_deref() {
-                Some("xai-device") => {
-                    let fresh = xai_refresh(&refresh).await?;
-                    persist_xai_refresh(provider, fresh, auth::set)
-                }
+                Some("xai-device") => xai_access(provider).await,
                 Some("codex") => codex_access(provider).await.map(|(access, _)| access),
                 other => Err(format!(
                     "cannot refresh {provider} (oauth flow {:?}) — run /login",

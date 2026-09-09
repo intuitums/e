@@ -129,7 +129,9 @@ pub fn report(host: &crate::core::extensions::ExtensionHost) -> Report {
     let home = crate::core::config::home::home();
     Report {
         version: crate::VERSION.into(),
-        target: crate::core::update::target().into(),
+        target: crate::core::update::target()
+            .unwrap_or("none (no release for this platform)")
+            .into(),
         working_directory: std::env::current_dir()
             .map(|path| sanitize_line(&path.display().to_string()))
             .unwrap_or_else(|_| "<unavailable>".into()),

@@ -28,6 +28,27 @@ fn version_comparison() {
     assert!(!is_release_version("1.2.3.4"));
 }
 
+/// A platform the release matrix does not ship for has no target at all —
+/// it must never fall back to the x86_64 glibc tarball, which is how a
+/// cargo-installed e on musl or armv7 got overwritten with a binary its
+/// host could not execute.
+#[test]
+fn off_matrix_platforms_have_no_release_target() {
+    use e::core::update::release_target;
+    assert_eq!(
+        release_target("linux", "x86_64", true),
+        Some("x86_64-unknown-linux-gnu")
+    );
+    assert_eq!(
+        release_target("macos", "aarch64", false),
+        Some("aarch64-apple-darwin")
+    );
+    assert_eq!(release_target("linux", "x86_64", false), None, "musl");
+    assert_eq!(release_target("linux", "arm", true), None);
+    assert_eq!(release_target("linux", "riscv64", true), None);
+    assert_eq!(release_target("freebsd", "x86_64", true), None);
+}
+
 fn serve_release(files: Vec<(String, Vec<u8>)>) -> (String, std::thread::JoinHandle<()>) {
     serve_files(files, "200 OK")
 }
@@ -67,7 +88,7 @@ fn serve_files(
 }
 
 fn fake_release(binary_contents: &str, poison_checksum: bool) -> (Vec<(String, Vec<u8>)>, String) {
-    let target = e::core::update::target();
+    let target = e::core::update::target().expect("tests run on a release target");
     let dir = std::env::temp_dir().join(format!(
         "e-update-fixture-{}-{}",
         std::process::id(),
@@ -114,7 +135,8 @@ fn fake_release(binary_contents: &str, poison_checksum: bool) -> (Vec<(String, V
 async fn install_follows_asset_redirects_and_swaps_the_binary_atomically() {
     let (files, contents) = fake_release("#!/bin/sh\necho new-e\n", false);
     let (base, server) = serve_release(files);
-    let responses = [format!("e-{}.tar.gz", e::core::update::target()), "checksums.txt".into()]
+    let target = e::core::update::target().expect("tests run on a release target");
+    let responses = [format!("e-{target}.tar.gz"), "checksums.txt".into()]
         .into_iter()
         .map(|name| format!("HTTP/1.1 302 Found\r\nLocation: {base}/{name}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
         .collect();
