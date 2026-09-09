@@ -504,7 +504,17 @@ fn search_file(
         return;
     };
     let rel = path.strip_prefix(cwd).unwrap_or(path).display().to_string();
-    let mut reader = BufReader::new(file);
+    search_lines(BufReader::new(file), &rel, re, hits, count);
+}
+
+/// Scan one file's lines for `re`, appending `rel:line: text` hits.
+fn search_lines<R: BufRead>(
+    mut reader: R,
+    rel: &str,
+    re: &regex::Regex,
+    hits: &mut Vec<String>,
+    count: &mut usize,
+) {
     let mut n = 0usize;
     loop {
         match bounded_line(&mut reader) {
@@ -522,7 +532,11 @@ fn search_file(
             Ok(None) => break,
             // Oversized or non-UTF-8 line: skip it (bounded_line advanced past
             // it) and keep scanning later lines instead of dropping them.
-            Err(_) => n += 1,
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => n += 1,
+            // An I/O error consumed nothing, so retrying would re-issue the
+            // same failing read forever (/proc/<pid>/mem, a bad block, a
+            // stale NFS handle). Give up on this file.
+            Err(_) => break,
         }
     }
 }
@@ -541,7 +555,9 @@ fn truncate_match_line(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_line, glob_regex, write, BufReader, MAX_LINE_BYTES};
+    use super::{
+        bounded_line, glob_regex, search_lines, write, BufRead, BufReader, MAX_LINE_BYTES,
+    };
     use serde_json::json;
 
     #[test]
@@ -586,6 +602,39 @@ mod tests {
         assert!(output.is_error());
         assert_eq!(std::fs::read(file).unwrap(), vec![0xff, 0x00]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A reader whose every read fails the way a bad block or
+    /// `/proc/<pid>/mem` does: persistently, consuming nothing.
+    struct FailingReader;
+
+    impl std::io::Read for FailingReader {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("input/output error"))
+        }
+    }
+
+    impl BufRead for FailingReader {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            Err(std::io::Error::other("input/output error"))
+        }
+        fn consume(&mut self, _: usize) {}
+    }
+
+    #[test]
+    fn grep_stops_scanning_a_file_whose_reads_keep_failing() {
+        let mut hits = Vec::new();
+        let mut count = 0;
+        // Returning at all is the pin: the buggy loop treated every error
+        // as "skip this line" and never terminated.
+        search_lines(
+            FailingReader,
+            "broken",
+            &regex::Regex::new("x").unwrap(),
+            &mut hits,
+            &mut count,
+        );
+        assert!(hits.is_empty());
     }
 
     #[test]
