@@ -1159,9 +1159,11 @@ impl App {
     /// Insert text normally, or turn a pasted list of image paths into
     /// attachments — but only into a free composer: over an open surface a
     /// paste is plain text, so it cannot silently stack onto a draft the
-    /// user is not looking at.
+    /// user is not looking at. Line endings normalise to `\n`: CRLF first,
+    /// so a Windows clipboard does not double every line, then the bare CR
+    /// some terminals send for a pasted newline.
     fn paste(&mut self, text: &str) {
-        let text = text.replace('\r', "\n");
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         if self.composer_free() {
             let paths: Vec<String> = text
                 .lines()
@@ -3531,6 +3533,13 @@ mod tests {
 
         assert!(app.composer_images.is_empty(), "no attach over a surface");
         assert_eq!(app.editor.text(), path.display().to_string());
+    }
+
+    #[test]
+    fn a_crlf_paste_keeps_one_newline_per_line() {
+        let mut app = session_app();
+        app.paste("line1\r\nline2\r\n");
+        assert_eq!(app.editor.text(), "line1\nline2\n");
     }
 
     #[test]
