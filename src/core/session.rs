@@ -324,7 +324,7 @@ impl SessionLog {
                     .map(|n| n.message)
             })
             .collect();
-        repair_tail(&mut messages);
+        repair_history(&mut messages);
         Ok(messages)
     }
 
@@ -414,10 +414,15 @@ impl SessionLog {
     }
 
     /// Re-open an existing session for appending. Fails while another
-    /// process owns the session's lock. The reopened handle picks up
-    /// exactly where the file's last branch left off — reading the file
-    /// once here is what lets a resumed session keep growing that branch
-    /// instead of quietly starting a second root next to it.
+    /// process owns the session's lock. A torn final record — what a crash
+    /// mid-append leaves — is truncated away first: `nodes` skips it on
+    /// read, but appending behind it would fuse the next record onto the
+    /// torn bytes, and that fused line becomes interior corruption that
+    /// turns one lost record into an unresumable session. The reopened
+    /// handle then picks up exactly where the file's last branch left off —
+    /// reading the file once here is what lets a resumed session keep
+    /// growing that branch instead of quietly starting a second root next
+    /// to it.
     pub fn reopen(path: &Path) -> std::io::Result<SessionLog> {
         home::ensure()?;
         let lock = LockGuard::acquire(path)?;
@@ -428,6 +433,7 @@ impl SessionLog {
             let mode = file.metadata()?.permissions().mode() & 0o600;
             file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         }
+        file.set_len(intact_len(path)?)?;
         let current = SessionLog::nodes(path)
             .ok()
             .and_then(|nodes| nodes.last().map(|n| n.id.clone()));
@@ -441,6 +447,24 @@ impl SessionLog {
     }
 }
 
+/// The file's length up to the end of its last intact record: the whole
+/// file unless the last non-empty line fails to parse — the torn tail
+/// `nodes` tolerates, cut back to where it starts.
+fn intact_len(path: &Path) -> std::io::Result<u64> {
+    let bytes = std::fs::read(path)?;
+    let Some(end) = bytes.iter().rposition(|b| !b.is_ascii_whitespace()) else {
+        return Ok(bytes.len() as u64);
+    };
+    let start = bytes[..end]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |newline| newline + 1);
+    match serde_json::from_slice::<Entry>(&bytes[start..=end]) {
+        Ok(_) => Ok(bytes.len() as u64),
+        Err(_) => Ok(start as u64),
+    }
+}
+
 fn validate_format(version: u32) -> std::io::Result<()> {
     if version <= FORMAT_VERSION {
         Ok(())
@@ -451,35 +475,48 @@ fn validate_format(version: u32) -> std::io::Result<()> {
     }
 }
 
-/// Make a loaded history replayable when a crash cut it mid-record: a
-/// trailing reasoning block with no assistant turn after it fails signature
-/// replay, and an assistant tool call whose result never got appended is a
-/// dangling tool_use every dialect rejects. The former is dropped; the
-/// latter gets an honest synthetic result so the content survives.
-fn repair_tail(messages: &mut Vec<ChatMessage>) {
-    while matches!(messages.last(), Some(m) if m.role() == "reasoning") {
-        messages.pop();
+/// Make a history replayable when a crash cut it mid-record. A reasoning
+/// block with no assistant turn after it fails signature replay and is
+/// dropped; an assistant tool call whose result never got appended is a
+/// dangling tool_use every dialect rejects and gets an honest synthetic
+/// result right after its batch, so the content survives. The whole
+/// history is scanned, not just the tail: the repair lives in memory only,
+/// and the next prompt is appended behind the unrepaired records, so from
+/// the second resume on (and on a `/tree` rewind to that prompt) the hole
+/// sits in the middle of the file.
+pub fn repair_history(messages: &mut Vec<ChatMessage>) {
+    // A reasoning block belongs to the next non-reasoning message, which
+    // must be its assistant turn.
+    let mut follower = None;
+    let mut kept = Vec::with_capacity(messages.len());
+    for message in std::mem::take(messages).into_iter().rev() {
+        let role = message.role();
+        if role != "reasoning" {
+            follower = Some(role);
+            kept.push(message);
+        } else if follower == Some("assistant") {
+            kept.push(message);
+        }
     }
-    let Some(assistant_at) = messages.iter().rposition(|m| m.role() == "assistant") else {
-        return;
-    };
-    let answered: Vec<String> = messages[assistant_at..]
-        .iter()
-        .filter(|m| m.role() == "tool")
-        .filter_map(|m| m.tool_call_id().cloned())
-        .collect();
-    let missing: Vec<String> = messages[assistant_at]
-        .tool_calls()
-        .iter()
-        .map(|c| c.id.clone())
-        .filter(|id| !answered.contains(id))
-        .collect();
-    for id in missing {
-        messages.push(ChatMessage::tool_result(
+    kept.reverse();
+    // Answer every call still open when its batch of results ends.
+    let mut unanswered: Vec<String> = Vec::new();
+    let synthetic = |id: String| {
+        ChatMessage::tool_result(
             id,
             "not executed — the session ended before this call completed",
-        ));
+        )
+    };
+    for message in kept {
+        if let Some(id) = message.tool_call_id() {
+            unanswered.retain(|open| open != id);
+        } else {
+            messages.extend(unanswered.drain(..).map(synthetic));
+            unanswered = message.tool_calls().iter().map(|c| c.id.clone()).collect();
+        }
+        messages.push(message);
     }
+    messages.extend(unanswered.into_iter().map(synthetic));
 }
 
 /// The latest persisted display name in a session file, if any — the name a

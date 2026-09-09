@@ -2239,8 +2239,9 @@ fn tree_items(nodes: &[crate::core::session::Node]) -> Vec<(String, String, bool
 }
 
 /// The rewind target for a chosen node: its parent, the message history before
-/// it, and its prompt text for the composer. None means the id no longer
-/// resolves or the ancestor path is corrupt.
+/// it (repaired the same way a resume's is, so a crash-cut ancestor never
+/// replays as a dangling call), and its prompt text for the composer. None
+/// means the id no longer resolves or the ancestor path is corrupt.
 fn rewind_target(
     nodes: &[crate::core::session::Node],
     node_id: &str,
@@ -2265,10 +2266,11 @@ fn rewind_target(
         cursor = node.parent.clone();
     }
     path_ids.reverse();
-    let messages = path_ids
+    let mut messages = path_ids
         .iter()
         .filter_map(|id| by_id.get(id.as_str()).map(|n| n.message.clone()))
         .collect();
+    crate::core::session::repair_history(&mut messages);
     Some((head, messages, target.message.content.clone()))
 }
 
