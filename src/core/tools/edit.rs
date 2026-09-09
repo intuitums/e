@@ -1,6 +1,7 @@
 //! The edit tool: exact single-occurrence string replacement.
 
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::path::Path;
 
 use super::{resolve, schema_object, ToolOutcome, ToolOutput};
@@ -8,7 +9,7 @@ use super::{resolve, schema_object, ToolOutcome, ToolOutput};
 pub fn schema() -> Value {
     schema_object(
         "edit",
-        "Replace an exact string in a file. old_string must occur exactly once and is the file's raw text — never include the line-number prefix the read tool adds. Fails if the file changed on disk since it was last read.",
+        "Replace an exact string in a file. old_string must occur exactly once and is the file's raw text — never include the line-number prefix the read tool adds. Line endings: when old_string does not match as written, it is matched with the file's CRLF read as LF (as read shows it); the file keeps its own line endings. Fails if the file changed on disk since it was last read.",
         json!({
             "path": {"type": "string"},
             "old_string": {"type": "string", "description": "Exact text to replace, including whitespace"},
@@ -45,7 +46,21 @@ pub fn run(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput {
         Ok(t) => t,
         Err(e) => return err(format!("edit {path}: {e}"), path),
     };
-    let occurrences = text.matches(old).count();
+    // Match the raw bytes first. A CRLF file is shown to the model with plain
+    // newlines (read strips the `\r`), so a multi-line old_string built from
+    // what it saw cannot match raw; retry on the LF-normalized text and put
+    // the file's dominant ending back on the result.
+    let normalized = text.matches(old).count() == 0 && text.contains("\r\n");
+    let (subject, old, new): (Cow<str>, Cow<str>, Cow<str>) = if normalized {
+        (
+            text.replace("\r\n", "\n").into(),
+            old.replace("\r\n", "\n").into(),
+            new.replace("\r\n", "\n").into(),
+        )
+    } else {
+        (text.as_str().into(), old.into(), new.into())
+    };
+    let occurrences = subject.matches(&*old).count();
     if occurrences == 0 {
         return err(format!("edit {path}: old_string not found"), path);
     }
@@ -55,7 +70,10 @@ pub fn run(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput {
             path,
         );
     }
-    let updated = text.replacen(old, new, 1);
+    let mut updated = subject.replacen(&*old, &new, 1);
+    if normalized && mostly_crlf(&text) {
+        updated = updated.replace('\n', "\r\n");
+    }
     match super::staged_write(&full, updated.as_bytes()) {
         Ok(()) => {
             super::note_seen(state, &full);
@@ -86,4 +104,10 @@ pub fn run(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput {
         }
         Err(e) => err(format!("edit {path}: {e}"), path),
     }
+}
+
+/// Whether most of `text`'s lines end in CRLF — the ending a normalized
+/// edit is written back with.
+fn mostly_crlf(text: &str) -> bool {
+    text.matches("\r\n").count() * 2 >= text.matches('\n').count()
 }

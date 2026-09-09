@@ -163,6 +163,28 @@ fn write_recreates_a_file_deleted_since_it_was_read() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// `read` shows a CRLF file with plain newlines, so a multi-line old_string
+/// built from what the model saw must still match — and the file keeps its
+/// CRLF endings, new lines included.
+#[test]
+fn edit_matches_across_crlf_line_breaks_and_keeps_the_endings() {
+    let ws = workspace("crlf");
+    let file = ws.join("win.txt");
+    std::fs::write(&file, "alpha\r\nbeta\r\ngamma\r\n").unwrap();
+
+    let edit = tools::run(
+        "edit",
+        r#"{"path":"win.txt","old_string":"alpha\nbeta","new_string":"one\ntwo\nthree"}"#,
+        &ws,
+    );
+    assert!(!edit.is_error(), "{}", edit.content);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "one\r\ntwo\r\nthree\r\ngamma\r\n"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 #[cfg(unix)]
 #[test]
 fn search_tools_survive_a_symlink_cycle() {

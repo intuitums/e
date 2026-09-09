@@ -26,7 +26,7 @@ fn err(message: String, tool: &str, target: &str) -> ToolOutput {
 pub fn read_schema() -> Value {
     schema_object(
         "read",
-        "Read a UTF-8 text file. Each returned line is prefixed with its 1-based line number and a tab; the prefix is not part of the file. Use offset/limit to window large files.",
+        "Read a UTF-8 text file. Each returned line is prefixed with its 1-based line number and a tab; the prefix is not part of the file. CRLF line endings are shown as plain newlines. Use offset/limit to window large files.",
         json!({
             "path": {"type": "string", "description": "File path, absolute or workspace-relative"},
             "offset": {"type": "integer", "description": "1-based first line"},
