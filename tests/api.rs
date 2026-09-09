@@ -912,3 +912,58 @@ done
     assert_eq!(eaten.notice.as_deref(), Some("heads up\neaten"));
     host.shutdown().await;
 }
+
+/// stderr is diagnostics, not protocol: an over-long line is reported and
+/// dropped, and the pipe stays open. Closing it made the child's next stderr
+/// write a SIGPIPE — a delayed crash instead of a truncation.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn an_oversized_stderr_line_does_not_kill_the_extension() {
+    const CHATTY: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"id":%s,"result":{"name":"chatty","tools":[{"name":"chat","parameters":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tool_call"'*)
+      head -c 1048577 /dev/zero | tr '\000' x >&2
+      printf '\nstill here\n' >&2
+      printf '{"id":%s,"result":{"content":"answered"}}\n' "$id" ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+done
+"#;
+    let _lock = env_lock();
+    let _home = tempdir::TempHome::with_extension("chatty.sh", CHATTY);
+    let (notices, mut rx) = tokio::sync::mpsc::channel(8);
+    let host = start_host(notices).await;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        host.call_tool("chat", "{}"),
+    )
+    .await
+    .expect("the tool call resolves");
+    assert!(!result.is_error, "{}", result.content);
+    assert_eq!(result.content, "answered");
+    // The cap is reported once, and the line after it still gets through.
+    let mut seen = Vec::new();
+    while let Ok(Some(msg)) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await
+    {
+        seen.push(msg);
+        if seen.iter().any(|m| m.ends_with("still here")) {
+            break;
+        }
+    }
+    assert_eq!(
+        seen.iter().filter(|m| m.contains("line exceeded")).count(),
+        1,
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|m| m == "extension chatty.sh: still here"),
+        "{seen:?}"
+    );
+    host.shutdown().await;
+}

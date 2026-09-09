@@ -845,6 +845,10 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "extension".into());
+        // stderr is diagnostics, not protocol: an over-long line is reported
+        // and its remainder dropped, then reading goes on. The pipe must
+        // stay open as long as the child lives — closing it would turn the
+        // child's next stderr write into SIGPIPE/EPIPE and kill it.
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
             loop {
@@ -856,7 +860,9 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
                     Ok(None) => break,
                     Err(error) => {
                         let _ = notices.try_send(format!("extension {source}: {error}"));
-                        break;
+                        if discard_line(&mut reader).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
@@ -1007,9 +1013,10 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
 /// view — deliberately, not just as a memory bound: a still-growing line
 /// with no newline yet (a firehose, or a client that never terminates one)
 /// must be cut off promptly rather than read forever looking for a
-/// newline that may never come. Every caller therefore treats this error
-/// as fatal to its read loop, never as "skip this line and keep going" —
-/// the stream is left mid-line, not resynced to the next one.
+/// newline that may never come. The stream is left mid-line, never
+/// resynced: protocol readers treat the error as fatal to their loop, and
+/// the one diagnostics reader (extension stderr) resyncs itself with
+/// `discard_line`.
 pub async fn read_bounded_line<R>(
     reader: &mut R,
     max_bytes: usize,
@@ -1029,7 +1036,9 @@ where
 
         if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
             if line.len().saturating_add(newline) > max_bytes {
-                reader.consume(newline + 1);
+                // Leave the newline in place so the stream is mid-line
+                // here exactly as in the no-newline-yet case below.
+                reader.consume(newline);
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("line exceeded {max_bytes} bytes"),
@@ -1058,6 +1067,32 @@ where
     String::from_utf8(line)
         .map(Some)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+/// Skip to just past the next newline (or EOF): the resync after
+/// `read_bounded_line` hits its cap on a stream where dropping the rest of
+/// the line is the right call. Reads and discards without buffering, so a
+/// firehose costs nothing but time.
+async fn discard_line<R>(reader: &mut R) -> std::io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+{
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        match available.iter().position(|byte| *byte == b'\n') {
+            Some(newline) => {
+                reader.consume(newline + 1);
+                return Ok(());
+            }
+            None => {
+                let count = available.len();
+                reader.consume(count);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
