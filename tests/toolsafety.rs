@@ -146,6 +146,23 @@ fn edit_fails_when_the_file_changed_on_disk_since_e_saw_it() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// A file that was read and then removed externally is not stale — there is
+/// nothing on disk to protect, and the "read it again" advice cannot be
+/// followed for a missing file.
+#[test]
+fn write_recreates_a_file_deleted_since_it_was_read() {
+    let ws = workspace("deleted");
+    let file = ws.join("gone.txt");
+    std::fs::write(&file, "old\n").unwrap();
+    assert!(!tools::run("read", r#"{"path":"gone.txt"}"#, &ws).is_error());
+    std::fs::remove_file(&file).unwrap();
+
+    let written = tools::run("write", r#"{"path":"gone.txt","content":"fresh\n"}"#, &ws);
+    assert!(!written.is_error(), "{}", written.content);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "fresh\n");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 #[cfg(unix)]
 #[test]
 fn search_tools_survive_a_symlink_cycle() {

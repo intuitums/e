@@ -670,7 +670,10 @@ fn note_seen_stamp(state: &ToolRuntime, path: &Path, stamp: (std::time::SystemTi
     seen.insert(freshness_key(path), stamp);
 }
 
-/// Fail when a recorded file changed on disk since e last saw it.
+/// Fail when a recorded file changed on disk since e last saw it. A file
+/// that has since been removed passes: there is nothing left to clobber, and
+/// demanding a re-read of a missing file would wedge the path for the rest
+/// of the session.
 fn check_fresh(
     state: &ToolRuntime,
     path: &Path,
@@ -684,7 +687,8 @@ fn check_fresh(
     let Some(recorded) = recorded else {
         return Ok(());
     };
-    if file_stamp(path) == Some(recorded) {
+    let current = file_stamp(path);
+    if current.is_none() || current == Some(recorded) {
         return Ok(());
     }
     Err(ToolOutput {
