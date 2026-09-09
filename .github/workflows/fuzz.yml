@@ -10,9 +10,9 @@ permissions:
 
 jobs:
   fuzz:
-    # Weekly and long-running; runs on the self-hosted runner (see ci.yml).
+    # Exercise each parser independently on a fresh GitHub-hosted VM.
     name: ${{ matrix.target }}
-    runs-on: intuitum-24vcpu-ubuntu-2604-01
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -21,8 +21,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          clean: false
 
       - name: Install cargo-fuzz
         run: |
