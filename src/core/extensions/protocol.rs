@@ -2,14 +2,15 @@
 //! extension process's stdin/stdout.
 //!
 //! e → extension requests (each expects a response with the same `id`):
-//!   {"id":1,"method":"initialize","params":{"protocol":1,"capabilities":["tool.update"],"e_version":"…","cwd":"…","config":{…}}}
+//!   {"id":1,"method":"initialize","params":{"protocol":1,"capabilities":["tool.update"],"e_version":"…","cwd":"…","extensions_config":{…}}}
 //!   {"id":7,"method":"tool_call","params":{"name":"…","arguments":{…}}}
 //!   {"id":9,"method":"command","params":{"name":"…","args":"…"}}
-//!   {"id":2,"method":"hook.startup","params":{"cwd":"…","argv":[…]}}
+//!   {"id":2,"method":"hook.startup","params":{"cwd":"…","argv":[…],"flags":{…}}}
 //!   {"id":4,"method":"hook.tool_call","params":{"name":"…","arguments":{…}}}
 //!   {"id":5,"method":"hook.input","params":{"text":"…"}}
 //! e → extension notifications (no response):
-//!   {"method":"event","params":{"name":"turn_end","aborted":false}}
+//!   {"method":"flags","params":{"flags":{…}}}              (at start, to extensions declaring typed flags)
+//!   {"method":"event","params":{"name":"turn_end","extra":{"aborted":false}}}
 //!   {"method":"shutdown"}
 //! extension → e:
 //!   {"id":1,"result":{…}} | {"id":1,"error":"message"}
@@ -20,7 +21,7 @@
 //!   {"name":"…","version":"…",
 //!    "tools":[{"name","description","parameters":{JSON Schema}}…],
 //!    "commands":[{"name","description"}…],
-//!    "flags":[{"name","description"}…],   (shown in --help /help)
+//!    "flags":[{"name","description","type"?,"default"?}…],   (shown in --help /help; typed ones are parsed)
 //!    "hooks":["startup","tool_call","input"…]}
 //!
 //! `initialize` params carry the extension's own config from
