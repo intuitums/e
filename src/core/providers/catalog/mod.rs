@@ -536,6 +536,11 @@ pub fn provider_grouped(mut models: Vec<Model>) -> Vec<Model> {
 }
 
 pub fn set_scope(ids: &[String]) -> std::io::Result<()> {
+    // Empty is reset, not a scope of nothing — `Some([])` would leave the
+    // picker showing no marks and ctrl+p cycling a dead pool.
+    if ids.is_empty() {
+        return clear_scope();
+    }
     crate::core::config::settings::set_strings("scoped_models", ids)
 }
 

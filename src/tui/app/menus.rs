@@ -83,30 +83,45 @@ impl App {
     }
 
     /// The scoped-models multi-select: every available model, Space toggling
-    /// membership. The reference semantics: no scope stored = everything in
-    /// scope; the first toggle narrows the scope to just that model.
+    /// membership, Ctrl+S saving the staged scope. The reference semantics:
+    /// no scope stored = everything in scope; the first toggle narrows the
+    /// scope to just that model. Edits stay staged until Ctrl+S — closing
+    /// without it (Enter or Esc) leaves the saved scope untouched.
     pub(super) fn open_scoped_menu(&mut self) {
         let available = model::available();
         if available.is_empty() {
             self.notice("no models available — use /login to sign in to a provider".into());
             return;
         }
-        let scope = model::scope();
+        // Stage a copy of the saved scope; nothing persists until Ctrl+S.
+        // A rebuild while the picker is open (Space promoting a row) keeps
+        // the buffer — only a fresh open seeds from what's saved.
+        if self.menu.as_ref().map(|m| m.kind) != Some(MenuKind::Scoped) {
+            self.staged_scope = model::scope();
+        }
+        let staged = self.staged_scope.clone().unwrap_or_default();
         let mut available = model::provider_grouped(available);
-        // The scoped entries lead the list — what you curated, not a hunt.
-        if let Some(ids) = &scope {
-            available.sort_by_key(|m| !ids.contains(&model::slug(m)));
+        // The staged entries lead the list — what you curated, not a hunt —
+        // most recently staged first, so what you just picked is at the very
+        // top. Unstaged entries keep the provider grouping.
+        if !staged.is_empty() {
+            let rank = |m: &_| {
+                staged
+                    .iter()
+                    .rposition(|id| *id == model::slug(m))
+                    .map(|pos| staged.len() - pos)
+                    .unwrap_or(usize::MAX)
+            };
+            available.sort_by_key(rank);
         }
         let items: Vec<MenuItem> = available
             .iter()
             .map(|m| {
                 let slug = model::slug(m);
                 let mut item = MenuItem::new(&m.id, &m.provider, &slug);
-                let in_scope = match &scope {
-                    Some(ids) => ids.contains(&slug),
-                    None => true,
-                };
-                if in_scope {
+                // Marks reflect the staging buffer, not what's saved — the
+                // picker shows the draft until Ctrl+S commits it.
+                if staged.contains(&slug) {
                     item.meta = "in scope".into();
                 }
                 item
@@ -120,8 +135,11 @@ impl App {
         ));
     }
 
-    /// Space on the scoped picker: reference toggle semantics — no scope yet
-    /// means the first toggle starts a scope of exactly that model.
+    /// Space on the scoped picker: toggle membership in the staging buffer —
+    /// reference semantics, no scope yet means the first toggle starts a
+    /// scope of exactly that model. A model that enters the buffer moves to
+    /// the top of the list, so what you curated leads and you never hunt for
+    /// what you just picked. Nothing is saved until Ctrl+S.
     pub(super) fn toggle_scoped(&mut self) {
         let Some(slug) = self
             .menu
@@ -130,39 +148,45 @@ impl App {
         else {
             return;
         };
-        match model::scope() {
-            None => {
-                if let Err(error) = model::set_scope(std::slice::from_ref(&slug)) {
-                    self.notice(format!("could not save model scope: {error}"));
-                    return;
-                }
-                if let Some(menu) = &mut self.menu {
-                    menu.for_each_item(|item| {
-                        item.meta = if item.value == slug {
-                            "in scope".into()
-                        } else {
-                            String::new()
-                        };
-                    });
-                }
-            }
-            Some(mut ids) => {
-                let meta = if let Some(pos) = ids.iter().position(|id| *id == slug) {
-                    ids.remove(pos);
-                    ""
-                } else {
-                    ids.push(slug.clone());
-                    "in scope"
-                };
-                if let Err(error) = model::set_scope(&ids) {
-                    self.notice(format!("could not save model scope: {error}"));
-                    return;
-                }
-                if let Some(item) = self.menu.as_mut().and_then(|menu| menu.current_mut()) {
-                    item.meta = meta.into();
-                }
+        let mut ids = self.staged_scope.take().unwrap_or_default();
+        let entering = !ids.contains(&slug);
+        if entering {
+            ids.push(slug.clone());
+        } else {
+            ids.retain(|id| id != &slug);
+        }
+        self.staged_scope = Some(ids);
+        // Rebuild the picker so the promoted row lands at the top, and keep
+        // the selection on the model just toggled.
+        self.open_scoped_menu();
+        if entering {
+            if let Some(menu) = self.menu.as_mut() {
+                menu.select_value(&slug);
             }
         }
+    }
+
+    /// Ctrl+S on the scoped picker: commit the staging buffer as the saved
+    /// scope. Empty commits as no scope at all — back to everything cycling.
+    /// A failed write keeps the draft and the picker, so a retry commits the
+    /// intended selection, never a cleared scope.
+    pub(super) fn save_scope(&mut self) {
+        let ids = self.staged_scope.clone().unwrap_or_default();
+        if let Err(error) = model::set_scope(&ids) {
+            self.notice(format!("could not save model scope: {error}"));
+            return;
+        }
+        self.staged_scope = None;
+        self.menu = None;
+        self.notice(if ids.is_empty() {
+            "scope cleared — ctrl+p cycles every model again".into()
+        } else {
+            format!(
+                "scope saved — ctrl+p cycles {} model{}",
+                ids.len(),
+                if ids.len() == 1 { "" } else { "s" }
+            )
+        });
     }
 
     pub(super) fn open_model_menu(&mut self) {
@@ -376,7 +400,10 @@ impl App {
             MenuKind::Sessions => {
                 self.resume_path(std::path::PathBuf::from(item.value));
             }
-            MenuKind::Scoped => {}
+            MenuKind::Scoped => {
+                // Closing without Ctrl+S discards the staged edits.
+                self.staged_scope = None;
+            }
             MenuKind::Skills => {
                 // Replace the $token, then send the skill body as context.
                 let text = self.editor.text();
