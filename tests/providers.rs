@@ -499,6 +499,59 @@ async fn streaming_rate_limit_codes_respect_quota_messages() {
     }
 }
 
+/// A 200 stream can still fail: OpenAI-style gateways send a bare
+/// `{"error":…}` frame before `[DONE]`, Gemini a `google.rpc.Status` frame
+/// and then nothing. Both must surface the provider's message and classify
+/// by its numeric code, not end as a clean turn or a stall.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn mid_stream_error_frames_fail_completions_and_google_streams() {
+    let _lock = env_lock();
+    let completions = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        "data: {\"error\":{\"message\":\"upstream provider overloaded\",\"code\":503},",
+        "\"choices\":[{\"delta\":{},\"finish_reason\":\"error\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let google = concat!(
+        "data: {\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\",",
+        "\"message\":\"Resource has been exhausted\"}}\n\n",
+    );
+    let (completions_port, _completions_server) = serve_sse(&[completions]);
+    let (google_port, _google_server) = serve_sse(&[google]);
+    let home = Home::new("mid-stream-error-frame");
+    home.auth(r#"{"openai":{"key":"k"},"google":{"key":"k"}}"#);
+
+    for (provider, port, api, message, cause) in [
+        (
+            "openai",
+            completions_port,
+            Api::Completions,
+            "upstream provider overloaded",
+            FailureCause::ProviderUnavailable,
+        ),
+        (
+            "google",
+            google_port,
+            Api::Google,
+            "Resource has been exhausted",
+            FailureCause::RateLimited,
+        ),
+    ] {
+        let error = collect_error(Request {
+            model: test_model(provider, port, api),
+            system: "sys".into(),
+            messages: vec![ChatMessage::user("hi")],
+            effort: None,
+            session_id: String::new(),
+            tools: Vec::new(),
+        })
+        .await;
+        assert_eq!(error.message, message, "{provider}");
+        assert_eq!(error.cause, cause, "{provider}");
+    }
+}
+
 /// Chat Completions may interleave fragments for parallel calls. Progress
 /// must retain a stable per-call key; one anonymous byte counter cannot prove
 /// that fragments were attributed or assembled correctly.

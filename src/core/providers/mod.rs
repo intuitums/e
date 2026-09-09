@@ -630,6 +630,27 @@ impl ProviderError {
             retry_after: None,
         }
     }
+    /// A bare `{"error":{…}}` frame inside a 200 stream — how OpenAI-style
+    /// gateways and Gemini report a failure once the connection is open.
+    /// The message's wording wins where it is specific (a quota wall);
+    /// otherwise the numeric `code` classifies like an HTTP status would.
+    pub fn from_error_frame(error: &serde_json::Value) -> Self {
+        let message = error["message"]
+            .as_str()
+            .unwrap_or("unknown provider error")
+            .to_string();
+        let text_cause = classify_text(&message);
+        let cause = if text_cause == Some(FailureCause::QuotaExhausted) {
+            FailureCause::QuotaExhausted
+        } else {
+            match error["code"].as_u64() {
+                Some(429) => FailureCause::RateLimited,
+                Some(408) | Some(500..=599) => FailureCause::ProviderUnavailable,
+                _ => text_cause.unwrap_or(FailureCause::Rejected),
+            }
+        };
+        ProviderError::frame(message, cause)
+    }
     /// Classify an HTTP status the provider actually returned; `body` is the
     /// response text the caller already read. The body's own wording wins
     /// where it is more specific than the status: a quota wall inside a 429
