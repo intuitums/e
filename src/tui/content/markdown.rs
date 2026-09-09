@@ -997,14 +997,29 @@ fn table_vertical_lines(out: &mut Vec<String>, content: &str, inner_width: usize
         while i < chars.len() {
             let c = chars[i];
             if c == '\x1b' {
-                // Copy the whole escape sequence at zero columns.
+                // Copy the whole escape sequence at zero columns: CSI to its
+                // final letter, OSC (hyperlinks) to BEL or ST — a split
+                // mid-sequence would count the URI as visible columns and
+                // leave the terminal reading the box as OSC data.
                 row.push(c);
                 i += 1;
+                let osc = chars.get(i) == Some(&']');
                 while i < chars.len() {
                     let n = chars[i];
                     row.push(n);
                     i += 1;
-                    if n.is_ascii_alphabetic() || n == '\\' || n == '\x07' {
+                    if osc {
+                        if n == '\x07' {
+                            break;
+                        }
+                        if n == '\x1b' {
+                            if let Some(&t) = chars.get(i) {
+                                row.push(t);
+                                i += 1;
+                            }
+                            break;
+                        }
+                    } else if n.is_ascii_alphabetic() {
                         break;
                     }
                 }
