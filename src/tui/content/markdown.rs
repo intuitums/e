@@ -28,8 +28,23 @@ use crate::tui::render::*;
 use crate::tui::theme::Theme;
 
 /// A link open carrying a document-scoped id, so a link split across
-/// wrapped rows stays one link in id-aware terminals.
+/// wrapped rows stays one link in id-aware terminals. Whitespace — legal in
+/// a `<…>` destination — is percent-encoded: the word-wrapper splits on
+/// spaces and must never find one inside the sequence.
 fn osc8_id(id: u64, url: &str) -> String {
+    let url: String = url
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() {
+                c.encode_utf8(&mut [0; 4])
+                    .bytes()
+                    .map(|b| format!("%{b:02X}"))
+                    .collect()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
     format!("\x1b]8;id=e-{id};{url}\x1b\\")
 }
 const OSC8_CLOSE: &str = "\x1b]8;;\x1b\\";
