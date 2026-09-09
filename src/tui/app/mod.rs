@@ -207,6 +207,10 @@ struct App {
     pending_key: Option<String>,
     /// The open picker, if any — commands, files, models.
     menu: Option<Menu>,
+    /// The scoped-models picker's staged scope: what Space has toggled but
+    /// Ctrl+S has not yet committed. None when not staging (the picker shows
+    /// the saved scope); Some when the picker is open with edits pending.
+    staged_scope: Option<Vec<String>>,
     /// The sign-in panel, when /login is active.
     auth: Option<AuthStage>,
     /// The settings panel, when /settings is active.
@@ -2156,6 +2160,7 @@ async fn run_scoped(
         context_tokens: 0,
         pending_key: None,
         menu: None,
+        staged_scope: None,
         auth: None,
         settings: None,
         show_thinking: crate::core::config::settings::show_thinking(),
@@ -2499,18 +2504,20 @@ async fn run_scoped(
                             .map(|m| m.kind == MenuKind::Scoped)
                             .unwrap_or(false)
                             && ((k.code == KeyCode::Char(' ') && !ctrl)
-                                || (ctrl && k.code == KeyCode::Char('x')))
+                                || (ctrl && matches!(k.code, KeyCode::Char('x') | KeyCode::Char('s'))))
                         {
-                            if ctrl {
-                                match model::clear_scope() {
-                                    Ok(()) => {
-                                        app.notice("scope cleared — ctrl+p cycles every model again".into());
-                                        app.open_scoped_menu();
-                                    }
-                                    Err(error) => app.notice(format!("could not save model scope: {error}")),
+                            match (k.code, ctrl) {
+                                (KeyCode::Char('x'), true) => {
+                                    // Reset: stage nothing — the picker
+                                    // mirrors "no scope" and Ctrl+S saves it
+                                    // (or Ctrl+X again is enough to walk
+                                    // back). Nothing hits settings.json
+                                    // until Ctrl+S.
+                                    app.staged_scope = Some(Vec::new());
+                                    app.open_scoped_menu();
                                 }
-                            } else {
-                                app.toggle_scoped();
+                                (KeyCode::Char('s'), true) => app.save_scope(),
+                                _ => app.toggle_scoped(),
                             }
                         } else if app.menu.is_some()
                             && (matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc)
@@ -2554,6 +2561,9 @@ async fn run_scoped(
                                 KeyCode::Enter => { app.select_menu(); }
                                 KeyCode::Esc => {
                                     app.menu = None;
+                                    // Closing the scoped picker without
+                                    // Ctrl+S discards its staged edits.
+                                    app.staged_scope = None;
                                     // Declining the -r picker releases a
                                     // held launch prompt into the current
                                     // session.
@@ -3322,6 +3332,7 @@ mod tests {
             context_tokens: 0,
             pending_key: None,
             menu: None,
+            staged_scope: None,
             auth: None,
             settings: None,
             show_thinking: true,

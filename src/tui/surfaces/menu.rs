@@ -84,7 +84,7 @@ pub struct Menu {
 
 pub const HINT_USE: &str = "↑↓ Navigate     Enter Use     Esc Close";
 pub const HINT_SCOPED: &str =
-    "↑↓ Navigate     Space Toggle     Ctrl+X Reset     Enter Done     Esc Close";
+    "↑↓ Navigate     Space Toggle     Ctrl+S Save     Ctrl+X Reset     Esc Discard";
 pub const HINT_SKILLS: &str = "↑↓ Navigate     Tab Source     Enter Use     Esc Close";
 pub const HINT_MODELS: &str = "↑↓ Navigate     Tab Provider     Enter Use     Esc Close";
 pub const HINT_SESSIONS: &str = "↑↓ Navigate     Tab Scope     Enter Resume     Esc Close";
