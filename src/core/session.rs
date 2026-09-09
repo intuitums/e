@@ -324,7 +324,7 @@ impl SessionLog {
                     .map(|n| n.message)
             })
             .collect();
-        repair_tail(&mut messages);
+        repair_history(&mut messages);
         Ok(messages)
     }
 
@@ -475,35 +475,48 @@ fn validate_format(version: u32) -> std::io::Result<()> {
     }
 }
 
-/// Make a loaded history replayable when a crash cut it mid-record: a
-/// trailing reasoning block with no assistant turn after it fails signature
-/// replay, and an assistant tool call whose result never got appended is a
-/// dangling tool_use every dialect rejects. The former is dropped; the
-/// latter gets an honest synthetic result so the content survives.
-fn repair_tail(messages: &mut Vec<ChatMessage>) {
-    while matches!(messages.last(), Some(m) if m.role() == "reasoning") {
-        messages.pop();
+/// Make a history replayable when a crash cut it mid-record. A reasoning
+/// block with no assistant turn after it fails signature replay and is
+/// dropped; an assistant tool call whose result never got appended is a
+/// dangling tool_use every dialect rejects and gets an honest synthetic
+/// result right after its batch, so the content survives. The whole
+/// history is scanned, not just the tail: the repair lives in memory only,
+/// and the next prompt is appended behind the unrepaired records, so from
+/// the second resume on (and on a `/tree` rewind to that prompt) the hole
+/// sits in the middle of the file.
+pub fn repair_history(messages: &mut Vec<ChatMessage>) {
+    // A reasoning block belongs to the next non-reasoning message, which
+    // must be its assistant turn.
+    let mut follower = None;
+    let mut kept = Vec::with_capacity(messages.len());
+    for message in std::mem::take(messages).into_iter().rev() {
+        let role = message.role();
+        if role != "reasoning" {
+            follower = Some(role);
+            kept.push(message);
+        } else if follower == Some("assistant") {
+            kept.push(message);
+        }
     }
-    let Some(assistant_at) = messages.iter().rposition(|m| m.role() == "assistant") else {
-        return;
-    };
-    let answered: Vec<String> = messages[assistant_at..]
-        .iter()
-        .filter(|m| m.role() == "tool")
-        .filter_map(|m| m.tool_call_id().cloned())
-        .collect();
-    let missing: Vec<String> = messages[assistant_at]
-        .tool_calls()
-        .iter()
-        .map(|c| c.id.clone())
-        .filter(|id| !answered.contains(id))
-        .collect();
-    for id in missing {
-        messages.push(ChatMessage::tool_result(
+    kept.reverse();
+    // Answer every call still open when its batch of results ends.
+    let mut unanswered: Vec<String> = Vec::new();
+    let synthetic = |id: String| {
+        ChatMessage::tool_result(
             id,
             "not executed — the session ended before this call completed",
-        ));
+        )
+    };
+    for message in kept {
+        if let Some(id) = message.tool_call_id() {
+            unanswered.retain(|open| open != id);
+        } else {
+            messages.extend(unanswered.drain(..).map(synthetic));
+            unanswered = message.tool_calls().iter().map(|c| c.id.clone()).collect();
+        }
+        messages.push(message);
     }
+    messages.extend(unanswered.into_iter().map(synthetic));
 }
 
 /// The latest persisted display name in a session file, if any — the name a
