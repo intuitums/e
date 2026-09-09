@@ -42,6 +42,11 @@ pub enum CatalogStrategy {
     Openai,
     Anthropic,
     Google,
+    /// The ChatGPT backend (`chatgpt.com/backend-api`): its `/models` is the
+    /// ChatGPT model-picker payload (`models[].slug`), not an OpenAI `data`
+    /// list. The codex-usable ids are the work-mode entries minus their
+    /// `-wm` marker.
+    Chatgpt,
     None,
 }
 
@@ -51,6 +56,7 @@ impl CatalogStrategy {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
             Self::Google => "google",
+            Self::Chatgpt => "chatgpt",
             Self::None => "none",
         }
     }

@@ -7,6 +7,35 @@ the pipeline publishes.
 
 ## Unreleased
 
+- GPT-6 Astra, OpenAI's new flagship, is seeded on both OpenAI providers: the
+  API (`openai`, 1.05M window, `xhigh`/`max` efforts included) and ChatGPT
+  Codex (`openai-codex`, 272k codex lane). The GPT-5.6 trio is seeded on the
+  API side too. Codex's live model discovery now works at all: its /models
+  is the ChatGPT model-picker payload, not an OpenAI `data` list, so it was
+  failing silently — the new `chatgpt` catalog strategy reads the picker
+  (work-mode entries, `-wm` suffix stripped, `max_tokens` as the window),
+  and a new Codex model appears in the picker with no e release.
+
+## 0.0.1 — 2026-09-08
+
+
+- ctrl+v attaches desktop-clipboard images to the composer draft: file copies
+  become attachments by path, bitmaps are read directly (macOS via osascript,
+  Linux via wl-paste/xclip). Helpers run with a timeout and a byte cap so a
+  hung or flooding clipboard cannot stall the session, and a failed read
+  surfaces as a notice. Attachments ride the same steering queue as text
+  (whole messages, images included), never attach over an open surface, and
+  commands submitted with a draft attached dispatch without them. Submitted
+  labels `[Image 1] [Image 2]` match the transcript.
+- The composer stays visible when a scrolled frame shrinks, and large streamed
+  appends paint every new row even when earlier Markdown changes. Resize keeps
+  native scrollback and redraws only the visible tail. Later tool batches retain
+  expanded thinking instead of deleting it.
+- Painting takes ownership of pending frames and compares only visible content,
+  reducing repeated work in long sessions. PTY regressions cover streaming and
+  tool completion across resize; release benchmarks now budget long-session
+  frame rendering.
+
 - Cancellation skips queued tool waves, and late tool events cannot change a
   newer turn. Rejected-image text stays a literal prompt, even when it starts
   with a command.
@@ -130,7 +159,6 @@ the pipeline publishes.
   author wrote; a definition is an ordinary paragraph). The parity suite
   pins both retirements so they cannot creep back unnoticed.
 
-## 0.0.1 — 2026-08-29
 
 - Provider failures are classified by the error body's own wording, not
   just the HTTP status: a hard quota or billing wall (OpenCode Zen Go's

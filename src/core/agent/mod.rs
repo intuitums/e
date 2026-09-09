@@ -364,7 +364,11 @@ where
         {
             continue;
         }
-        let discarded: Vec<String> = queue.items.drain(..).map(|(_, text)| text).collect();
+        let discarded: Vec<String> = queue
+            .items
+            .drain(..)
+            .map(|(_, message)| message.content)
+            .collect();
         compact_requested.store(false, Ordering::SeqCst);
         queue.running = false;
         if let Ok(mut permits) = permits {
@@ -529,7 +533,9 @@ impl Default for AgentOptions {
 struct PendingQueue {
     running: bool,
     next_id: u64,
-    items: Vec<(u64, String)>,
+    /// Whole messages, not just text: a queued image prompt keeps its
+    /// attachments until the turn drains it.
+    items: Vec<(u64, ChatMessage)>,
 }
 
 pub struct Agent {
@@ -845,15 +851,17 @@ impl Agent {
             .len()
     }
 
-    /// Snapshot the queued prompts, oldest first, with the keys the review
-    /// commit sends back. Purely a read: the turn keeps steering while the
-    /// review is open.
+    /// Snapshot the queued prompts' text, oldest first, with the keys the
+    /// review commit sends back. Purely a read: the turn keeps steering
+    /// while the review is open.
     pub fn queue_snapshot(&self) -> Vec<(u64, String)> {
         self.pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .items
-            .clone()
+            .iter()
+            .map(|(id, message)| (*id, message.content.clone()))
+            .collect()
     }
 
     /// Apply the queued-prompt review's edits. Each `(key, text)` replaces
@@ -865,13 +873,13 @@ impl Agent {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         for (key, text) in edits {
             if let Some(entry) = pending.items.iter_mut().find(|(id, _)| *id == key) {
-                entry.1 = text;
+                entry.1.content = text;
             } else {
                 // Drained while the review held it: the edit is still the
                 // user's intent — submit it as a fresh steering message.
                 pending.next_id += 1;
                 let key = pending.next_id;
-                pending.items.push((key, text));
+                pending.items.push((key, ChatMessage::user(text)));
             }
         }
         for key in removed {
@@ -921,7 +929,7 @@ impl Agent {
         if pending.running {
             pending.next_id += 1;
             let key = pending.next_id;
-            pending.items.push((key, message.content));
+            pending.items.push((key, message));
             drop(pending);
             return true;
         }
@@ -1423,6 +1431,37 @@ mod option_tests {
     }
 
     #[tokio::test]
+    async fn a_steered_prompt_queues_whole_with_its_images() {
+        let (mut agent, _rx) = Agent::with_options(
+            crate::core::providers::catalog::builtin_catalog().remove(0),
+            AgentOptions {
+                save_session: false,
+                ..AgentOptions::default()
+            },
+        );
+        agent.pending.lock().unwrap().running = true;
+        let held = agent.submit_message(
+            ChatMessage::user_with_images(
+                "what is in this screenshot",
+                vec![crate::core::providers::ImageInput {
+                    media_type: "image/png".into(),
+                    data: std::sync::Arc::from("AA=="),
+                }],
+            ),
+            String::new(),
+        );
+        assert!(held, "a running turn steers instead of starting");
+        let pending = agent.pending.lock().unwrap();
+        let (id, message) = &pending.items[0];
+        assert_eq!(*id, 1);
+        assert_eq!(message.content, "what is in this screenshot");
+        let crate::core::providers::MessageKind::User { images, .. } = &message.kind else {
+            panic!("a steered user prompt stays a user message");
+        };
+        assert_eq!(images.len(), 1, "attachments survive the queue");
+    }
+
+    #[tokio::test]
     async fn a_prompt_in_the_completion_gap_is_consumed_before_turn_end() {
         let (events, mut rx) = mpsc::channel(8);
         let queue = Arc::new(Mutex::new(PendingQueue {
@@ -1441,9 +1480,9 @@ mod option_tests {
                 if attempt == 0 {
                     // The worker has decided to stop, but completion has not
                     // been published. A concurrent submit still belongs here.
-                    pending.items.push((1, "late prompt".into()));
+                    pending.items.push((1, ChatMessage::user("late prompt")));
                 } else {
-                    assert_eq!(pending.items.remove(0).1, "late prompt");
+                    assert_eq!(pending.items.remove(0).1.content, "late prompt");
                 }
                 turn::Outcome::Complete
             })

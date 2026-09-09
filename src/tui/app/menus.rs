@@ -382,6 +382,9 @@ impl App {
         self.menu = None;
         match kind {
             MenuKind::Commands => {
+                // The picker consumed the draft line; any attachments were
+                // tied to it and go with it.
+                self.discard_composer_images();
                 self.editor.set_text("");
                 self.dispatch_command(item.value);
             }
@@ -408,6 +411,9 @@ impl App {
                     Some(at) => text[..at].trim_end().to_string(),
                     None => String::new(),
                 };
+                // The skill body replaces the draft; its attachments were
+                // tied to what is being replaced.
+                self.discard_composer_images();
                 self.editor.set_text("");
                 if let Some(skill) =
                     crate::core::resources::skills::get(&item.value, &self.agent.cwd())

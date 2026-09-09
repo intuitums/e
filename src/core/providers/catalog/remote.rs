@@ -276,25 +276,42 @@ async fn fetch_models(
         }
         (true, _) => {
             let request = request.bearer_auth(&authorization.bearer);
-            match authorization.account_id {
+            let request = match authorization.account_id {
                 Some(account) => request.header("chatgpt-account-id", account),
                 None => request,
+            };
+            // The ChatGPT backend answers the picker endpoints only for
+            // requests that name a client; the codex mount carries the same
+            // pair on every inference call.
+            if catalog_strategy == crate::core::providers::registry::CatalogStrategy::Chatgpt {
+                request
+                    .header("originator", "e")
+                    .header("OpenAI-Beta", "responses=experimental")
+            } else {
+                request
             }
         }
     };
     let body: serde_json::Value = request.send().await.ok()?.json().await.ok()?;
     let google = catalog_strategy == crate::core::providers::registry::CatalogStrategy::Google;
-    let entries = if google {
+    let chatgpt = catalog_strategy == crate::core::providers::registry::CatalogStrategy::Chatgpt;
+    let entries = if google || chatgpt {
         body["models"].as_array()
     } else {
         body["data"].as_array()
     }?;
-    // The wire id: Gemini reports `models/gemini-…` and wants the bare id back.
+    // The wire id: Gemini reports `models/gemini-…` and wants the bare id
+    // back; ChatGPT marks codex-usable entries with a `-wm` slug suffix
+    // that is the picker's own marker, not part of the model name.
     let id_of = |entry: &serde_json::Value| -> Option<String> {
         if google {
             entry["name"]
                 .as_str()
                 .map(|n| n.strip_prefix("models/").unwrap_or(n).to_string())
+        } else if chatgpt {
+            entry["slug"]
+                .as_str()
+                .map(|s| s.strip_suffix("-wm").unwrap_or(s).to_string())
         } else {
             entry["id"].as_str().map(String::from)
         }
@@ -307,10 +324,15 @@ async fn fetch_models(
         };
         // Providers that report a type or capability list embeddings, images,
         // video, and speech beside chat models. Keep the picker for language
-        // models: Gemini says so via supportedGenerationMethods, OpenAI-style
-        // gateways via a `type` field, falling back to the id heuristic when
-        // the provider doesn't say.
-        if google {
+        // models: Gemini says so via supportedGenerationMethods, ChatGPT
+        // via the work-mode flag (the codex lane), OpenAI-style gateways via
+        // a `type` field, falling back to the id heuristic when the provider
+        // doesn't say.
+        if chatgpt {
+            if !entry["is_work_mode_model"].as_bool().unwrap_or(false) {
+                continue;
+            }
+        } else if google {
             let serves_chat = entry["supportedGenerationMethods"]
                 .as_array()
                 .is_some_and(|ms| ms.iter().any(|m| m.as_str() == Some("generateContent")));
@@ -331,12 +353,19 @@ async fn fetch_models(
             }
         }
         // Some gateways report the window; keep it when they do. Gemini's
-        // inputTokenLimit is its context window as far as the picker cares.
-        let window = entry["context_length"]
-            .as_u64()
-            .or(entry["context_window"].as_u64())
-            .or(entry["max_context_length"].as_u64())
-            .or(entry["inputTokenLimit"].as_u64());
+        // inputTokenLimit is its context window as far as the picker cares,
+        // and ChatGPT's max_tokens is the codex lane's own window — kept
+        // strategy-scoped because an OpenAI-shaped gateway may report
+        // max_tokens as an output limit, not a context window.
+        let window = if chatgpt {
+            entry["max_tokens"].as_u64()
+        } else {
+            entry["context_length"]
+                .as_u64()
+                .or(entry["context_window"].as_u64())
+                .or(entry["max_context_length"].as_u64())
+                .or(entry["inputTokenLimit"].as_u64())
+        };
         out.push((id, window));
     }
     if out.is_empty() {
