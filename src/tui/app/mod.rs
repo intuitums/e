@@ -2370,14 +2370,22 @@ async fn run_scoped(
     } = options;
     // A panic mid-frame must not strand the shell in raw mode with a hidden
     // cursor or kitty keyboard flags — restore the terminal first, then
-    // report as usual. (\x1b[<u pops the keyboard enhancement stack.)
+    // report as usual. (\x1b[<u pops the keyboard enhancement stack.) Only
+    // a panic on this thread — the frame loop, driven by the runtime's
+    // block_on — is fatal to the session; the paint thread, tool tasks and
+    // the turn worker all run elsewhere and catch their own panics to keep
+    // the session alive, so the hook must leave the terminal alone for them
+    // (the hook fires before any catch_unwind gets its say).
     {
         let default_hook = std::panic::take_hook();
+        let frame_thread = std::thread::current().id();
         std::panic::set_hook(Box::new(move |info| {
-            let _ = terminal::disable_raw_mode();
-            print!("\x1b[<u\x1b[?2004l\x1b[?25h\r\n");
-            use std::io::Write as _;
-            let _ = std::io::stdout().flush();
+            if std::thread::current().id() == frame_thread {
+                let _ = terminal::disable_raw_mode();
+                print!("\x1b[<u\x1b[?2004l\x1b[?25h\r\n");
+                use std::io::Write as _;
+                let _ = std::io::stdout().flush();
+            }
             default_hook(info);
         }));
     }
