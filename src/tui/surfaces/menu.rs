@@ -251,7 +251,9 @@ impl Menu {
         self.filtered.is_empty()
     }
 
-    /// Move the selection to the item with this value, if present.
+    /// Move the selection to the item with this value, if present, and
+    /// scroll the window so the row is on screen — a preselected current
+    /// model past the visible band must open highlighted, not hidden.
     pub fn select_value(&mut self, value: &str) {
         if let Some(pos) = self
             .filtered
@@ -259,6 +261,7 @@ impl Menu {
             .position(|&i| self.items[i].value == value)
         {
             self.selected = pos;
+            self.clamp_window();
         }
     }
 
@@ -291,8 +294,13 @@ impl Menu {
         if n == 0 {
             return;
         }
-        let visible = self.max_visible();
         self.selected = (self.selected as isize + delta).rem_euclid(n as isize) as usize;
+        self.clamp_window();
+    }
+
+    /// Slide the visible window the minimum needed to contain `selected`.
+    fn clamp_window(&mut self) {
+        let visible = self.max_visible();
         if self.selected < self.window_start {
             self.window_start = self.selected;
         }
@@ -808,6 +816,30 @@ mod tests {
         assert!(fuzzy_score("LOG", "/login").is_some());
         // Empty query keeps everything, original order.
         assert_eq!(fuzzy_score("", "anything"), Some(usize::MAX / 2));
+    }
+
+    /// Preselecting a value past the visible band scrolls the window so the
+    /// picker opens with that row on screen and highlighted.
+    #[test]
+    fn select_value_scrolls_the_window_to_the_row() {
+        let items = (0..30)
+            .map(|n| MenuItem {
+                label: format!("model-{n:02}"),
+                description: String::new(),
+                meta: String::new(),
+                value: format!("p/model-{n:02}"),
+                tab: None,
+            })
+            .collect();
+        let mut menu = Menu::new(MenuKind::Models, "Models", HINT_MODELS, items);
+        menu.select_value("p/model-25");
+        assert_eq!(menu.selected, 25);
+        let theme = crate::tui::theme::resolve("dark", false);
+        let rows = menu.render(&theme, 80);
+        assert!(
+            rows.iter().any(|row| row.contains("model-25")),
+            "the preselected row is off screen: {rows:?}"
+        );
     }
 
     /// Shift+tab walks the tabs backward, wrapping at the first tab — the
