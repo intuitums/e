@@ -248,6 +248,26 @@ fn edit_matches_across_crlf_line_breaks_and_keeps_the_endings() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// The CRLF fallback re-ends every line on write-back, so it is reserved
+/// for uniformly CRLF files: a mixed file is left byte-for-byte alone
+/// rather than having its untouched lines rewritten.
+#[test]
+fn edit_leaves_a_mixed_ending_file_untouched_when_only_normalized_text_matches() {
+    let ws = workspace("mixed-endings");
+    let file = ws.join("mixed.txt");
+    let original = "alpha\r\nbeta\r\ngamma\ndelta\r\n";
+    std::fs::write(&file, original).unwrap();
+
+    let edit = tools::run(
+        "edit",
+        r#"{"path":"mixed.txt","old_string":"alpha\nbeta","new_string":"one\ntwo"}"#,
+        &ws,
+    );
+    assert!(edit.is_error(), "{}", edit.content);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 #[cfg(unix)]
 #[test]
 fn search_tools_survive_a_symlink_cycle() {

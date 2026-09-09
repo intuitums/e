@@ -59,7 +59,7 @@ struct Link {
     /// Requests awaiting a response, keyed by wire id.
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
     progress: Mutex<HashMap<u64, mpsc::Sender<ToolProgress>>>,
-    child: Mutex<Option<tokio::process::Child>>,
+    child: tokio::sync::Mutex<Option<tokio::process::Child>>,
     /// Set once the handshake succeeds. Until then the pipes stay quiet
     /// about an exit — `start` reports a pre-initialize death itself.
     exit_notice: OnceLock<String>,
@@ -101,11 +101,15 @@ impl Link {
     /// a zombie — for the session, or (on the relaunch path) across the
     /// exec into the next e, where nothing could reap it any more. A child
     /// that outlives `REAP_TIMEOUT` is dropped to tokio's orphan reaper.
+    /// The slot stays locked across the wait so a second reaper (the
+    /// reader task on EOF, `shutdown` a beat later) blocks until the first
+    /// has finished instead of returning while the wait is still pending.
     async fn reap(&self) {
-        let child = self.child.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(mut child) = child {
+        let mut slot = self.child.lock().await;
+        if let Some(child) = slot.as_mut() {
             let _ = child.start_kill();
             let _ = tokio::time::timeout(REAP_TIMEOUT, child.wait()).await;
+            *slot = None;
         }
     }
 }
@@ -919,7 +923,13 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
                     Ok(None) => break,
                     Err(error) => {
                         let _ = notices.try_send(format!("extension {source}: {error}"));
-                        if discard_line(&mut reader).await.is_err() {
+                        // Only the byte cap leaves the stream mid-line; a
+                        // UTF-8 failure has already consumed its line, and
+                        // resyncing there would eat the next one too.
+                        let mid_line = error
+                            .get_ref()
+                            .is_none_or(|inner| !inner.is::<std::string::FromUtf8Error>());
+                        if mid_line && discard_line(&mut reader).await.is_err() {
                             break;
                         }
                     }
@@ -932,7 +942,7 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
         alive: AtomicBool::new(true),
         pending: Mutex::new(HashMap::new()),
         progress: Mutex::new(HashMap::new()),
-        child: Mutex::new(Some(child)),
+        child: tokio::sync::Mutex::new(Some(child)),
         exit_notice: OnceLock::new(),
         notices,
     });

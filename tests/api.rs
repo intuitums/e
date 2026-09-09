@@ -968,6 +968,52 @@ done
     host.shutdown().await;
 }
 
+/// A UTF-8 failure has already consumed its stderr line, so the reader must
+/// not resync past the next one: the line after the bad bytes still arrives.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn an_invalid_utf8_stderr_line_does_not_eat_the_next_one() {
+    const NOISY: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"id":%s,"result":{"name":"noisy","tools":[{"name":"chat","parameters":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tool_call"'*)
+      printf 'bad \377 bytes\nstill here\n' >&2
+      printf '{"id":%s,"result":{"content":"answered"}}\n' "$id" ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+done
+"#;
+    let _lock = env_lock();
+    let _home = tempdir::TempHome::with_extension("noisy.sh", NOISY);
+    let (notices, mut rx) = tokio::sync::mpsc::channel(8);
+    let host = start_host(notices).await;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        host.call_tool("chat", "{}"),
+    )
+    .await
+    .expect("the tool call resolves");
+    assert_eq!(result.content, "answered");
+    let mut seen = Vec::new();
+    while let Ok(Some(msg)) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await
+    {
+        seen.push(msg);
+        if seen.iter().any(|m| m.ends_with("still here")) {
+            break;
+        }
+    }
+    assert!(
+        seen.iter().any(|m| m == "extension noisy.sh: still here"),
+        "{seen:?}"
+    );
+    host.shutdown().await;
+}
+
 /// A guard that dies mid-session fails open by design — but silently was a
 /// bug. The exit is announced once, with a louder line for a hook-bearing
 /// extension, and the host knows it is gone.
