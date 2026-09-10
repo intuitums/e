@@ -550,6 +550,7 @@ impl Editor {
         let rows = self.visual_rows(&chars, inner);
         let cursor = self.cursor.max(rows[0].start);
         let cursor_row = row_of(&rows, cursor);
+        let gutter_cursor = shell && self.cursor < rows[0].start;
         let last = rows.len() - 1;
         // While a selection is live the range itself is the highlight —
         // reverse video across its rows, no separate cursor cell.
@@ -561,7 +562,7 @@ impl Editor {
                 && self.cursor == self.text.len()
                 && self.cursor == row.end
                 && row_width(&chars, row) >= inner;
-            let cursor_here = cursor_row == Some(index);
+            let cursor_here = cursor_row == Some(index) && !gutter_cursor;
             let rendered = if let Some((start, end)) = selection
                 .map(|(a, b)| (a.max(row.start), b.min(row.end)))
                 .filter(|(a, b)| a < b)
@@ -631,12 +632,15 @@ impl Editor {
                 } else {
                     "!"
                 };
-                let rendered = if self.cursor == 0 && selection.is_none() {
-                    rendered.replace("\x1b[7m", "").replace("\x1b[27m", "")
+                let gap = if self.text.get(1) == Some(&' ')
+                    && (self.cursor == 1 && selection.is_none()
+                        || selection.is_some_and(|(start, end)| start <= 1 && end > 1))
+                {
+                    "\x1b[7m \x1b[27m"
                 } else {
-                    rendered.clone()
+                    " "
                 };
-                out.push(format!("{} {rendered}", theme.fg("bashMode", marker)));
+                out.push(format!("{}{gap}{rendered}", theme.fg("bashMode", marker)));
             } else {
                 out.push(format!("{rail}{rendered}"));
             }

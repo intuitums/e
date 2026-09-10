@@ -1199,6 +1199,10 @@ impl App {
         }
         self.cancel_login();
         self.auth = None;
+        self.trust = None;
+        self.queue_review = None;
+        self.pending_initial = None;
+        self.pending_initial_images.clear();
         self.pending_key = None;
         self.editor.mask = false;
         self.editor.set_text("");
@@ -3271,6 +3275,28 @@ impl Drop for TerminalGuard {
 
 #[cfg(test)]
 mod tests {
+    /// Interrupt dismisses transient navigation without trusting or submitting.
+    #[test]
+    fn interrupt_dismisses_trust_and_queue_review_and_drops_held_prompt() {
+        let mut app = session_app();
+        app.trust = Some(crate::tui::trustpanel::TrustStage::new(&app.agent.cwd()));
+        app.queue_review = Some(QueueReview {
+            entries: vec![(1, "queued".into())],
+            dirty: vec![false],
+            selected: 0,
+            visible: true,
+        });
+        app.pending_initial = Some("must not run".into());
+        app.editor.set_text("draft");
+        app.interrupt_or_exit();
+        assert!(app.trust.is_none());
+        assert!(app.queue_review.is_none());
+        assert!(app.pending_initial.is_none());
+        assert!(app.editor.is_empty());
+        assert!(!app.agent.is_streaming());
+        assert!(!app.should_quit);
+    }
+
     use super::*;
 
     #[test]

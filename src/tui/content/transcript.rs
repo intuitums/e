@@ -1092,6 +1092,19 @@ impl Transcript {
 
 #[cfg(test)]
 mod tests {
+    /// Notice wrapping preserves the first character, including multibyte text.
+    #[test]
+    fn notices_keep_the_first_body_character() {
+        let theme = crate::tui::theme::load_bundled(false).unwrap();
+        for body in ["First character stays.", "界 first character stays."] {
+            let rows = super::notice_rows(&theme, "dim", false, "Notice", body, 80);
+            assert_eq!(
+                crate::core::tools::strip_ansi(&rows.join("\n")),
+                format!("● Notice: {body}")
+            );
+        }
+    }
+
     use super::*;
 
     fn theme() -> Theme {

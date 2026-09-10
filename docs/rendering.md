@@ -113,8 +113,8 @@ invalid JSON; a truncated HTTP body produces the same headline. The message
 cannot, by itself, prove whether a provider, proxy, or local network caused it.
 
 Before any output, retryable transport failures use the normal retry budget.
-After output, e retains the partial response and reports the failure rather
-than blindly replaying the request. Sleep-attributed failures have a separate
+After output, including partial tool arguments, e retains the partial response
+and reports the failure rather than blindly replaying the request. Sleep-attributed failures have a separate
 bounded continuation policy. A display-off event alone does not activate it.
 
 `./x ui` checks completed terminal frames for composer anchoring, shell styling,
@@ -152,16 +152,19 @@ whether the provider, proxy, or local network caused it.
 Saved sessions append reports to a private `<session-stem>.errors.jsonl` sidecar.
 Each record links to the preceding message on its branch. Reports never enter
 model context or change the session's message format. `--no-save` writes no
-report file. Headless JSON includes `error_details` even without saving.
+report file. A diagnostic append whose rollback also fails retires the session
+handle, preventing later records from extending a torn JSON line. Headless JSON
+includes `error_details` even without saving.
 
 Reports collect no request bodies or authentication headers. Known bearer
 credentials and transport-error request URLs are redacted; provider-authored error text can
 still contain sensitive information and should be reviewed before sharing.
 Only allowlisted response IDs are captured, with length limits. Diagnostic text
-is bounded and marks truncation. Nothing is uploaded and no reporting command
-or team-submission prompt is added.
+is bounded before compatibility error events are published and marks truncation.
+Nothing is uploaded and no reporting command or team-submission prompt is added.
 
 Short headlines can be overridden in `~/.e/settings.json` with `error_auth`,
 `error_network`, `error_stalled`, `error_rate_limited`, `error_quota`,
 `error_unavailable`, and `error_rejected`. Missing or empty values use the
-built-in headline. These keys are read when a failure occurs.
+built-in headline. These keys are read on a blocking worker when a failure
+occurs, with the same scoped e home as the failed turn.

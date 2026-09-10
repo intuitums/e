@@ -31,7 +31,8 @@ Apply instantly with `/reload` (or after closing `/settings`).
 ## Global cancellation and trust navigation
 
 Ctrl+C works in every panel. The first press cancels active work and sign-in,
-clears the draft, and arms exit. Press it again within 1.5 seconds to quit.
+clears the draft and any held launch prompt, closes trust and queue navigation,
+and arms exit. Press it again within 1.5 seconds to quit.
 Quitting at the trust question does not record a trust decision.
 
 Long trust questions and choices wrap. If they exceed the terminal height,
@@ -49,4 +50,6 @@ Up/Down preserve display columns across wide and combining characters.
 Typing `!` as the first character replaces the first `┃` gutter with a green
 `!`, using the theme's `bashMode` token. Command text keeps its normal color;
 wrapped lines keep neutral rails. Deleting the leading `!` restores the normal
-composer. The draft and submitted command retain the original prefix.
+composer. The draft and submitted command retain the original prefix. When
+that prefix is `! `, its space remains editable in the gutter, with its own
+cursor and selection highlight.

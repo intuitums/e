@@ -623,6 +623,17 @@ pub fn classify_text(text: &str) -> Option<FailureCause> {
     None
 }
 
+/// Bound both compatibility errors and stored diagnostics before cloning them.
+fn bounded_diagnostic(text: &str) -> String {
+    const LIMIT: usize = 8192;
+    let mut chars = text.chars();
+    let mut bounded: String = chars.by_ref().take(LIMIT).collect();
+    if chars.next().is_some() {
+        bounded.push_str(" [truncated]");
+    }
+    bounded
+}
+
 impl ProviderError {
     pub fn auth(message: impl Into<String>) -> Self {
         let message = message.into();
@@ -679,7 +690,7 @@ impl ProviderError {
     /// A provider error frame delivered mid-stream, already classified by
     /// the dialect that parsed it (e.g. Anthropic's `overloaded_error`).
     pub fn frame(message: impl Into<String>, cause: FailureCause) -> Self {
-        let message = message.into();
+        let message = bounded_diagnostic(&message.into());
         ProviderError {
             short: message.clone(),
             message,
@@ -791,12 +802,7 @@ impl ProviderError {
     }
     /// Keep diagnostic text bounded even when an SSE error frame is enormous.
     pub fn diagnostic(&self) -> String {
-        let text = self.detail.as_deref().unwrap_or(&self.message);
-        let mut detail: String = text.chars().take(8192).collect();
-        if text.chars().nth(8192).is_some() {
-            detail.push_str(" [truncated]");
-        }
-        detail
+        bounded_diagnostic(self.detail.as_deref().unwrap_or(&self.message))
     }
 
     /// HTTP and SSE codes may be strings or numeric status values.
@@ -1377,6 +1383,38 @@ pub fn retry_after_seconds(response: &reqwest::Response) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    /// An unknown code must not hide a recognized type in an SSE error frame.
+    #[test]
+    fn named_error_types_survive_unknown_machine_codes() {
+        for (kind, code, expected) in [
+            (
+                "rate_limit_error",
+                "slow_down",
+                super::FailureCause::RateLimited,
+            ),
+            (
+                "service_unavailable_error",
+                "server_is_overloaded",
+                super::FailureCause::ProviderUnavailable,
+            ),
+        ] {
+            let error = super::ProviderError::from_error_frame(
+                &serde_json::json!({"type":kind,"code":code,"message":"try later"}),
+            );
+            assert_eq!(error.cause, expected);
+            assert_eq!(error.provider_code.as_deref(), Some(code));
+        }
+    }
+
+    /// Provider-controlled error text is bounded before compatibility events clone it.
+    #[test]
+    fn oversized_frame_messages_are_bounded_before_publication() {
+        let error =
+            super::ProviderError::frame("界".repeat(100_000), super::FailureCause::Rejected);
+        assert_eq!(error.message, format!("{} [truncated]", "界".repeat(8192)));
+        assert_eq!(error.short, error.message);
+        assert_eq!(error.diagnostic(), error.message);
+    }
 
     /// Wire codes classify auth and transient errors without masking hard quota.
     #[test]

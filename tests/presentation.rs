@@ -136,3 +136,23 @@ fn shell_cursor_crosses_hanging_whitespace_without_losing_the_prefix() {
     assert_eq!(editor.cursor(), 11);
     assert_eq!(editor.text(), "!abcdef  gh");
 }
+
+/// The optional prefix space remains a real editable cell in the shell gutter.
+#[test]
+fn shell_prefix_space_has_its_own_cursor_and_selection_cell() {
+    let theme = load_bundled(false).unwrap();
+    let mut editor = Editor::new();
+    editor.set_text("! echo");
+    editor.key(Key::Home);
+    editor.key(Key::Right);
+    assert_eq!(
+        editor.render(&theme, 80, 8)[1],
+        format!("{}\x1b[7m \x1b[27mecho", theme.fg("bashMode", "!"))
+    );
+    editor.key(Key::SelectRight);
+    assert_eq!(
+        editor.render(&theme, 80, 8)[1],
+        format!("{}\x1b[7m \x1b[27mecho", theme.fg("bashMode", "!"))
+    );
+    assert_eq!(editor.text(), "! echo");
+}

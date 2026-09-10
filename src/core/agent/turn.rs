@@ -329,7 +329,8 @@ pub(super) async fn run(context: Context, compact_only: bool) -> Outcome {
                     let nothing_produced = text.is_empty()
                         && calls.is_empty()
                         && reasoning_items.is_empty()
-                        && !reasoning_streamed;
+                        && !reasoning_streamed
+                        && assembly_bytes == 0;
                     // The attempt was in flight across a sleep that
                     // fits the window: the run keeps going. Nothing
                     // streamed means an immediate replay — not
@@ -430,7 +431,7 @@ pub(super) async fn run(context: Context, compact_only: bool) -> Outcome {
                         max_attempts,
                     );
                     let details = failure::ErrorDetails {
-                        summary: failure::ErrorDetails::summary(&err),
+                        summary: failure::ErrorDetails::summary(&err).await,
                         detail: err.diagnostic(),
                         cause: err.cause,
                         stage: err.stage,

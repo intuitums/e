@@ -44,8 +44,8 @@ pub struct ErrorDetails {
 }
 
 impl ErrorDetails {
-    /// Produce a short, file-overridable headline from the typed cause.
-    pub fn summary(error: &ProviderError) -> String {
+    /// Read the file-overridable headline off the async worker, retaining its home.
+    pub async fn summary(error: &ProviderError) -> String {
         let (key, default) = match error.cause {
             FailureCause::Auth => ("auth", "Provider authentication failed."),
             FailureCause::Network => ("network", "Could not connect to the provider."),
@@ -55,9 +55,17 @@ impl ErrorDetails {
             FailureCause::ProviderUnavailable => ("unavailable", "Provider unavailable."),
             FailureCause::Rejected => ("rejected", "Provider request failed."),
         };
-        crate::core::config::settings::get_string(&format!("error_{key}"))
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| default.into())
+        let home = crate::core::config::home::home();
+        tokio::task::spawn_blocking(move || {
+            crate::core::config::home::with_home(home, || {
+                crate::core::config::settings::get_string(&format!("error_{key}"))
+            })
+        })
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| default.into())
     }
 
     /// Record the same decision the turn loop made, without inferring root cause.
