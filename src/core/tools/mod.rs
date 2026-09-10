@@ -553,7 +553,7 @@ fn staged_replace(
 
 /// Publish a staged file where `hard_link` is unavailable: create `target`
 /// exclusively (a concurrent creator still wins with AlreadyExists) and copy
-/// the staged bytes in.
+/// the staged bytes in. Failed copies remove their partial target.
 fn copy_into_new(staged: &mut std::fs::File, target: &Path) -> std::io::Result<()> {
     use std::io::Seek;
     let mut options = std::fs::OpenOptions::new();
@@ -564,9 +564,23 @@ fn copy_into_new(staged: &mut std::fs::File, target: &Path) -> std::io::Result<(
         options.mode(0o666);
     }
     let mut created = options.open(target)?;
-    staged.rewind()?;
-    std::io::copy(staged, &mut created)?;
-    created.sync_all()
+    let result = (|| {
+        staged.rewind()?;
+        std::io::copy(staged, &mut created)?;
+        created.sync_all()
+    })();
+    if result.is_err() {
+        // Do not remove a replacement created by another writer.
+        #[cfg(unix)]
+        let ours = verify_target_identity(&created, target).is_ok();
+        #[cfg(not(unix))]
+        let ours = true;
+        drop(created);
+        if ours {
+            let _ = std::fs::remove_file(target);
+        }
+    }
+    result
 }
 
 /// Refuse a pathname that was removed or replaced while its inode was open.
@@ -687,7 +701,7 @@ fn note_seen_stamp(state: &ToolRuntime, path: &Path, stamp: (std::time::SystemTi
 /// Fail when a recorded file changed on disk since e last saw it. A file
 /// that has since been removed passes: there is nothing left to clobber, and
 /// demanding a re-read of a missing file would wedge the path for the rest
-/// of the session.
+/// of the session. Other metadata failures remain stale, never confirmed deletions.
 fn check_fresh(
     state: &ToolRuntime,
     path: &Path,
@@ -701,9 +715,16 @@ fn check_fresh(
     let Some(recorded) = recorded else {
         return Ok(());
     };
-    let current = file_stamp(path);
-    if current.is_none() || current == Some(recorded) {
-        return Ok(());
+    match std::fs::metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Ok(meta)
+            if meta
+                .modified()
+                .is_ok_and(|modified| (modified, meta.len()) == recorded) =>
+        {
+            return Ok(());
+        }
+        _ => {}
     }
     Err(ToolOutput {
         content: format!(
@@ -759,15 +780,23 @@ fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path) -> bool) -> bool {
 /// is `Ok(None)`; anything else names the parameter so the model can correct
 /// it — silently ignoring `limit: 50.0` used to dump the whole file.
 fn integer_arg(args: &Value, name: &str) -> Result<Option<u64>, String> {
-    let number = match &args[name] {
-        Value::Null => return Ok(None),
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.trim().parse::<f64>().ok(),
-        _ => None,
-    };
-    match number {
-        Some(n) if n >= 0.0 && n.fract() == 0.0 && n <= u64::MAX as f64 => Ok(Some(n as u64)),
-        _ => Err(format!("{name} must be a non-negative integer")),
+    let invalid = || format!("{name} must be a non-negative integer");
+    match &args[name] {
+        Value::Null => Ok(None),
+        Value::String(s) => s.trim().parse::<u64>().map(Some).map_err(|_| invalid()),
+        Value::Number(n) => {
+            if let Some(n) = n.as_u64() {
+                return Ok(Some(n));
+            }
+            match n.as_f64() {
+                // 2^64 is exactly representable; u64::MAX rounds up to it.
+                Some(n) if n >= 0.0 && n.fract() == 0.0 && n < 18446744073709551616.0 => {
+                    Ok(Some(n as u64))
+                }
+                _ => Err(invalid()),
+            }
+        }
+        _ => Err(invalid()),
     }
 }
 
@@ -798,6 +827,63 @@ fn schema_object(name: &str, description: &str, properties: Value, required: &[&
 
 #[cfg(test)]
 mod tests {
+
+    /// Integer coercion must preserve exact bounds, including JSON u64 values.
+    #[test]
+    fn integer_arguments_reject_overflow_without_rounding() {
+        for value in [
+            serde_json::json!("18446744073709551616"),
+            serde_json::json!(18446744073709551616.0),
+        ] {
+            for name in ["offset", "limit", "timeout"] {
+                assert!(super::integer_arg(&serde_json::json!({name: value}), name).is_err());
+            }
+        }
+        for value in [
+            serde_json::json!(u64::MAX),
+            serde_json::json!(u64::MAX.to_string()),
+        ] {
+            assert_eq!(
+                super::integer_arg(&serde_json::json!({"limit": value}), "limit"),
+                Ok(Some(u64::MAX))
+            );
+        }
+        assert_eq!(
+            super::integer_arg(&serde_json::json!({"limit": 2.0}), "limit"),
+            Ok(Some(2))
+        );
+    }
+
+    /// A copy failure must not publish an empty or partially copied target.
+    #[test]
+    fn failed_link_free_copy_removes_its_target() {
+        let dir = std::env::temp_dir().join(format!("e-copy-failure-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let mut staged = std::fs::File::create(dir.join("stage")).unwrap();
+        let target = dir.join("target");
+        // A write-only stage permits rewind but makes the copy's read fail.
+        assert!(super::copy_into_new(&mut staged, &target).is_err());
+        assert!(!target.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Metadata errors must not impersonate a confirmed deletion.
+    #[cfg(unix)]
+    #[test]
+    fn freshness_fails_closed_when_metadata_cannot_be_read() {
+        let dir = std::env::temp_dir().join(format!("e-stat-failure-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("file");
+        std::fs::write(&path, "seen").unwrap();
+        let state = super::ToolRuntime::default();
+        super::note_seen(&state, &path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(super::check_fresh(&state, &path, "write", "file").is_ok());
+        std::os::unix::fs::symlink("file", &path).unwrap();
+        assert!(super::check_fresh(&state, &path, "write", "file").is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     use super::{
         failure_summary, filter_schemas, is_builtin, restrict_to, schemas, stable_path_key,
     };

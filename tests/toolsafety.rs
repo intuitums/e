@@ -357,3 +357,17 @@ fn grep_cap_notice_survives_the_output_truncation() {
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// An oversized first row must not masquerade as a complete, truncated read.
+#[test]
+fn oversized_first_read_line_is_rejected_with_a_next_line_offset() {
+    let ws = workspace("oversized-window");
+    std::fs::write(ws.join("f.txt"), format!("{}\nnext\n", "x".repeat(40_000))).unwrap();
+    let out = tools::run("read", r#"{"path":"f.txt","limit":1}"#, &ws);
+    assert!(out.is_error());
+    assert!(out.content.contains("line not returned"));
+    assert!(out.content.contains("offset 2"));
+    let next = tools::run("read", r#"{"path":"f.txt","offset":2}"#, &ws);
+    assert_eq!(next.content, "2\tnext");
+    std::fs::remove_dir_all(ws).unwrap();
+}

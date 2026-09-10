@@ -633,19 +633,36 @@ impl ProviderError {
     /// A bare `{"error":{…}}` frame inside a 200 stream — how OpenAI-style
     /// gateways and Gemini report a failure once the connection is open.
     /// The message's wording wins where it is specific (a quota wall);
-    /// otherwise the numeric `code` classifies like an HTTP status would.
+    /// otherwise numeric status codes and named provider codes classify it.
     pub fn from_error_frame(error: &serde_json::Value) -> Self {
         let message = error["message"]
             .as_str()
+            .or_else(|| error.as_str())
             .unwrap_or("unknown provider error")
             .to_string();
-        let text_cause = classify_text(&message);
+        let text_cause = classify_text(&error.to_string());
+        let code = error
+            .get("code")
+            .filter(|v| !v.is_null())
+            .unwrap_or(&error["type"]);
+        let code = code
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| code.to_string());
         let cause = if text_cause == Some(FailureCause::QuotaExhausted) {
             FailureCause::QuotaExhausted
         } else {
-            match error["code"].as_u64() {
-                Some(429) => FailureCause::RateLimited,
-                Some(408) | Some(500..=599) => FailureCause::ProviderUnavailable,
+            match code.as_str() {
+                "401" | "403" | "invalid_api_key" | "authentication_error" | "permission_error" => {
+                    FailureCause::Auth
+                }
+                "429" | "rate_limit_exceeded" | "rate_limit_error" => FailureCause::RateLimited,
+                "408" | "server_error" | "internal_server_error" | "overloaded_error" => {
+                    FailureCause::ProviderUnavailable
+                }
+                code if code.parse::<u16>().is_ok_and(|n| (500..=599).contains(&n)) => {
+                    FailureCause::ProviderUnavailable
+                }
                 _ => text_cause.unwrap_or(FailureCause::Rejected),
             }
         };
@@ -1169,6 +1186,32 @@ pub fn retry_after_seconds(response: &reqwest::Response) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Wire codes classify auth and transient errors without masking hard quota.
+    #[test]
+    fn error_frame_codes_preserve_retry_classification() {
+        use super::{FailureCause, ProviderError};
+        for code in [
+            serde_json::json!(401),
+            serde_json::json!(403),
+            serde_json::json!("401"),
+        ] {
+            assert_eq!(
+                ProviderError::from_error_frame(
+                    &serde_json::json!({"code":code,"message":"denied"})
+                )
+                .cause,
+                FailureCause::Auth
+            );
+        }
+        let error = serde_json::json!({"code":"server_error","message":"Provider disconnected unexpectedly"});
+        assert_eq!(
+            ProviderError::from_error_frame(&error).cause,
+            FailureCause::ProviderUnavailable
+        );
+        assert_eq!(ProviderError::from_error_frame(&serde_json::json!({"code":429,"type":"insufficient_quota","message":"quota exhausted"})).cause, FailureCause::QuotaExhausted);
+    }
+
     use super::*;
 
     #[test]

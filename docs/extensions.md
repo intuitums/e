@@ -156,7 +156,8 @@ relaunch ends the chain.
 - Tool calls have 300 s, commands 60 s.
 - On quit e sends `shutdown`, waits a beat, then kills the process.
 - A crashed or missing extension is reported in the transcript and skipped;
-  it is never a reason e can't run.
+  it is never a reason e can't run. An exit immediately after a valid initialize
+  response still emits one notice, including which runtime hooks now fail open.
 
 ## Examples
 

@@ -180,7 +180,8 @@ const WINDOW_BYTES: usize = super::MAX_BYTES - 128;
 /// The numbered lines from `offset`, and — when the byte cap cut the window
 /// short — the number of the first line not shown. The cut falls between
 /// whole lines: a line split mid-way is unusable to the model, and a bare
-/// number prefix is worse than one line fewer.
+/// number prefix is worse than one line fewer. An oversized first line fails
+/// with a skip offset rather than returning a misleading partial line.
 fn read_window(
     path: &Path,
     offset: Option<u64>,
@@ -208,6 +209,12 @@ fn read_window(
             continue;
         }
         let entry = format!("{line_number}\t{line}");
+        if returned == 0 && entry.len() > WINDOW_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("line {line_number} exceeds the {WINDOW_BYTES} byte read window; line not returned; skip it with offset {}", line_number + 1),
+            ));
+        }
         if returned > 0 && output.len() + 1 + entry.len() > WINDOW_BYTES {
             return Ok((output, Some(line_number)));
         }

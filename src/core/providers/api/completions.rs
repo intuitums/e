@@ -219,7 +219,7 @@ pub async fn run(
             // frame (OpenRouter also sets finish_reason "error"); without
             // this the frame carries no delta, is skipped, and `[DONE]`
             // ends the turn as a clean success.
-            if let Some(error) = value.get("error").filter(|e| e.is_object()) {
+            if let Some(error) = value.get("error").filter(|e| !e.is_null()) {
                 return Err(ProviderError::from_error_frame(error));
             }
             if let Some(delta) = value["choices"][0]["delta"].as_object() {

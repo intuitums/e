@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -60,9 +60,9 @@ struct Link {
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
     progress: Mutex<HashMap<u64, mpsc::Sender<ToolProgress>>>,
     child: tokio::sync::Mutex<Option<tokio::process::Child>>,
-    /// Set once the handshake succeeds. Until then the pipes stay quiet
-    /// about an exit — `start` reports a pre-initialize death itself.
-    exit_notice: OnceLock<String>,
+    /// Manifest notice and unexpected-exit flag, coordinated across handshake
+    /// and pipe tasks. Pre-initialize failures are reported by `start`.
+    exit_notice: Mutex<(Option<String>, bool)>,
     notices: mpsc::Sender<String>,
 }
 
@@ -91,10 +91,21 @@ impl Link {
     /// first, and only after the handshake.
     fn exited(&self) {
         if self.retire() {
-            if let Some(notice) = self.exit_notice.get() {
+            let mut state = self.exit_notice.lock().unwrap_or_else(|e| e.into_inner());
+            state.1 = true;
+            if let Some(notice) = &state.0 {
                 let _ = self.notices.try_send(notice.clone());
             }
         }
+    }
+
+    /// Install the manifest's notice, including an EOF that beat the handshake.
+    fn install_exit_notice(&self, notice: String) {
+        let mut state = self.exit_notice.lock().unwrap_or_else(|e| e.into_inner());
+        if state.1 {
+            let _ = self.notices.try_send(notice.clone());
+        }
+        state.0 = Some(notice);
     }
 
     /// Kill the child if it still runs and wait it, so it never lingers as
@@ -943,7 +954,7 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
         pending: Mutex::new(HashMap::new()),
         progress: Mutex::new(HashMap::new()),
         child: tokio::sync::Mutex::new(Some(child)),
-        exit_notice: OnceLock::new(),
+        exit_notice: Mutex::new((None, false)),
         notices,
     });
 
@@ -1048,7 +1059,7 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
             return Err(reason);
         }
     };
-    let _ = link.exit_notice.set(exit_notice(&source, &manifest));
+    link.install_exit_notice(exit_notice(&source, &manifest));
     Ok(Extension { manifest, ..ext })
 }
 
@@ -1165,6 +1176,31 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    /// EOF before or after manifest installation announces one unexpected exit.
+    #[test]
+    fn exit_notice_survives_eof_before_handshake_continuation() {
+        for early in [false, true] {
+            let (notices, mut rx) = tokio::sync::mpsc::channel(4);
+            let link = super::Link {
+                alive: std::sync::atomic::AtomicBool::new(true),
+                pending: std::sync::Mutex::new(std::collections::HashMap::new()),
+                progress: std::sync::Mutex::new(std::collections::HashMap::new()),
+                child: tokio::sync::Mutex::new(None),
+                exit_notice: std::sync::Mutex::new((None, false)),
+                notices,
+            };
+            if early {
+                link.exited();
+            }
+            link.install_exit_notice("guard exited; hooks fail open".into());
+            link.exited();
+            link.exited();
+            assert_eq!(rx.try_recv().unwrap(), "guard exited; hooks fail open");
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
     // The entry-point tests set file modes, so they are unix-only. Nested so
     // the module opens with a bare `#[cfg(test)]` (the guard's prod/test split
     // keys on that) without mixing an inner `#![cfg]` on the same module.

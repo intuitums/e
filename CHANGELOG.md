@@ -7,6 +7,15 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Review fixes for the audit: background handles reserve their PID until pipes
+  close; failed new-file copies remove their partial target; metadata errors
+  fail freshness checks closed. Read windows reject oversized first lines with
+  an offset to skip them, and integer arguments reject overflow without rounding.
+- OAuth refresh waits are scoped to each home and provider; fresh Codex tokens
+  bypass them. Extension exit notices survive EOF immediately after initialize.
+  Stream error codes distinguish authentication failures and transient server
+  disconnects while preserving hard-quota classification.
+
 - Sessions survive a crash: a torn final line is truncated on reopen instead
   of fusing with the next record, and dangling tool calls or orphaned
   reasoning blocks are repaired anywhere in a history (on `/tree` too), so a
