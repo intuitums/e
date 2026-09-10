@@ -7,6 +7,18 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Running tools stay in connected, wrapped trees with live output tails and
+  Ctrl+O review. The composer stays at the bottom by default, leading `!` uses
+  a green gutter marker, and edit counts show green additions and red deletions.
+- Provider failures show brief UI errors and retain local diagnostic details in
+  private session sidecars and headless JSON. Partial completions with error
+  frames fail instead of appearing successful. Display-off time is not sleep.
+- Drafts, trust paths, and tab titles cannot inject terminal controls. Ctrl+C
+  cancels across panels, pasted line endings normalize once, vertical cursor
+  motion follows display columns, and long trust questions can be scrolled.
+- `./x ui` checks terminal frames for tool trees, composer placement, shell
+  styling, short errors, and diff colors on Linux and macOS CI.
+
 - GPT-6 Astra, OpenAI's new flagship, is seeded on both OpenAI providers: the
   API (`openai`, 1.05M window, `xhigh`/`max` efforts included) and ChatGPT
   Codex (`openai-codex`, 272k codex lane). The GPT-5.6 trio is seeded on the

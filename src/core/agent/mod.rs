@@ -8,6 +8,7 @@
 
 pub mod compact;
 pub mod context;
+pub mod failure;
 pub mod retry;
 mod turn;
 pub mod wake;
@@ -76,6 +77,24 @@ impl TurnLog {
             Ok(result) => result,
             Err(_) => Err(std::io::Error::other("session append task panicked")),
         };
+        note_persist(&self.persist_warned, result, &self.events);
+    }
+
+    /// Persist diagnostic metadata outside model history, honoring no-save mode.
+    async fn record_error(&self, details: failure::ErrorDetails) {
+        if !self.save_session {
+            return;
+        }
+        let log = self.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut session = log.session.lock().unwrap_or_else(|e| e.into_inner());
+            match session.as_mut() {
+                Some(session) => session.record_error(details),
+                None => Ok(()),
+            }
+        })
+        .await
+        .unwrap_or_else(|_| Err(std::io::Error::other("diagnostic append task panicked")));
         note_persist(&self.persist_warned, result, &self.events);
     }
 
@@ -442,6 +461,8 @@ pub enum SessionEvent {
         output: u64,
         cache_read: u64,
     },
+    /// Diagnostic facts emitted immediately before the compatible Error message.
+    ErrorDetails(Box<failure::ErrorDetails>),
     Error(String),
     /// A non-fatal turn problem worth showing: a truncated or refused reply
     /// the provider delivered as success, or malformed stream frames that

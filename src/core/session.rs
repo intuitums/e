@@ -207,6 +207,39 @@ impl SessionLog {
         Ok(())
     }
 
+    /// Append backend diagnostics beside the session without changing its format.
+    /// The session lock owns this sidecar too; failed writes remove their partial tail.
+    pub fn record_error(
+        &mut self,
+        details: crate::core::agent::failure::ErrorDetails,
+    ) -> std::io::Result<()> {
+        let mut line = serde_json::to_string(&serde_json::json!({
+            "format_version": 1, "parent": self.current, "details": details,
+        }))?;
+        line.push('\n');
+        let path = self.path.with_extension("errors.jsonl");
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = file.metadata()?.permissions().mode() & 0o600;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+        let end = file.metadata()?.len();
+        if let Err(error) = file.write_all(line.as_bytes()) {
+            file.set_len(end)?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Move the node subsequent appends attach to. `/tree` calls this with
     /// an earlier node's id to rewind: the file is untouched, the next
     /// append grows a new branch instead of extending the old tail.

@@ -1,12 +1,11 @@
 //! System-sleep detection by clock divergence.
 //!
-//! Monotonic time (`Instant`) pauses while the process is suspended; wall
-//! time (`SystemTime`) does not. A one-second heartbeat therefore tells
-//! sleep from ordinary elapsed time: when the wall clock ran far ahead of
-//! the monotonic wait, the process was suspended in between. No platform
-//! APIs, works everywhere; the clock reads go through [`Beat::now`] and the
-//! comparison lives in pure [`observe`], so the policy is testable without
-//! putting the machine to sleep.
+//! On platforms whose monotonic clock pauses in system sleep, wall-clock
+//! divergence estimates the sleep duration. It is a heuristic: a large wall
+//! clock correction can also look like sleep, and platforms whose monotonic
+//! clock advances in sleep may not detect it. Display power and focus are
+//! never inputs. Ordinary elapsed time, including time with the display off,
+//! does not count as sleep. The pure comparison is testable without suspending.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -139,6 +138,13 @@ mod tests {
     #[test]
     fn ordinary_elapsed_time_is_not_a_gap() {
         let (last, now) = beats(1_000, 1_000);
+        assert!(observe(last, now).is_none());
+    }
+
+    /// A powered-off display leaves both clocks running, even for a long wait.
+    #[test]
+    fn display_off_elapsed_time_is_not_system_sleep() {
+        let (last, now) = beats(0, 30 * 60 * 1_000);
         assert!(observe(last, now).is_none());
     }
 

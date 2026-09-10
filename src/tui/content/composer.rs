@@ -1,4 +1,4 @@
-//! The composer: a `┃`-railed editor at column zero, no rules, no tint.
+//! The composer: neutral rails with a shell-mode `!` in the first gutter.
 //!
 //! Fixed v1 key set: insert/delete, arrows (line movement in wrapped or
 //! multi-line drafts, history at the edges), home/end, word-left/right,
@@ -276,19 +276,51 @@ impl Editor {
         }
     }
 
+    /// Lay out displayed command text while keeping raw buffer indices. The
+    /// leading shell prefix occupies the gutter, including one optional space.
+    fn visual_rows(&self, chars: &[char], inner: usize) -> Vec<VisualRow> {
+        let offset = if !self.mask && self.text.first() == Some(&'!') {
+            1 + usize::from(self.text.get(1) == Some(&' '))
+        } else {
+            0
+        };
+        layout_rows(&chars[offset..], inner)
+            .into_iter()
+            .map(|row| VisualRow {
+                start: row.start + offset,
+                end: row.end + offset,
+            })
+            .collect()
+    }
+
     /// Where a vertical motion would land: the same column in the visual
     /// row above/below, None at the draft's edge.
     fn line_target(&self, direction: isize) -> Option<usize> {
         let inner = self.inner_width?;
-        let rows = layout_rows(&self.text, inner);
-        let index = row_of(&rows, self.cursor)?;
+        let chars = self.display_chars();
+        let rows = self.visual_rows(&chars, inner);
+        let cursor = self.cursor.max(rows[0].start);
+        let index = row_of(&rows, cursor)?;
         let target = match direction {
             -1 if index > 0 => &rows[index - 1],
             1 if index + 1 < rows.len() => &rows[index + 1],
             _ => return None,
         };
-        let col = self.cursor.saturating_sub(rows[index].start);
-        Some((target.start + col).min(target.end))
+        let col: usize = chars[rows[index].start..cursor]
+            .iter()
+            .map(|c| c.width().unwrap_or(0))
+            .sum();
+        let mut position = target.start;
+        let mut width = 0;
+        while position < target.end {
+            let next = chars[position].width().unwrap_or(0);
+            if width + next > col {
+                break;
+            }
+            width += next;
+            position += 1;
+        }
+        Some(position)
     }
 
     /// Vertical arrows: move between visual rows of the draft when there is
@@ -472,6 +504,22 @@ impl Editor {
         }
     }
 
+    /// One display character per buffer character keeps cursor and selection
+    /// indices stable. Controls stay in the submitted data, never in terminal
+    /// output; only a newline may affect layout, and tabs display as spaces.
+    fn display_chars(&self) -> Vec<char> {
+        self.text
+            .iter()
+            .map(|&c| match c {
+                _ if self.mask => '•',
+                '\n' => '\n',
+                '\t' => ' ',
+                c if c.is_control() => '�',
+                c => c,
+            })
+            .collect()
+    }
+
     /// Render the composer band: a leading blank (the reference paints its
     /// top divider only when the composer is hidden or queued banners sit
     /// above it — a plain visible composer gets none), then railed rows
@@ -479,29 +527,18 @@ impl Editor {
     /// show; a longer draft scrolls behind a cursor-following window whose
     /// first row wears `┃↑` when rows hide above.
     pub fn render(&mut self, theme: &Theme, width: usize, max_body_rows: usize) -> Vec<String> {
-        // A draft starting with `!` is a shell command: the rail turns the
-        // bash-mode color — the whole indicator, no words.
-        let rail_token =
-            if !self.mask && self.text.iter().find(|c| !c.is_whitespace()) == Some(&'!') {
-                "bashMode"
-            } else {
-                "userMessageText"
-            };
-        let rail = format!("{} ", theme.fg(rail_token, "┃"));
+        let shell = !self.mask && self.text.first() == Some(&'!');
+        let rail = format!("{} ", theme.fg("userMessageText", "┃"));
         let inner = width.saturating_sub(2).max(1);
         self.inner_width = Some(inner);
         let mut out = vec![String::new()];
 
         // Logical lines wrap at word boundaries to `inner`-wide visual rows,
         // every row carrying the rail. The cursor maps to its visual row.
-        let text = if self.mask {
-            "•".repeat(self.text.len())
-        } else {
-            self.text()
-        };
-        let chars: Vec<char> = text.chars().collect();
-        let rows = layout_rows(&chars, inner);
-        let cursor_row = row_of(&rows, self.cursor);
+        let chars = self.display_chars();
+        let rows = self.visual_rows(&chars, inner);
+        let cursor = self.cursor.max(rows[0].start);
+        let cursor_row = row_of(&rows, cursor);
         let last = rows.len() - 1;
         // While a selection is live the range itself is the highlight —
         // reverse video across its rows, no separate cursor cell.
@@ -525,7 +562,7 @@ impl Editor {
             } else if selection.is_some() {
                 slice.iter().collect()
             } else if cursor_here && !full_final_row {
-                let at = self.cursor - row.start;
+                let at = cursor - row.start;
                 let before: String = slice[..at].iter().collect();
                 let cursor_char = slice
                     .get(at)
@@ -573,7 +610,21 @@ impl Editor {
         }
         for (i, rendered) in body.iter().enumerate().skip(self.scroll).take(cap) {
             if i == self.scroll && self.scroll > 0 {
-                out.push(format!("{}{rendered}", theme.fg(rail_token, "┃↑")));
+                out.push(format!("{}{rendered}", theme.fg("userMessageText", "┃↑")));
+            } else if i == 0 && shell {
+                let marker = if self.cursor == 0 && selection.is_none()
+                    || selection.is_some_and(|(start, end)| start == 0 && end > 0)
+                {
+                    "\x1b[7m!\x1b[27m"
+                } else {
+                    "!"
+                };
+                let rendered = if self.cursor == 0 && selection.is_none() {
+                    rendered.replace("\x1b[7m", "").replace("\x1b[27m", "")
+                } else {
+                    rendered.clone()
+                };
+                out.push(format!("{} {rendered}", theme.fg("bashMode", marker)));
             } else {
                 out.push(format!("{rail}{rendered}"));
             }

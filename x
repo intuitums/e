@@ -5,7 +5,7 @@ set -eu
 cd "$(dirname "$0")"
 
 usage() {
-  echo "usage: ./x [check|test|fmt|lint|guard|bench|release-check] [args...]" >&2
+  echo "usage: ./x [check|test|ui|fmt|lint|guard|bench|release-check] [args...]" >&2
   exit 2
 }
 
@@ -25,6 +25,10 @@ case "$command" in
     ;;
   test)
     cargo test --locked "$@"
+    ;;
+  ui)
+    cargo build --locked
+    "${PYTHON:-python3}" tests/ui/run.py "$@"
     ;;
   fmt)
     cargo fmt "$@"

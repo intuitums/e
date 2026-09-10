@@ -47,6 +47,7 @@ struct ActiveTurn {
     turn: Turn,
     started: Instant,
     error: Option<String>,
+    error_summary: Option<String>,
     /// tool id → stable group block, so lifecycle events update in place.
     tool_blocks: std::collections::HashMap<u64, usize>,
     /// Batch members not yet terminal, including pending calls.
@@ -300,6 +301,8 @@ struct App {
     /// Cached statusline inputs. Deriving them reads `~/.e/auth.json` and
     /// `~/.e/settings.json`; doing that per frame stalls streaming, so
     /// they refresh only via `refresh_status_cache`.
+    bottom_pinned: bool,
+    live_preview_rows: usize,
     signed_in: bool,
     status_effort: Option<String>,
 }
@@ -353,39 +356,61 @@ impl App {
             }
             for (row, detail) in lines {
                 rows.push(crate::tui::markdown::clip_styled(&row, width));
-                let Some(id) = detail else { continue };
-                let Some(body) = Self::output_body(&self.outputs, id) else {
+                use crate::tui::transcript::ToolDetail;
+                let Some(detail) = detail else { continue };
+                if let ToolDetail::Live(index) = detail {
+                    if block
+                        .tool_children
+                        .get(index)
+                        .is_some_and(|child| child.output_truncated)
+                    {
+                        rows.extend(crate::tui::transcript::tree_rows(
+                            &self.theme,
+                            width,
+                            "│",
+                            &self.theme.fg("dim", "Earlier live output omitted."),
+                        ));
+                    }
+                }
+                let body = match detail {
+                    ToolDetail::Stored(id) => Self::output_body(&self.outputs, id),
+                    ToolDetail::Live(index) => block
+                        .tool_children
+                        .get(index)
+                        .map(|child| child.output.as_str()),
+                };
+                let Some(body) = body else {
                     rows.push(self.theme.fg("dim", "│  Full saved result unavailable."));
                     continue;
                 };
-                let body_lines: Vec<&str> = body.lines().collect();
-                let shown = if full {
-                    body_lines.len()
+                let body_rows: Vec<String> = body
+                    .lines()
+                    .flat_map(|line| {
+                        let colored = Self::diff_row_color(&self.theme, line)
+                            .unwrap_or_else(|| self.theme.fg("dim", line));
+                        crate::tui::transcript::tree_rows(&self.theme, width, "│", &colored)
+                    })
+                    .collect();
+                let hidden = if full {
+                    0
                 } else {
-                    body_lines.len().min(REVIEW_DETAIL_LINES)
+                    body_rows.len().saturating_sub(REVIEW_DETAIL_LINES)
                 };
-                let mut clipped_any = false;
-                for line in &body_lines[..shown] {
-                    let railed = match Self::diff_row_color(&self.theme, line) {
-                        Some(colored) => {
-                            format!("{} {colored}", self.theme.fg("dim", "│"))
-                        }
-                        None => self.theme.fg("dim", &format!("│ {line}")),
-                    };
-                    if crate::tui::markdown::visible_width(&railed) > width {
-                        clipped_any = true;
-                    }
-                    rows.push(crate::tui::markdown::clip_styled(&railed, width));
+                let shown = body_rows.len() - hidden;
+                if matches!(detail, ToolDetail::Live(_)) {
+                    rows.extend(body_rows.into_iter().skip(hidden));
+                } else {
+                    rows.extend(body_rows.into_iter().take(shown));
                 }
-                let hidden = body_lines.len() - shown;
                 if hidden > 0 {
-                    let noun = if hidden == 1 { "line" } else { "lines" };
-                    rows.push(
-                        self.theme
-                            .fg("dim", &format!("│  {hidden} more {noun} · → to expand")),
-                    );
-                } else if !full && clipped_any {
-                    rows.push(self.theme.fg("dim", "│  line clipped · → to expand"));
+                    rows.extend(crate::tui::transcript::tree_rows(
+                        &self.theme,
+                        width,
+                        "│",
+                        &self
+                            .theme
+                            .fg("dim", &format!("{hidden} more rows · → to expand")),
+                    ));
                 }
             }
         }
@@ -466,20 +491,7 @@ impl App {
         let mut lines = self
             .transcript
             .render_animated(&self.theme, width, blink_on);
-        // The transient running-tool row: the focused call leaves its tree
-        // and paints directly below the transcript (no gap), its marker
-        // steady; the activity row follows one blank further down.
-        if self.active.is_some() {
-            if let Some(group) = self
-                .transcript
-                .blocks
-                .iter()
-                .rev()
-                .find(|b| b.kind == Kind::ToolGroup && !b.done)
-            {
-                lines.extend(group.overlay_rows(&self.theme, width));
-            }
-        }
+        let dock_start = lines.len();
         if let Some(s) = &self.active {
             if self.rendering_delayed {
                 lines.push(String::new());
@@ -525,6 +537,9 @@ impl App {
                     lines.push(label);
                 }
             }
+        }
+        if self.active.is_some() {
+            lines.resize(lines.len().max(dock_start + 2), String::new());
         }
         let entering_key = matches!(self.auth, Some(AuthStage::ApiKey { .. }));
         if !entering_key {
@@ -576,9 +591,15 @@ impl App {
             }
             lines.extend(composer);
         }
-        if let Some(stage) = &self.trust {
+        if let Some(stage) = &mut self.trust {
             let dir = self.agent.cwd().to_string_lossy().into_owned();
-            lines.extend(trustpanel::render(stage, &self.theme, width, &dir));
+            lines.extend(trustpanel::render_view(
+                stage,
+                &self.theme,
+                width,
+                height.saturating_sub(1),
+                &dir,
+            ));
         } else if let Some(stage) = &self.auth {
             lines.extend(authpanel::render(
                 stage,
@@ -624,6 +645,12 @@ impl App {
             panel_open,
             width,
         ));
+        if self.bottom_pinned && lines.len() < height {
+            lines.splice(
+                dock_start..dock_start,
+                vec![String::new(); height - lines.len()],
+            );
+        }
         lines
     }
 
@@ -1156,12 +1183,39 @@ impl App {
         }
     }
 
+    /// Ctrl+C is global, including during trust and login. The first press
+    /// cancels work and clears transient input; a second press exits without
+    /// recording a trust decision or waiting for cancellation to finish.
+    fn interrupt_or_exit(&mut self) {
+        if self
+            .armed_at
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(1500))
+        {
+            self.should_quit = true;
+            return;
+        }
+        if self.agent.is_streaming() {
+            self.agent.interrupt();
+        }
+        self.cancel_login();
+        self.auth = None;
+        self.pending_key = None;
+        self.editor.mask = false;
+        self.editor.set_text("");
+        self.discard_composer_images();
+        self.viewer = None;
+        self.settings = None;
+        self.menu = None;
+        self.staged_scope = None;
+        arm(self);
+    }
+
     /// Insert text normally, or turn a pasted list of image paths into
     /// attachments — but only into a free composer: over an open surface a
     /// paste is plain text, so it cannot silently stack onto a draft the
     /// user is not looking at.
     fn paste(&mut self, text: &str) {
-        let text = text.replace('\r', "\n");
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         if self.composer_free() {
             let paths: Vec<String> = text
                 .lines()
@@ -1910,6 +1964,18 @@ impl App {
         self.signed_in =
             crate::core::auth::signed_in(&crate::core::auth::load(), &self.agent.model.provider);
         self.status_effort = self.agent.effort();
+        self.bottom_pinned = crate::core::config::settings::get_string("composer_position")
+            .as_deref()
+            != Some("inline");
+        self.live_preview_rows = crate::core::config::settings::get_u64("tool_preview_rows")
+            .filter(|n| *n <= 20)
+            .unwrap_or(5) as usize;
+        for block in &mut self.transcript.blocks {
+            if block.live_preview_rows != self.live_preview_rows {
+                block.live_preview_rows = self.live_preview_rows;
+                block.touch();
+            }
+        }
     }
 
     fn notice(&mut self, text: String) {
@@ -1944,12 +2010,14 @@ fn tab_title(path: &str, session_name: Option<&str>) -> String {
     format!("𝑒 · {label}")
 }
 
+/// Write a title without letting a path or session name terminate its OSC.
 fn set_tab_title(title: &str) {
     // Escape codes into a pipe are garbage in the pipe; titles only make
     // sense on a terminal.
     if !stdout_is_tty() {
         return;
     }
+    let title = crate::core::tools::sanitize_display(title).replace('\n', " ");
     let mut out = std::io::stdout();
     let _ = write!(out, "\x1b]0;{title}\x07");
     let _ = out.flush();
@@ -2462,6 +2530,8 @@ async fn run_scoped(
         rendering_delayed: false,
         last_paint_failure: None,
         light_background: detected,
+        bottom_pinned: true,
+        live_preview_rows: 5,
         signed_in: false,
         status_effort: None,
     };
@@ -2568,7 +2638,9 @@ async fn run_scoped(
                     }
                     TermEvent::Key(k) if k.kind != crossterm::event::KeyEventKind::Release => {
                         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                        if ctrl
+                        if ctrl && k.code == KeyCode::Char('c') {
+                            app.interrupt_or_exit();
+                        } else if ctrl
                             && k.code == KeyCode::Char('v')
                             && app.composer_free()
                             && !app.editor.mask
@@ -2617,6 +2689,8 @@ async fn run_scoped(
                             match k.code {
                                 KeyCode::Up => stage.step(-1),
                                 KeyCode::Down => stage.step(1),
+                                KeyCode::PageUp => stage.page(-1, cols as usize, (rows as usize).saturating_sub(1)),
+                                KeyCode::PageDown => stage.page(1, cols as usize, (rows as usize).saturating_sub(1)),
                                 KeyCode::Enter => {
                                     // The middle row (when offered) trusts the
                                     // broader ancestor; trust propagates down,
@@ -2856,22 +2930,6 @@ async fn run_scoped(
                             app.notice("login cancelled".into());
                         } else if k.code == KeyCode::Esc && app.agent.is_streaming() {
                             app.agent.interrupt();
-                        } else if ctrl && k.code == KeyCode::Char('c') {
-                            if app.agent.is_streaming() {
-                                app.agent.interrupt();
-                                arm(&mut app);
-                            } else if !app.editor.is_empty()
-                                || !app.composer_images.is_empty()
-                                || app.clipboard_reading
-                            {
-                                app.editor.set_text("");
-                                app.discard_composer_images();
-                                arm(&mut app);
-                            } else if app.armed_at.map(|t| t.elapsed() < Duration::from_millis(1500)).unwrap_or(false) {
-                                break;
-                            } else {
-                                arm(&mut app);
-                            }
                         } else if ctrl && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('P')) {
                             let backward = k.code == KeyCode::Char('P')
                                 || k.modifiers.contains(KeyModifiers::SHIFT);
@@ -3632,6 +3690,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The error block supplies its own label, so the event text stays bare.
+    #[test]
+    fn failed_turn_does_not_duplicate_the_error_label() {
+        let mut app = session_app();
+        app.on_session_event(SessionEvent::TurnStart);
+        app.on_session_event(SessionEvent::Error("provider response interrupted".into()));
+        app.on_session_event(SessionEvent::TurnEnd { aborted: false });
+        let error = app
+            .transcript
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Error)
+            .unwrap();
+        assert_eq!(error.text, "provider response interrupted");
+    }
+
+    /// CRLF is one pasted line break; standalone CR and LF still work.
+    #[test]
+    fn paste_normalizes_line_endings_once() {
+        let mut app = session_app();
+        app.paste("first\r\nsecond\rthird\nfourth");
+        assert_eq!(app.editor.text(), "first\nsecond\nthird\nfourth");
+    }
+
+    /// Global cancellation stops an in-flight sign-in and retires secret input.
+    #[tokio::test]
+    async fn ctrl_c_cancels_login_before_arming_exit() {
+        let mut app = session_app();
+        let cancellation = crate::core::auth::login::LoginCancellation::default();
+        let observed = cancellation.clone();
+        app.login_task = Some(ActiveLogin {
+            flow_id: 1,
+            cancellation,
+            task: tokio::spawn(std::future::pending()),
+            wait_for_callback: false,
+        });
+        app.auth = Some(AuthStage::Waiting { back: None });
+        app.pending_key = Some("mock".into());
+        app.editor.mask = true;
+        app.editor.set_text("synthetic-secret");
+        app.interrupt_or_exit();
+        assert!(observed.is_cancelled());
+        assert!(app.auth.is_none());
+        assert!(app.pending_key.is_none());
+        assert!(!app.editor.mask);
+        assert!(app.editor.is_empty());
+        assert!(!app.should_quit);
+        app.interrupt_or_exit();
+        assert!(app.should_quit);
+    }
+
     #[tokio::test]
     async fn active_login_guard_cancels_on_drop() {
         let cancellation = crate::core::auth::login::LoginCancellation::default();
@@ -3716,6 +3825,8 @@ mod tests {
             rendering_delayed: false,
             last_paint_failure: None,
             light_background: false,
+            bottom_pinned: true,
+            live_preview_rows: 5,
             signed_in: false,
             status_effort: None,
         }
@@ -3858,6 +3969,51 @@ mod tests {
             0,
             "the clamp persists so ↑/↓ arithmetic starts in range"
         );
+    }
+
+    #[test]
+    fn command_output_and_completion_do_not_move_the_composer_dock() {
+        let mut app = session_app();
+        app.on_session_event(SessionEvent::TurnStart);
+        app.on_session_event(SessionEvent::ToolBatchStart {
+            calls: vec![crate::core::agent::ToolCallPresentation {
+                id: 1,
+                category: "command".into(),
+                running: "Running".into(),
+                completed: "Ran".into(),
+                target: "test command with a long argument".into(),
+            }],
+        });
+        app.on_session_event(SessionEvent::ToolStart { id: 1 });
+        for (width, height, count) in [(80, 24, 1), (24, 12, 30), (80, 24, 2)] {
+            app.on_session_event(SessionEvent::ToolOutput {
+                id: 1,
+                stream: crate::core::tools::OutputStream::Stdout,
+                chunk: "output line with a long argument\n".repeat(count),
+            });
+            let frame = app.frame(width, height);
+            assert!(frame.len() >= height);
+            assert!(crate::core::tools::strip_ansi(&frame[frame.len() - 3]).starts_with("┃ "));
+            let review = app.viewer_rows(width, true).join("\n");
+            assert!(
+                review.contains("output line"),
+                "running output must be reviewable"
+            );
+        }
+        app.on_session_event(SessionEvent::ToolEnd {
+            id: 1,
+            outcome: crate::core::tools::ToolOutcome::Completed,
+            summary: "done".into(),
+            content: "authoritative final output".into(),
+        });
+        app.on_session_event(SessionEvent::TurnEnd { aborted: false });
+        let frame = app.frame(80, 24);
+        assert_eq!(frame.len(), 24);
+        assert!(crate::core::tools::strip_ansi(&frame[21]).starts_with("┃ "));
+        assert!(app
+            .viewer_rows(80, true)
+            .join("\n")
+            .contains("authoritative final output"));
     }
 
     #[test]

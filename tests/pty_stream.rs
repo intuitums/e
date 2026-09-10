@@ -203,3 +203,80 @@ fn tool_completion_after_resize_keeps_the_final_reply() {
         "completed tool row never painted"
     );
 }
+
+/// The global exit chord must reach the app even while a panel owns input.
+#[test]
+fn ctrl_c_exits_modal_panels_without_recording_trust() {
+    let _lock = env_lock();
+    common::clear_env_keys();
+    for (name, prompt, marker) in [
+        ("trust", "", "Trust this directory"),
+        ("settings", "/settings", "Settings"),
+        ("login", "/login", "Sign in"),
+        ("viewer", "\u{f}", "Review"),
+    ] {
+        let home = Home::new("pty-panel-exit");
+        home.write("models.json", r#"{"providers":{"mock":{"base_url":"http://127.0.0.1:1","catalog":"none","models":["audit"]}}}"#);
+        home.auth(r#"{"mock":{"key":"synthetic"}}"#);
+        home.write("settings.json", r#"{"auto_update":"off"}"#);
+        let workspace = home.dir.join(if name == "trust" {
+            "workspace\x07\x1b]0;BOUNTY_INJECTED\x07"
+        } else {
+            "workspace"
+        });
+        std::fs::create_dir(&workspace).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        if name != "trust" {
+            home.write(
+                "trust.json",
+                serde_json::to_vec(&serde_json::json!({
+                    (workspace.to_str().unwrap()): {"trusted": true}
+                }))
+                .unwrap(),
+            );
+        }
+        let capture = home.dir.join("panel.raw");
+        let output = Command::new("python3")
+            .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/ptycap.py"))
+            .arg(&capture)
+            .args(["100", "30", "0.2", "0.7"])
+            .arg(env!("CARGO_BIN_EXE_e"))
+            .args([
+                "--no-save",
+                "--no-extensions",
+                "--no-tools",
+                "--model",
+                "mock/audit",
+            ])
+            .current_dir(&workspace)
+            .env("E_HOME", &home.dir)
+            .env("CAP_PROMPT", prompt)
+            .env("CAP_EXIT", "\u{3}\u{3}")
+            .env("CAP_EXIT_WAIT", "2")
+            .env_remove("CAP_WAIT_FOR")
+            .env_remove("CAP_RESIZE_AFTER")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let raw = std::fs::read(&capture).unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains(marker), "{name} panel never opened");
+        // ptycap saves bytes before its fallback SIGTERM. These cleanup bytes
+        // prove Ctrl+C itself exited, not the capture script's forced stop.
+        assert!(text.contains("\x1b[?2004l"), "Ctrl+C did not exit {name}");
+        if name == "trust" {
+            assert!(
+                !text.contains("\x1b]0;BOUNTY_INJECTED\x07"),
+                "path controls escaped through the trust UI or tab title"
+            );
+            assert!(
+                !home.dir.join("trust.json").exists(),
+                "exit wrote a trust decision"
+            );
+        }
+    }
+}
