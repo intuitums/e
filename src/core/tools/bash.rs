@@ -78,12 +78,11 @@ impl Drop for BackgroundRegistry {
             .unwrap_or_else(|error| error.into_inner())
             .values()
         {
-            if process
+            let exit = process
                 .exit
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .is_none()
-            {
+                .unwrap_or_else(|error| error.into_inner());
+            if exit.is_none() {
                 kill_group(process.pid);
             }
         }
@@ -114,12 +113,8 @@ fn untrack_group(pid: u32) {
 
 /// Kill every live shell process group before the owning e process exits.
 pub fn kill_tracked_processes() {
-    let groups = PROCESS_GROUPS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-        .unwrap_or_default();
-    for pid in groups {
+    let mut groups = PROCESS_GROUPS.lock().unwrap_or_else(|e| e.into_inner());
+    for pid in groups.take().unwrap_or_default() {
         kill_group(pid);
     }
 }
@@ -215,8 +210,8 @@ fn start_background(command: &str, cwd: &Path, registry: &Arc<BackgroundRegistry
     });
     if !register_background(registry, id.clone(), process.clone()) {
         kill_group(pid);
-        let _ = child.wait();
         untrack_group(pid);
+        let _ = child.wait();
         return failure("bash: background process limit reached; check or stop existing handles");
     }
 
@@ -274,8 +269,8 @@ fn drain_into_background<R: std::io::Read>(mut pipe: R, process: Arc<BackgroundP
     }
 }
 
-/// Wait for the child so it never becomes a zombie, then record how it
-/// ended once both pipes have drained.
+/// Keep the leader unreaped while descendants hold pipes, reserving its PID.
+/// Reaping and retiring the kill handle share locks with both shutdown paths.
 fn reap_background(
     mut child: Child,
     process: Arc<BackgroundProcess>,
@@ -283,13 +278,30 @@ fn reap_background(
     stderr_thread: Option<std::thread::JoinHandle<()>>,
     registry: std::sync::Weak<BackgroundRegistry>,
 ) {
-    let status = child.wait();
     if let Some(t) = stdout_thread {
         let _ = t.join();
     }
     if let Some(t) = stderr_thread {
         let _ = t.join();
     }
+    let (status, mut exit) = loop {
+        let exit = process.exit.lock().unwrap_or_else(|e| e.into_inner());
+        let mut groups = PROCESS_GROUPS.lock().unwrap_or_else(|e| e.into_inner());
+        let status = match child.try_wait() {
+            Ok(None) => {
+                drop(groups);
+                drop(exit);
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Ok(Some(status)) => Ok(status),
+            Err(error) => Err(error),
+        };
+        if let Some(groups) = groups.as_mut() {
+            groups.remove(&process.pid);
+        }
+        break (status, exit);
+    };
     let outcome = match status {
         Ok(status) => {
             #[cfg(unix)]
@@ -307,12 +319,12 @@ fn reap_background(
         }
         Err(_) => ExitOutcome::Exited(-1),
     };
-    *process.exit.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+    *exit = Some(outcome);
+    drop(exit);
     process.finished_sequence.store(
         BACKGROUND_FINISHED_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         Ordering::Relaxed,
     );
-    untrack_group(process.pid);
     if let Some(registry) = registry.upgrade() {
         prune_background(&mut registry.jobs.lock().unwrap_or_else(|e| e.into_inner()));
     }
@@ -323,8 +335,18 @@ fn query_background(registry: &BackgroundRegistry, id: &str, kill: bool) -> Tool
     let Some(process) = find_background(registry, id) else {
         return failure(&format!("bash: no background process with handle {id}"));
     };
-    if kill {
-        kill_group(process.pid);
+    // Hold the exit lock through signaling so the reaper cannot release and
+    // reuse the PID between the liveness check and kill.
+    let signalled = {
+        let exit = process.exit.lock().unwrap_or_else(|e| e.into_inner());
+        if kill && exit.is_none() {
+            kill_group(process.pid);
+            true
+        } else {
+            false
+        }
+    };
+    if signalled {
         // Give the reaper a brief window to observe the exit and record it.
         let deadline = Instant::now() + Duration::from_millis(500);
         while process
@@ -439,7 +461,10 @@ where
     if args["background"].as_bool().unwrap_or(false) {
         return start_background(command, cwd, &state.background);
     }
-    let timeout = args["timeout"].as_u64().unwrap_or(120).clamp(1, 600);
+    let timeout = match super::integer_arg(args, "timeout") {
+        Ok(timeout) => timeout.unwrap_or(120).clamp(1, 600),
+        Err(message) => return failure(&format!("bash: {message}")),
+    };
 
     let mut cmd = Command::new("bash");
     cmd.arg("-lc")
@@ -795,6 +820,50 @@ fn failure(message: &str) -> ToolOutput {
 
 #[cfg(test)]
 mod tests {
+
+    /// A leader's zombie reserves its PID until inherited pipes have drained.
+    #[cfg(unix)]
+    #[test]
+    fn background_reaper_reserves_pid_while_pipes_are_open() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let process = std::sync::Arc::new(super::BackgroundProcess {
+            pid,
+            command: String::new(),
+            output: std::sync::Mutex::new(Vec::new()),
+            total_bytes: std::sync::Mutex::new(0),
+            exit: std::sync::Mutex::new(None),
+            finished_sequence: std::sync::atomic::AtomicU64::new(0),
+        });
+        let (release, wait) = std::sync::mpsc::channel();
+        let pipe = std::thread::spawn(move || {
+            let _ = wait.recv();
+        });
+        let reaper = std::thread::spawn(move || {
+            super::reap_background(child, process, Some(pipe), None, std::sync::Weak::new())
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let reserved = loop {
+            let state = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            if String::from_utf8_lossy(&state.stdout).contains('Z') {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        release.send(()).unwrap();
+        reaper.join().unwrap();
+        assert!(reserved, "leader was reaped before inherited pipes closed");
+    }
+
     use super::*;
 
     fn finished(sequence: u64) -> Arc<BackgroundProcess> {
@@ -806,6 +875,45 @@ mod tests {
             exit: Mutex::new(Some(ExitOutcome::Exited(0))),
             finished_sequence: AtomicU64::new(sequence),
         })
+    }
+
+    /// A finished handle's pid may already belong to someone else. Here an
+    /// unrelated group leader wears that pid; killing the handle must leave
+    /// it alone.
+    #[cfg(unix)]
+    #[test]
+    fn killing_a_finished_handle_does_not_signal_its_reused_pid() {
+        let mut bystander = Command::new("sleep");
+        bystander.arg("30").stdin(Stdio::null());
+        unsafe {
+            bystander.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut bystander = bystander.spawn().unwrap();
+        let registry = BackgroundRegistry::default();
+        let process = Arc::new(BackgroundProcess {
+            pid: bystander.id(),
+            command: String::new(),
+            output: Mutex::new(Vec::new()),
+            total_bytes: Mutex::new(0),
+            exit: Mutex::new(Some(ExitOutcome::Exited(0))),
+            finished_sequence: AtomicU64::new(1),
+        });
+        assert!(register_background(&registry, "done".into(), process));
+
+        let out = query_background(&registry, "done", true);
+        assert_eq!(out.summary, "exited 0");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "an unrelated process group was killed through a stale handle"
+        );
+        kill_group(bystander.id());
+        let _ = bystander.wait();
     }
 
     #[test]

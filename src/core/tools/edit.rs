@@ -1,6 +1,7 @@
 //! The edit tool: exact single-occurrence string replacement.
 
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::path::Path;
 
 use super::{resolve, schema_object, ToolOutcome, ToolOutput};
@@ -8,7 +9,7 @@ use super::{resolve, schema_object, ToolOutcome, ToolOutput};
 pub fn schema() -> Value {
     schema_object(
         "edit",
-        "Replace an exact string in a file. old_string must occur exactly once and is the file's raw text — never include the line-number prefix the read tool adds. Fails if the file changed on disk since it was last read.",
+        "Replace an exact string in a file. old_string must occur exactly once and is the file's raw text — never include the line-number prefix the read tool adds. Line endings: in a CRLF file, when old_string does not match as written it is matched with CRLF read as LF (as read shows it) and the result is written back as CRLF. Fails if the file changed on disk since it was last read.",
         json!({
             "path": {"type": "string"},
             "old_string": {"type": "string", "description": "Exact text to replace, including whitespace"},
@@ -45,7 +46,23 @@ pub fn run(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput {
         Ok(t) => t,
         Err(e) => return err(format!("edit {path}: {e}"), path),
     };
-    let occurrences = text.matches(old).count();
+    // Match the raw bytes first. A CRLF file is shown to the model with plain
+    // newlines (read strips the `\r`), so a multi-line old_string built from
+    // what it saw cannot match raw; retry on the LF-normalized text and put
+    // CRLF back on the result. Only a uniformly CRLF file qualifies: the
+    // write-back re-ends every line, which on a mixed file would rewrite
+    // lines the edit never touched.
+    let normalized = text.matches(old).count() == 0 && uniformly_crlf(&text);
+    let (subject, old, new): (Cow<str>, Cow<str>, Cow<str>) = if normalized {
+        (
+            text.replace("\r\n", "\n").into(),
+            old.replace("\r\n", "\n").into(),
+            new.replace("\r\n", "\n").into(),
+        )
+    } else {
+        (text.as_str().into(), old.into(), new.into())
+    };
+    let occurrences = subject.matches(&*old).count();
     if occurrences == 0 {
         return err(format!("edit {path}: old_string not found"), path);
     }
@@ -55,7 +72,10 @@ pub fn run(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput {
             path,
         );
     }
-    let updated = text.replacen(old, new, 1);
+    let mut updated = subject.replacen(&*old, &new, 1);
+    if normalized {
+        updated = updated.replace('\n', "\r\n");
+    }
     match super::staged_write(&full, updated.as_bytes()) {
         Ok(()) => {
             super::note_seen(state, &full);
@@ -86,4 +106,11 @@ pub fn run(args: &Value, cwd: &Path, state: &super::ToolRuntime) -> ToolOutput {
         }
         Err(e) => err(format!("edit {path}: {e}"), path),
     }
+}
+
+/// Whether `text` has at least one line break and every one of them is
+/// CRLF — the only shape a normalized edit can be written back to exactly.
+fn uniformly_crlf(text: &str) -> bool {
+    let crlf = text.matches("\r\n").count();
+    crlf > 0 && crlf == text.matches('\n').count()
 }

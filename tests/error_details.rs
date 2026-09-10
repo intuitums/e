@@ -97,3 +97,42 @@ async fn no_save_failures_still_emit_redacted_backend_details() {
     assert_eq!(report.detail, "rejected [redacted]");
     assert!(agent.session_path().is_none());
 }
+
+/// Both shared-classifier callers retain wire codes and response correlation IDs.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_stream_error_classifier_keeps_diagnostics_in_both_dialects() {
+    use e::core::providers::{self, ChatMessage, Event, FailureCause, Request};
+    let _lock = env_lock();
+    let home = Home::new("shared-error-diagnostics");
+    home.auth(r#"{"mock":{"key":"synthetic-key"}}"#);
+    for api in [Api::Completions, Api::Google] {
+        let body = "data: {\"error\":{\"code\":\"server_error\",\"message\":\"Provider disconnected unexpectedly\"}}\n\n";
+        let (port, server) = serve_raw(vec![format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nx-request-id: shared-123\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()
+        )]);
+        let (mut events, task) = providers::stream(Request {
+            model: test_model("mock", port, api),
+            system: "test".into(),
+            messages: vec![ChatMessage::user("test")],
+            effort: None,
+            session_id: String::new(),
+            tools: Vec::new(),
+        });
+        let mut failure = None;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::Error(error) => failure = Some(error),
+                Event::Done(_) => panic!("error frame reported success"),
+                _ => {}
+            }
+        }
+        task.await.unwrap();
+        server.join().unwrap();
+        let failure = failure.expect("missing provider error");
+        assert_eq!(failure.cause, FailureCause::ProviderUnavailable);
+        assert_eq!(failure.provider_code.as_deref(), Some("server_error"));
+        assert_eq!(failure.response.request_id.as_deref(), Some("shared-123"));
+        assert_eq!(failure.response.http_status, Some(200));
+    }
+}

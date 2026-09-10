@@ -118,3 +118,21 @@ fn live_output_keeps_new_bytes_after_reaching_its_memory_cap() {
     assert!(rows.contains("NEWEST"));
     assert!(rows.contains("earlier output omitted"));
 }
+
+/// Shell offsets and hanging wrap whitespace must use the same cursor indices.
+#[test]
+fn shell_cursor_crosses_hanging_whitespace_without_losing_the_prefix() {
+    let theme = load_bundled(false).unwrap();
+    let mut editor = Editor::new();
+    editor.set_text("!abcdef  gh");
+    editor.render(&theme, 8, 8);
+    editor.key(Key::Home);
+    for _ in 0..8 {
+        editor.key(Key::Right);
+    }
+    assert_eq!(editor.cursor(), 8);
+    assert!(strip_ansi(&editor.render(&theme, 8, 8)[1]).starts_with("! abcdef"));
+    editor.key(Key::Down);
+    assert_eq!(editor.cursor(), 11);
+    assert_eq!(editor.text(), "!abcdef  gh");
+}

@@ -19,6 +19,54 @@ the pipeline publishes.
 - `./x ui` checks terminal frames for tool trees, composer placement, shell
   styling, short errors, and diff colors on Linux and macOS CI.
 
+- Review fixes for the audit: background handles reserve their PID until pipes
+  close; failed new-file copies remove their partial target; metadata errors
+  fail freshness checks closed. Read windows reject oversized first lines with
+  an offset to skip them, and integer arguments reject overflow without rounding.
+- OAuth refresh waits are scoped to each home and provider; fresh Codex tokens
+  bypass them. Extension exit notices survive EOF immediately after initialize.
+  Stream error codes distinguish authentication failures and transient server
+  disconnects while preserving hard-quota classification.
+
+- Sessions survive a crash: a torn final line is truncated on reopen instead
+  of fusing with the next record, and dangling tool calls or orphaned
+  reasoning blocks are repaired anywhere in a history (on `/tree` too), so a
+  resumed session stays resumable and replayable on every dialect.
+- Providers: Anthropic and Together live model sync no longer discards every
+  chat model (`type` is a deny-list of non-chat kinds now, and the Anthropic
+  list asks for 1000 entries); a mid-stream `{"error":…}` frame in a
+  completions or Gemini body surfaces as the provider's error instead of a
+  clean success or a bare stall; provider-level `context_window`,
+  `max_output`, `effort`, `thinking`, and `pricing` in models.json apply to
+  built-in seed models as documented; parallel Anthropic tool results ride
+  in one user turn. models.md lists the `chatgpt` catalog strategy.
+- Tools: `write` creates files on link-less filesystems (exFAT) and after an
+  external delete; `edit` matches across CRLF line breaks and keeps the
+  file's endings; `read` cuts on a whole line and says which offset to
+  continue from; `grep` fails on a missing path and stops on a file whose
+  reads keep failing instead of spinning; `offset`, `limit`, and `timeout`
+  accept integral floats and numeric strings; a finished background handle
+  is never signalled again (pid reuse); a writable file inside a read-only
+  directory can be edited.
+- Extensions: a runtime crash is announced once in the transcript (louder
+  when the extension owned a `tool_call` or `input` hook); an over-long
+  stderr line is discarded instead of closing the pipe and killing the
+  extension; children are reaped on exit and shutdown; notice-only input
+  verdicts are shown; the worktree example no longer fetches inside its
+  5 s startup budget, and the MCP guide notes the `npx -y` cold start; the
+  protocol.rs header matches what the host sends.
+- Config and CLI: self-update declines on platforms with no release
+  artifact instead of installing the x86_64-gnu tarball over a source build;
+  concurrent OAuth refreshes are serialized so one refresh token is never
+  redeemed twice; shift+letter and `-`/`+` chords bind; `doctor` or
+  `providers` behind an extension flag is a usage error, not a prompt; the
+  help text no longer claims piped stdin is read.
+- TUI: a caught panic (paint worker, tool task, turn worker) no longer drops
+  the terminal out of raw mode; the vertical table fallback and link
+  destinations with spaces keep OSC 8 sequences whole; `/models` scrolls
+  to the current model; CRLF pastes keep one newline per line; the
+  composer hangs seam whitespace off the row and moves ↑/↓ by display
+  column over wide characters.
 - GPT-6 Astra, OpenAI's new flagship, is seeded on both OpenAI providers: the
   API (`openai`, 1.05M window, `xhigh`/`max` efforts included) and ChatGPT
   Codex (`openai-codex`, 272k codex lane). The GPT-5.6 trio is seeded on the

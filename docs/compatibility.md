@@ -66,6 +66,16 @@ Unix writes also check that the target still names the opened inode before
 and after copying. A detected external replacement fails the write so the
 caller can reread and retry; external writers still need their own coordination.
 
+Tool integer arguments accept JSON unsigned integers, integral JSON floats below
+2^64, and decimal integer strings within the u64 range. Out-of-range values fail
+validation instead of saturating. A read line larger than the output window is
+reported as an error with an offset to skip it, never as a complete truncated
+line. Files and saved sessions need no migration.
+
+On filesystems without hard links, a failed new-file copy removes its partial
+target when it still identifies the created file. Freshness checks allow a
+confirmed deletion but fail closed on other metadata errors.
+
 ## Not a supported contract
 
 The Cargo library target lets the binary, the integration tests, and the

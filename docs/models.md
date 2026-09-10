@@ -44,8 +44,10 @@ built-in's provider and id replaces it — the file wins, like themes.
 - `catalog` controls only live model discovery and is independent from
   `api`: `openai` (default, `GET /models` + `data[].id`), `anthropic`
   (`GET /v1/models` + x-api-key), `google` (`models[].name` + x-goog-api-key),
-  or `none`. This separation matters for gateways that accept one inference
-  dialect but expose another provider's catalog shape.
+  `chatgpt` (the ChatGPT backend's picker: `models[].slug` with the `-wm`
+  suffix stripped, work-mode entries only, `max_tokens` as the context
+  window), or `none`. This separation matters for gateways that accept one
+  inference dialect but expose another provider's catalog shape.
 - `context_window` may sit on the provider (default for its models) or on a
   model object; it drives the statusline percentage and auto-compaction, so
   set it truthfully. Default: 200000.

@@ -11,9 +11,12 @@ falls back to e's built-in bindings untouched.
 }
 ```
 
-- A chord is `[ctrl+][alt+][shift+]<key>`, any order, case-insensitive.
-  `<key>` is `enter`, `backspace`, `delete`, `left`, `right`, `up`, `down`,
-  `home`, `end`, or a single character.
+- A chord is `[ctrl+][alt+][shift+]<key>`, modifiers in any order,
+  case-insensitive. `<key>` is `enter`, `backspace`, `delete`, `left`,
+  `right`, `up`, `down`, `home`, `end`, or a single character — `+` and `-`
+  included (`ctrl+-`, `ctrl++`): modifiers are read off the front and
+  whatever remains is the key. A capital letter is spelled with its
+  modifier, `shift+a`, since that is how the terminal reports it.
 - The value is an action name — `enter`, `newline`, `backspace`, `delete`,
   `left`, `right`, `up`, `down`, `word_left`, `word_right`, `home`, `end`,
   `kill_to_end`, `kill_to_start`, `kill_word` — or `"none"` to unbind a

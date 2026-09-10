@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use crate::core::providers::runtime::Authorization;
 use crate::core::providers::{
     http, require_success, retry_after_seconds, send_request, with_attribution, Event,
-    FailureCause, FinishReason, ProviderError, Request, SseStream, StreamEnd, ToolCall,
+    FinishReason, ProviderError, Request, SseStream, StreamEnd, ToolCall,
 };
 
 /// Provider/model/level combinations that rejected our `reasoning_effort`
@@ -62,38 +62,6 @@ async fn send(
         request,
     ))
     .await
-}
-
-/// Gateways may report an error after HTTP headers and partial text. Keep
-/// its message and classify numeric or named codes without treating DONE as
-/// success or publishing unfinished tool calls.
-fn stream_error(error: &serde_json::Value) -> ProviderError {
-    let message = error["message"]
-        .as_str()
-        .or_else(|| error.as_str())
-        .unwrap_or("unknown provider error");
-    let text_cause = crate::core::providers::classify_text(&error.to_string());
-    let code = error
-        .get("code")
-        .filter(|code| !code.is_null())
-        .unwrap_or(&error["type"]);
-    let code = code
-        .as_str()
-        .map(String::from)
-        .unwrap_or_else(|| code.to_string());
-    let cause = if text_cause == Some(FailureCause::QuotaExhausted) {
-        FailureCause::QuotaExhausted
-    } else {
-        match code.as_str() {
-            "401" | "403" | "invalid_api_key" | "authentication_error" | "permission_error" => {
-                FailureCause::Auth
-            }
-            "429" => FailureCause::RateLimited,
-            "408" | "500" | "502" | "503" | "504" => FailureCause::ProviderUnavailable,
-            _ => text_cause.unwrap_or(FailureCause::Rejected),
-        }
-    };
-    ProviderError::frame(message, cause)
 }
 
 pub async fn run(
@@ -251,15 +219,11 @@ pub async fn run(
                     continue;
                 }
             };
+            // Error frames fail the response without flushing unfinished tool calls.
             if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
-                return Err(stream_error(error)
-                    .with_response(sse.response.clone())
-                    .with_code_value(
-                        error
-                            .get("code")
-                            .filter(|v| !v.is_null())
-                            .unwrap_or(&error["type"]),
-                    ));
+                return Err(
+                    ProviderError::from_error_frame(error).with_response(sse.response.clone())
+                );
             }
             if let Some(delta) = value["choices"][0]["delta"].as_object() {
                 if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {

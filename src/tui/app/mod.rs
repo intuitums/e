@@ -1213,7 +1213,9 @@ impl App {
     /// Insert text normally, or turn a pasted list of image paths into
     /// attachments — but only into a free composer: over an open surface a
     /// paste is plain text, so it cannot silently stack onto a draft the
-    /// user is not looking at.
+    /// user is not looking at. Line endings normalise to `\n`: CRLF first,
+    /// so a Windows clipboard does not double every line, then the bare CR
+    /// some terminals send for a pasted newline.
     fn paste(&mut self, text: &str) {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         if self.composer_free() {
@@ -2307,8 +2309,9 @@ fn tree_items(nodes: &[crate::core::session::Node]) -> Vec<(String, String, bool
 }
 
 /// The rewind target for a chosen node: its parent, the message history before
-/// it, and its prompt text for the composer. None means the id no longer
-/// resolves or the ancestor path is corrupt.
+/// it (repaired the same way a resume's is, so a crash-cut ancestor never
+/// replays as a dangling call), and its prompt text for the composer. None
+/// means the id no longer resolves or the ancestor path is corrupt.
 fn rewind_target(
     nodes: &[crate::core::session::Node],
     node_id: &str,
@@ -2333,10 +2336,11 @@ fn rewind_target(
         cursor = node.parent.clone();
     }
     path_ids.reverse();
-    let messages = path_ids
+    let mut messages = path_ids
         .iter()
         .filter_map(|id| by_id.get(id.as_str()).map(|n| n.message.clone()))
         .collect();
+    crate::core::session::repair_history(&mut messages);
     Some((head, messages, target.message.content.clone()))
 }
 
@@ -2438,14 +2442,22 @@ async fn run_scoped(
     } = options;
     // A panic mid-frame must not strand the shell in raw mode with a hidden
     // cursor or kitty keyboard flags — restore the terminal first, then
-    // report as usual. (\x1b[<u pops the keyboard enhancement stack.)
+    // report as usual. (\x1b[<u pops the keyboard enhancement stack.) Only
+    // a panic on this thread — the frame loop, driven by the runtime's
+    // block_on — is fatal to the session; the paint thread, tool tasks and
+    // the turn worker all run elsewhere and catch their own panics to keep
+    // the session alive, so the hook must leave the terminal alone for them
+    // (the hook fires before any catch_unwind gets its say).
     {
         let default_hook = std::panic::take_hook();
+        let frame_thread = std::thread::current().id();
         std::panic::set_hook(Box::new(move |info| {
-            let _ = terminal::disable_raw_mode();
-            print!("\x1b[<u\x1b[?2004l\x1b[?25h\r\n");
-            use std::io::Write as _;
-            let _ = std::io::stdout().flush();
+            if std::thread::current().id() == frame_thread {
+                let _ = terminal::disable_raw_mode();
+                print!("\x1b[<u\x1b[?2004l\x1b[?25h\r\n");
+                use std::io::Write as _;
+                let _ = std::io::stdout().flush();
+            }
             default_hook(info);
         }));
     }
@@ -3581,6 +3593,13 @@ mod tests {
 
         assert!(app.composer_images.is_empty(), "no attach over a surface");
         assert_eq!(app.editor.text(), path.display().to_string());
+    }
+
+    #[test]
+    fn a_crlf_paste_keeps_one_newline_per_line() {
+        let mut app = session_app();
+        app.paste("line1\r\nline2\r\n");
+        assert_eq!(app.editor.text(), "line1\nline2\n");
     }
 
     #[test]

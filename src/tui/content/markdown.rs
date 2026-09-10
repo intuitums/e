@@ -28,8 +28,23 @@ use crate::tui::render::*;
 use crate::tui::theme::Theme;
 
 /// A link open carrying a document-scoped id, so a link split across
-/// wrapped rows stays one link in id-aware terminals.
+/// wrapped rows stays one link in id-aware terminals. Whitespace — legal in
+/// a `<…>` destination — is percent-encoded: the word-wrapper splits on
+/// spaces and must never find one inside the sequence.
 fn osc8_id(id: u64, url: &str) -> String {
+    let url: String = url
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() {
+                c.encode_utf8(&mut [0; 4])
+                    .bytes()
+                    .map(|b| format!("%{b:02X}"))
+                    .collect()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
     format!("\x1b]8;id=e-{id};{url}\x1b\\")
 }
 const OSC8_CLOSE: &str = "\x1b]8;;\x1b\\";
@@ -997,14 +1012,29 @@ fn table_vertical_lines(out: &mut Vec<String>, content: &str, inner_width: usize
         while i < chars.len() {
             let c = chars[i];
             if c == '\x1b' {
-                // Copy the whole escape sequence at zero columns.
+                // Copy the whole escape sequence at zero columns: CSI to its
+                // final letter, OSC (hyperlinks) to BEL or ST — a split
+                // mid-sequence would count the URI as visible columns and
+                // leave the terminal reading the box as OSC data.
                 row.push(c);
                 i += 1;
+                let osc = chars.get(i) == Some(&']');
                 while i < chars.len() {
                     let n = chars[i];
                     row.push(n);
                     i += 1;
-                    if n.is_ascii_alphabetic() || n == '\\' || n == '\x07' {
+                    if osc {
+                        if n == '\x07' {
+                            break;
+                        }
+                        if n == '\x1b' {
+                            if let Some(&t) = chars.get(i) {
+                                row.push(t);
+                                i += 1;
+                            }
+                            break;
+                        }
+                    } else if n.is_ascii_alphabetic() {
                         break;
                     }
                 }
