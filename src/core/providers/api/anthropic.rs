@@ -209,7 +209,8 @@ pub async fn run(
     )
     .await?;
 
-    let mut sse = SseStream::new(response.bytes_stream());
+    let response_context = crate::core::providers::ResponseContext::from_response(&response);
+    let mut sse = SseStream::new(response.bytes_stream()).with_response(response_context);
     // Tool input JSON streams in fragments per content block index.
     let mut open_tools: std::collections::BTreeMap<usize, ToolCall> = Default::default();
     // A thinking block accumulates text and its opaque signature; on stop it
@@ -387,7 +388,9 @@ pub async fn run(
                             _ => text_cause.unwrap_or(FailureCause::Rejected),
                         }
                     };
-                    return Err(ProviderError::frame(message, cause));
+                    return Err(ProviderError::frame(message, cause)
+                        .with_response(sse.response.clone())
+                        .with_code(value["error"]["type"].as_str()));
                 }
                 _ => {}
             }

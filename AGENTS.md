@@ -9,6 +9,7 @@ cargo build          # fast dev build
 ./x test             # the whole behavioral contract
 ./x check            # format, lint, tests, and security-surface guard
 ./x bench            # release-mode performance budgets
+./x ui               # PTY frame/color checks; Python setup in tests/ui/README.md
 ```
 
 `./x test` is not optional. The visual design is pinned byte-for-byte in
@@ -107,8 +108,9 @@ surface? Route it through `panel.rs` so it can't diverge.
   override, not a constant. When data isn't enough there is the extension API
   (`core/extensions/`, docs/extensions.md) — grow its protocol by need, never by
   symmetry, and keep hooks fail-open.
-- Verify UI changes with a real frame, not by reasoning about bytes. `scripts/`
-  has a pty capture-and-replay harness; that is how the look gets checked.
+- Verify UI changes with a real frame, not by reasoning about bytes. `./x ui`
+  runs checked PTY scenarios under `tests/ui/`, sharing the capture/replay
+  helpers in `scripts/`. See `tests/ui/README.md` for setup and retained frames.
 - `scripts/guard.sh` pins the trust boundary: allowed network hosts, the
   sovereign home, store-only config writes, where `unsafe` lives, SHA-pinned
   CI actions. If a change legitimately moves a boundary, update the guard in

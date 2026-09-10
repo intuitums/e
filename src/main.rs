@@ -497,6 +497,7 @@ fn rpc_options(defaults: &Options, request: &RpcRequest) -> Result<Options, Stri
 struct TurnAccumulator {
     output: String,
     error: Option<String>,
+    error_details: Option<e::core::agent::failure::ErrorDetails>,
     warnings: Vec<String>,
     aborted: bool,
     terminal: bool,
@@ -542,6 +543,9 @@ impl TurnAccumulator {
                 "{} — retrying ({attempt}/{limit}) in {delay_secs}s: {reason}",
                 cause.label()
             )),
+            SessionEvent::ErrorDetails(details) => {
+                self.error_details = Some(details.as_ref().clone())
+            }
             SessionEvent::Error(message) => self.error = Some(message.clone()),
             SessionEvent::TurnEnd { aborted } => {
                 self.aborted = *aborted;
@@ -575,6 +579,7 @@ impl TurnAccumulator {
             "effort": effort,
             "aborted": self.aborted,
             "error": self.error,
+            "error_details": self.error_details,
             "warnings": self.warnings,
             "usage": {
                 "input_tokens": self.input_tokens,

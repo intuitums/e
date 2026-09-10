@@ -27,3 +27,29 @@ falls back to e's built-in bindings untouched.
   since the app-level handler runs first.
 
 Apply instantly with `/reload` (or after closing `/settings`).
+
+## Global cancellation and trust navigation
+
+Ctrl+C works in every panel. The first press cancels active work and sign-in,
+clears the draft and any held launch prompt, closes trust and queue navigation,
+and arms exit. Press it again within 1.5 seconds to quit.
+Quitting at the trust question does not record a trust decision.
+
+Long trust questions and choices wrap. If they exceed the terminal height,
+PgUp/PgDn scroll the text without changing the choice; Up/Down change the choice
+and reveal its label. The scrolling hint can be overridden with
+`"trust_scroll_hint"` in `~/.e/settings.json`.
+
+Pastes normalize CRLF and standalone CR to one newline each. Terminal control
+characters in a draft display as replacement characters, while tabs display
+as spaces. The underlying draft retains those characters for submission.
+Up/Down preserve display columns across wide and combining characters.
+
+## Shell composer
+
+Typing `!` as the first character replaces the first `┃` gutter with a green
+`!`, using the theme's `bashMode` token. Command text keeps its normal color;
+wrapped lines keep neutral rails. Deleting the leading `!` restores the normal
+composer. The draft and submitted command retain the original prefix. When
+that prefix is `! `, its space remains editable in the gutter, with its own
+cursor and selection highlight.

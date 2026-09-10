@@ -97,6 +97,6 @@ fn tool_labels_never_emit_terminal_controls() {
     assert!(!frame.contains("\x1b]52"));
     assert!(!frame.contains("\x1b[2J"));
     transcript.blocks[0].start_tool(1);
-    let live = transcript.blocks[0].overlay_rows(&theme, 180);
+    let live = transcript.blocks[0].lines_for_test(&theme, 180);
     assert!(!live.join("\n").contains("\x1b]52"));
 }

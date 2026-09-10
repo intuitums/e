@@ -193,14 +193,10 @@ impl Screen {
         let rows = self.rows as usize;
         let len = lines.len();
         let shrank = len < self.prev.len();
-        if shrank && self.anchor + len <= self.viewport_top {
-            // Content and overlays can collapse by more than a screen, leaving
-            // the dock above the logical window. Rebase only when the tail has
-            // actually fallen above the screen top — the tail (buffer row
-            // len-1) sits at screen row `anchor + len - 1 - viewport_top`, off
-            // the top exactly when `anchor + len <= viewport_top`. Rebasing on
-            // any shrink would repaint over the pre-launch rows still visible
-            // above a frame that launched near the bottom.
+        if shrank && (self.anchor + len <= self.viewport_top || len >= rows) {
+            // A full-height frame has already scrolled pre-launch rows away.
+            // Rebase its tail on every shrink so the dock stays bottom-pinned.
+            // Short inline frames retain their launch anchor while visible.
             self.anchor = 0;
             self.viewport_top = len.saturating_sub(rows);
         }
@@ -596,6 +592,23 @@ mod tests {
             "the composer disappeared: {output:?}"
         );
         assert_eq!(screen.viewport_top, 0);
+    }
+
+    #[test]
+    fn small_shrinks_keep_a_full_height_dock_on_the_last_row() {
+        let mut screen = Screen::new(80, 10, 7);
+        screen
+            .paint_to(lines(40, "history"), &mut Vec::new())
+            .unwrap();
+        for count in [39, 35, 10] {
+            let mut frame = lines(count, "history");
+            frame[count - 1] = "dock".into();
+            let mut bytes = Vec::new();
+            screen.paint_to(frame, &mut bytes).unwrap();
+            assert_eq!(screen.anchor + count - screen.viewport_top, 10);
+            assert_eq!(screen.shadow[9].as_deref(), Some("dock"));
+            assert!(!bytes.windows(4).any(|b| b == b"\x1b[3J"));
+        }
     }
 
     #[test]

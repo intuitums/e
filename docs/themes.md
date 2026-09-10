@@ -20,9 +20,15 @@ A theme is a JSON file: `~/.e/themes/<name>.json`. Every name in
   JSON verbatim; save it under a new name and edit.
 
 Tokens you will most likely touch: `userMessageText` (the composer rail and
-user text), `dim`, `border` (dividers), `muted`, `bashMode` (the `!` rail),
+user text), `dim`, `border` (dividers), `muted`, `bashMode` (the `!` shell marker),
 `accent`, and the `syntax*` family for code tinting. Unknown tokens are
 ignored; missing tokens fall back to the terminal default — a partial theme
 is valid.
 
 Apply instantly with `/reload` (or pick it in `/settings`).
+
+Edit/write summary counts use `toolDiffAddedMarker` and `toolDiffRemovedMarker`
+for truecolor terminals, or `toolDiffAddedMarkerFallback` and
+`toolDiffRemovedMarkerFallback` otherwise. These also color the review's diff
+markers. The defaults are green for additions and red for deletions; labels and
+tree rails remain neutral.

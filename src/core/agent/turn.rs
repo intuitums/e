@@ -74,6 +74,8 @@ pub(super) async fn run(context: Context, compact_only: bool) -> Outcome {
     // Steps this turn has run (one request each). The cap is a
     // runaway backstop far above real work, not a working budget.
     let mut steps = 0u32;
+    let mut settled_tools = 0usize;
+    let mut failed_tools = 0usize;
     let outcome = 'turn: loop {
         if cancel.load(Ordering::SeqCst) {
             break Outcome::Cancelled;
@@ -327,7 +329,8 @@ pub(super) async fn run(context: Context, compact_only: bool) -> Outcome {
                     let nothing_produced = text.is_empty()
                         && calls.is_empty()
                         && reasoning_items.is_empty()
-                        && !reasoning_streamed;
+                        && !reasoning_streamed
+                        && assembly_bytes == 0;
                     // The attempt was in flight across a sleep that
                     // fits the window: the run keeps going. Nothing
                     // streamed means an immediate replay — not
@@ -422,6 +425,47 @@ pub(super) async fn run(context: Context, compact_only: bool) -> Outcome {
                             break 'stream;
                         }
                     }
+                    let retry_decision = failure::ErrorDetails::retry_decision(
+                        &err,
+                        !nothing_produced,
+                        max_attempts,
+                    );
+                    let details = failure::ErrorDetails {
+                        summary: failure::ErrorDetails::summary(&err).await,
+                        detail: err.diagnostic(),
+                        cause: err.cause,
+                        stage: err.stage,
+                        response: err.response.as_ref().clone(),
+                        provider_code: err.provider_code.clone(),
+                        provider: model.provider.clone(),
+                        model: model.id.clone(),
+                        timestamp_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            .min(u64::MAX as u128) as u64,
+                        attempt_elapsed_ms: attempt_started
+                            .elapsed()
+                            .as_millis()
+                            .min(u64::MAX as u128)
+                            as u64,
+                        step: steps,
+                        attempt,
+                        max_attempts,
+                        retry_after_secs: err.retry_after,
+                        partial_tool_argument_bytes: assembly_bytes,
+                        retry_decision,
+                        partial_text_bytes: text.len(),
+                        reasoning_received: reasoning_streamed || !reasoning_items.is_empty(),
+                        unexecuted_tool_calls: calls.len(),
+                        settled_tools,
+                        failed_tools,
+                        recovery: failure::ErrorDetails::recovery(err.cause, retry_decision),
+                    };
+                    log.record_error(details.clone()).await;
+                    let _ = events
+                        .send(SessionEvent::ErrorDetails(Box::new(details)))
+                        .await;
                     // Distinguish genuine exhaustion (the cause was
                     // retryable and nothing had streamed, but the
                     // budget ran out) from a failure that simply
@@ -777,6 +821,8 @@ pub(super) async fn run(context: Context, compact_only: bool) -> Outcome {
                         display: None,
                     },
                 };
+                settled_tools += 1;
+                failed_tools += usize::from(output.outcome.is_error());
                 last_context = last_context
                     .saturating_add((output.content.chars().count() as u64).div_ceil(4));
                 log.commit_async(ChatMessage::tool_result_with_meta(

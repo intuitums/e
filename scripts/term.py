@@ -8,8 +8,11 @@ class Screen(pyte.Screen):
     def write_process_input(self, *args, **kwargs):
         pass
 
-def replay(path, cols, rows):
-    """Replay PTY bytes and the capture's optional resize sidecar in order."""
+def replay(path, cols, rows, on_frame=None):
+    """Replay bytes and resizes; optionally inspect each completed sync frame.
+
+    The callback receives the live screen. Copy any cells retained beyond it.
+    """
     data = pathlib.Path(path).read_bytes()
     screen = Screen(cols, rows)
     stream = pyte.Stream(screen)
@@ -34,11 +37,19 @@ def replay(path, cols, rows):
                 text = text[: m.start()]
         stream.feed(text)
 
+    events = []
+    if on_frame is not None:
+        events.extend((match.end(), "frame", None)
+                      for match in re.finditer(re.escape(b"\x1b[?2026l"), data))
+    events.extend((size["offset"], "resize", size) for size in sizes)
     offset = 0
-    for size in sizes:
-        feed(data[offset:size["offset"]])
-        screen.resize(lines=size["rows"], columns=size["cols"])
-        offset = size["offset"]
+    for end, kind, size in sorted(events, key=lambda event: event[0]):
+        feed(data[offset:end])
+        if kind == "resize":
+            screen.resize(lines=size["rows"], columns=size["cols"])
+        else:
+            on_frame(screen)
+        offset = end
     feed(data[offset:], final=True)
     return screen
 

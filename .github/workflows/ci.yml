@@ -45,6 +45,24 @@ jobs:
       - name: Repository contract
         run: ./x check
 
+      - name: Terminal frame dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/e-ui-env"
+          "$RUNNER_TEMP/e-ui-env/bin/pip" install -r tests/ui/requirements.txt
+
+      - name: Terminal frame checks
+        run: PYTHON="$RUNNER_TEMP/e-ui-env/bin/python" ./x ui --out "$RUNNER_TEMP/e-ui-frames"
+
+      - name: Retain terminal frames on failure
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-frames-${{ runner.os }}
+          path: ${{ runner.temp }}/e-ui-frames
+          if-no-files-found: ignore
+          retention-days: 7
+
   performance:
     name: Performance budgets
     runs-on: ubuntu-latest

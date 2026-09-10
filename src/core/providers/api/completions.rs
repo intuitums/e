@@ -137,6 +137,7 @@ pub async fn run(
     let response = if matches!(first.status().as_u16(), 400 | 422) {
         let status = first.status();
         let retry_after = retry_after_seconds(&first);
+        let response_context = crate::core::providers::ResponseContext::from_response(&first);
         let text = first.text().await.unwrap_or_default();
         let lower = text.to_ascii_lowercase();
         // A validation rejection over an optional field we added is recoverable:
@@ -174,7 +175,9 @@ pub async fn run(
             }
             healed
         } else {
-            return Err(ProviderError::from_status(status, &text).with_retry_after(retry_after));
+            return Err(ProviderError::from_status(status, &text)
+                .with_retry_after(retry_after)
+                .with_response(response_context));
         }
     } else {
         require_success(first).await?
@@ -199,7 +202,8 @@ pub async fn run(
         }
     };
 
-    let mut sse = SseStream::new(response.bytes_stream());
+    let response_context = crate::core::providers::ResponseContext::from_response(&response);
+    let mut sse = SseStream::new(response.bytes_stream()).with_response(response_context);
     let mut finish = FinishReason::Normal;
     loop {
         let payload = sse.next().await?;
@@ -215,12 +219,11 @@ pub async fn run(
                     continue;
                 }
             };
-            // A failure after the headers arrives as a `data: {"error":…}`
-            // frame (OpenRouter also sets finish_reason "error"); without
-            // this the frame carries no delta, is skipped, and `[DONE]`
-            // ends the turn as a clean success.
-            if let Some(error) = value.get("error").filter(|e| !e.is_null()) {
-                return Err(ProviderError::from_error_frame(error));
+            // Error frames fail the response without flushing unfinished tool calls.
+            if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+                return Err(
+                    ProviderError::from_error_frame(error).with_response(sse.response.clone())
+                );
             }
             if let Some(delta) = value["choices"][0]["delta"].as_object() {
                 if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {

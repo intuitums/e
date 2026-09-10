@@ -207,6 +207,39 @@ impl SessionLog {
         Ok(())
     }
 
+    /// Append backend diagnostics beside the session without changing its format.
+    /// The session lock owns this sidecar too. Failed rollback retires both logs.
+    pub fn record_error(
+        &mut self,
+        details: crate::core::agent::failure::ErrorDetails,
+    ) -> std::io::Result<()> {
+        if !self.healthy {
+            return Err(std::io::Error::other(
+                "session log was retired after an incomplete write",
+            ));
+        }
+        let mut line = serde_json::to_string(&serde_json::json!({
+            "format_version": 1, "parent": self.current, "details": details,
+        }))?;
+        line.push('\n');
+        let path = self.path.with_extension("errors.jsonl");
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = file.metadata()?.permissions().mode() & 0o600;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+        append_checked(&mut file, &mut self.healthy, line.as_bytes())
+    }
+
     /// Move the node subsequent appends attach to. `/tree` calls this with
     /// an earlier node's id to rewind: the file is untouched, the next
     /// append grows a new branch instead of extending the old tail.
@@ -233,22 +266,7 @@ impl SessionLog {
     /// to the known-good end. If rollback itself fails, permanently retire the
     /// handle instead of ever turning that torn tail into interior corruption.
     fn append_record(&mut self, record: &[u8]) -> std::io::Result<()> {
-        if !self.healthy {
-            return Err(std::io::Error::other(
-                "session log was retired after an incomplete write",
-            ));
-        }
-        let good_len = self.file.metadata()?.len();
-        if let Err(write_error) = self.file.write_all(record) {
-            if let Err(rollback_error) = self.file.set_len(good_len) {
-                self.healthy = false;
-                return Err(std::io::Error::other(format!(
-                    "{write_error}; could not remove the partial session record: {rollback_error}"
-                )));
-            }
-            return Err(write_error);
-        }
-        Ok(())
+        append_checked(&mut self.file, &mut self.healthy, record)
     }
 
     pub fn path(&self) -> &Path {
@@ -445,6 +463,26 @@ impl SessionLog {
             current,
         })
     }
+}
+
+/// Append to either log, retiring their shared handle if rollback fails.
+fn append_checked(file: &mut File, healthy: &mut bool, record: &[u8]) -> std::io::Result<()> {
+    if !*healthy {
+        return Err(std::io::Error::other(
+            "session log was retired after an incomplete write",
+        ));
+    }
+    let good_len = file.metadata()?.len();
+    if let Err(write_error) = file.write_all(record) {
+        if let Err(rollback_error) = file.set_len(good_len) {
+            *healthy = false;
+            return Err(std::io::Error::other(format!(
+                "{write_error}; could not remove the partial session record: {rollback_error}"
+            )));
+        }
+        return Err(write_error);
+    }
+    Ok(())
 }
 
 /// The file's length up to the end of its last intact record: the whole
@@ -816,29 +854,41 @@ mod tests {
 
     #[test]
     fn a_log_is_retired_when_a_failed_append_cannot_be_rolled_back() {
-        // /dev/full rejects writes and truncation, exercising the otherwise
-        // difficult disk-full + failed-rollback path deterministically.
-        let file = OpenOptions::new().append(true).open("/dev/full").unwrap();
-        let lock_path = std::env::temp_dir().join(format!(
-            "e-dev-full-{}-{}.lock",
-            std::process::id(),
-            uuid::Uuid::now_v7()
-        ));
-        let mut session = SessionLog {
-            path: PathBuf::from("/dev/full"),
-            file,
-            healthy: true,
-            _lock: LockGuard::acquire(&lock_path).unwrap(),
-            current: None,
-        };
+        for diagnostic in [false, true] {
+            // /dev/full rejects writes and truncation, exercising the otherwise
+            // difficult disk-full + failed-rollback path deterministically.
+            let file = OpenOptions::new().append(true).open("/dev/full").unwrap();
+            let lock_path = std::env::temp_dir().join(format!(
+                "e-dev-full-{}-{}.lock",
+                std::process::id(),
+                uuid::Uuid::now_v7()
+            ));
+            let mut session = SessionLog {
+                path: PathBuf::from("/dev/full"),
+                file,
+                healthy: true,
+                _lock: LockGuard::acquire(&lock_path).unwrap(),
+                current: None,
+            };
 
-        let first = session.append(&ChatMessage::user("lost")).unwrap_err();
-        assert!(first.to_string().contains("could not remove the partial"));
-        let second = session
-            .append(&ChatMessage::user("must not append"))
-            .unwrap_err();
-        assert!(second.to_string().contains("retired"));
-        drop(session);
-        std::fs::remove_file(lock_path).unwrap();
+            let first = if diagnostic {
+                let mut sidecar = OpenOptions::new().append(true).open("/dev/full").unwrap();
+                super::append_checked(&mut sidecar, &mut session.healthy, b"lost\n").unwrap_err()
+            } else {
+                session.append(&ChatMessage::user("lost")).unwrap_err()
+            };
+            assert!(first.to_string().contains("could not remove the partial"));
+            let second = session
+                .append(&ChatMessage::user("must not append"))
+                .unwrap_err();
+            assert!(second.to_string().contains("retired"));
+            let report =
+                serde_json::from_str(include_str!("../../tests/fixtures/error-details-v1.json"))
+                    .unwrap();
+            let diagnostic_error = session.record_error(report).unwrap_err();
+            assert!(diagnostic_error.to_string().contains("retired"));
+            drop(session);
+            std::fs::remove_file(lock_path).unwrap();
+        }
     }
 }

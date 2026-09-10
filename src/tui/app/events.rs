@@ -42,6 +42,7 @@ impl App {
                     turn: Turn::new(),
                     started: Instant::now(),
                     error: None,
+                    error_summary: None,
                     sleep_stopped: false,
                     tool_blocks: std::collections::HashMap::new(),
                     pending_tools: 0,
@@ -119,6 +120,7 @@ impl App {
                         })
                         .collect();
                     let idx = self.transcript.extend_tool_group(children);
+                    self.transcript.blocks[idx].live_preview_rows = self.live_preview_rows;
                     for call in calls {
                         s.tool_blocks.insert(call.id, idx);
                     }
@@ -269,9 +271,14 @@ impl App {
                     });
                 }
             }
+            SessionEvent::ErrorDetails(details) => {
+                if let Some(s) = &mut self.active {
+                    s.error_summary = Some(details.summary);
+                }
+            }
             SessionEvent::Error(message) => {
                 if let Some(s) = &mut self.active {
-                    s.error = Some(message);
+                    s.error = Some(s.error_summary.take().unwrap_or(message));
                 } else {
                     self.notice(format!("error: {message}"));
                 }
@@ -361,8 +368,7 @@ impl App {
                 if let Some(message) = s.error {
                     // A failed turn ends visibly: the error persists in error
                     // color below the trailer, never a vanishing status blip.
-                    self.transcript
-                        .push(Block::new(Kind::Error, format!("error: {message}")));
+                    self.transcript.push(Block::new(Kind::Error, message));
                 }
                 // Release prompts held by frontend work such as shell passthrough.
                 // Prompts queued in the agent are consumed by the core itself.

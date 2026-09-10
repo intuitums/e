@@ -29,9 +29,10 @@ prod_rs() {
 #    else — in the shipped binary (src/) or its dev tooling (scripts/). A new
 #    host means a new place user data can go — add it here deliberately or
 #    the build fails.
-allowed_hosts="localhost models.dev auth.openai.com api.openai.com chatgpt.com opencode.ai auth.x.ai api.x.ai api.anthropic.com api.github.com github.com ai-gateway.vercel.sh generativelanguage.googleapis.com api.groq.com api.mistral.ai api.deepseek.com api.cerebras.ai openrouter.ai api.together.xyz api.fireworks.ai"
+# Numeric loopback is used by tests/ui/run.py's synthetic streaming server.
+allowed_hosts="localhost 127.0.0.1 models.dev auth.openai.com api.openai.com chatgpt.com opencode.ai auth.x.ai api.x.ai api.anthropic.com api.github.com github.com ai-gateway.vercel.sh generativelanguage.googleapis.com api.groq.com api.mistral.ai api.deepseek.com api.cerebras.ai openrouter.ai api.together.xyz api.fireworks.ai"
 found_hosts=$(
-  { prod_rs $(find src -name '*.rs' 2>/dev/null); find scripts -type f 2>/dev/null | xargs cat 2>/dev/null; } |
+  { prod_rs $(find src -name '*.rs' 2>/dev/null); find scripts tests/ui -type f ! -path '*/__pycache__/*' -exec cat -- {} + 2>/dev/null; } |
     grep -ohE 'https?://[A-Za-z0-9.-]+' | sed -E 's#https?://##' | sort -u
 )
 for host in $found_hosts; do

@@ -7,6 +7,25 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Review follow-ups: partial tool arguments prevent retries, SSE error messages
+  are bounded before publication, and failed diagnostic rollback retires the
+  session handle. Error-summary settings load off async workers. Ctrl+C closes
+  trust and queue navigation without submitting held prompts, and the shell
+  prefix space has its own cursor and selection cell. The network guard now
+  scans tooling filenames containing spaces or quotes.
+
+- Running tools stay in connected, wrapped trees with live output tails and
+  Ctrl+O review. The composer stays at the bottom by default, leading `!` uses
+  a green gutter marker, and edit counts show green additions and red deletions.
+- Provider failures show brief UI errors and retain local diagnostic details in
+  private session sidecars and headless JSON. Partial completions with error
+  frames fail instead of appearing successful. Display-off time is not sleep.
+- Drafts, trust paths, and tab titles cannot inject terminal controls. Ctrl+C
+  cancels across panels, pasted line endings normalize once, vertical cursor
+  motion follows display columns, and long trust questions can be scrolled.
+- `./x ui` checks terminal frames for tool trees, composer placement, shell
+  styling, short errors, and diff colors on Linux and macOS CI.
+
 - Review fixes for the audit: background handles reserve their PID until pipes
   close; failed new-file copies remove their partial target; metadata errors
   fail freshness checks closed. Read windows reject oversized first lines with

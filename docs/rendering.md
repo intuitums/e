@@ -1,16 +1,18 @@
 # Inline rendering contract
 
-The main screen shows a transcript with the composer and status rows at its
-tail. The renderer owns visible rows; the terminal owns rows that have
+The main screen shows a transcript above a bottom-pinned composer and status area. The renderer owns visible rows; the terminal owns rows that have
 scrolled out of view. Those historical rows are snapshots of what was shown
 at that time. They are not a second editable copy of the session document.
 
 - Streaming may change visible Markdown, tool rows, and the dock. A large
   append must paint every new row on its way into scrollback, even if an
   earlier Markdown row also changed.
-- A shorter frame repaints its visible tail in place. The logical window
-  can move backward without scrolling the terminal backward, so collapsing
-  tool output or closing a panel cannot move the composer off screen.
+- A shorter full-height frame repaints its visible tail in place. Its logical
+  window moves backward without scrolling the terminal backward, keeping the
+  dock at the bottom when tool previews disappear or panels close.
+- Short conversations leave blank space above the dock. Set
+  `"composer_position": "inline"` in `~/.e/settings.json` to retain the compact
+  startup layout instead. The default is `"bottom"`. Apply with `/reload`.
 - Resize redraws only the new visible tail. It does not erase scrollback or
   print the entire transcript again. The terminal controls how existing
   history wraps. The full-detail viewer renders current source at the new
@@ -34,6 +36,32 @@ the complete response under a source-size pacing budget. Each frame still
 assembles the cached transcript rows, but the painter takes ownership of
 that frame and compares only the reachable suffix. Further incremental
 parsing or shared-row storage should be justified by a measured bottleneck.
+
+## Tool trees and shell input
+
+Running and completed calls occupy the same tree positions, in provider order.
+A call's first row has a branch connector; wrapped continuation rows use `│`.
+Paths, commands, failure reasons, and edit statistics wrap by display-cell width.
+Review uses the same action-row layout and attaches details after the final row.
+
+Running commands show a wrapped output tail inside their branch. The last
+command closes the tree with `└ ctrl+o to view`, or a count of omitted rows
+followed by that hint. Connectors share the theme's `muted` token; output text
+uses `dim`. File writes and edits do not stream their contents inline.
+Edit/write counts use the theme's green added-marker and red removed-marker
+tokens, including their 256-color fallbacks. The slash stays dim and zero counts
+are omitted. Wrapping and review preserve those colors.
+
+`"tool_preview_rows"` in `~/.e/settings.json` controls the live preview budget.
+The default is 5 rendered rows; accepted values are 0 through 20. Apply with
+`/reload`. Running buffers retain the latest 64 KiB and disclose when earlier
+output was omitted. Ctrl+O can show retained output before completion. After
+completion, the tool's final retained result replaces the live buffer.
+
+A literal `!` at the start of the draft replaces its first gutter rail and uses
+`bashMode`. The prefix is not repeated in the command text. Continuation rails
+stay neutral. Editing, selection, history, and submission retain raw indices
+and the original prefix; masked credential entry never activates shell styling.
 
 ## Verify session transitions
 
@@ -68,3 +96,75 @@ The helper requires Python's `pyte` package; the Rust and PTY tests do not.
 Inspect transitions as well as the final screen when investigating a new
 failure. A tail marker in captured bytes alone cannot prove that every
 earlier frame was correct.
+
+## Display power and interrupted responses
+
+Turning off the display or moving focus away from the terminal does not cancel
+a run. Streaming and tools continue while the process and network remain
+available. Actual system sleep can suspend both; e estimates some sleep gaps
+from clock divergence, not display notifications. That estimate depends on the
+platform's monotonic clock and can also be affected by wall-clock corrections.
+
+`provider response interrupted` means the HTTP body could not be read to
+completion. Backend diagnostics include the underlying transport cause where
+available; the TUI shows only `Provider response interrupted.`.
+Reqwest's `error decoding response body` alone does not mean the model sent
+invalid JSON; a truncated HTTP body produces the same headline. The message
+cannot, by itself, prove whether a provider, proxy, or local network caused it.
+
+Before any output, retryable transport failures use the normal retry budget.
+After output, including partial tool arguments, e retains the partial response
+and reports the failure rather than blindly replaying the request. Sleep-attributed failures have a separate
+bounded continuation policy. A display-off event alone does not activate it.
+
+`./x ui` checks completed terminal frames for composer anchoring, shell styling,
+short errors, and colored diff counts. See [tests/ui/README.md](../tests/ui/README.md)
+for checked scenarios and capture-only repros of paste safety and trust panels:
+
+```sh
+cargo build
+python3 -m venv /tmp/e-replay-venv
+/tmp/e-replay-venv/bin/pip install -r tests/ui/requirements.txt
+PYTHON=/tmp/e-replay-venv/bin/python ./x ui --out /tmp/e-replay-new
+```
+
+Use a fresh output directory. Read the generated `.txt` frames or replay the
+`.raw` files through `scripts/term.py`; do not print raw injection captures
+directly into a terminal. The helper uses dummy credentials, an isolated home,
+and a loopback provider, with extensions and auto-update disabled. Tools are
+disabled except in `tool-tree`, which runs synthetic `printf` and `sleep` commands,
+and `diff-counts`, which edits a generated file in the isolated workspace.
+
+## Backend error details
+
+Terminal provider failures emit `SessionEvent::ErrorDetails` immediately before
+`SessionEvent::Error`. The existing error string remains available to backend
+callers. The TUI consumes the report's short summary, not the diagnostic body.
+Cancellation, sleep stops, tool exit codes, and recovered retries do not become
+terminal provider-error reports.
+
+Reports retain the observed failure stage and cause, provider and model,
+available HTTP status and request ID, provider code, timestamp, attempt duration,
+retry decision and budget, partial-output counts, and settled tool counts.
+Recovery guidance belongs in the report. A transport failure does not establish
+whether the provider, proxy, or local network caused it.
+
+Saved sessions append reports to a private `<session-stem>.errors.jsonl` sidecar.
+Each record links to the preceding message on its branch. Reports never enter
+model context or change the session's message format. `--no-save` writes no
+report file. A diagnostic append whose rollback also fails retires the session
+handle, preventing later records from extending a torn JSON line. Headless JSON
+includes `error_details` even without saving.
+
+Reports collect no request bodies or authentication headers. Known bearer
+credentials and transport-error request URLs are redacted; provider-authored error text can
+still contain sensitive information and should be reviewed before sharing.
+Only allowlisted response IDs are captured, with length limits. Diagnostic text
+is bounded before compatibility error events are published and marks truncation.
+Nothing is uploaded and no reporting command or team-submission prompt is added.
+
+Short headlines can be overridden in `~/.e/settings.json` with `error_auth`,
+`error_network`, `error_stalled`, `error_rate_limited`, `error_quota`,
+`error_unavailable`, and `error_rejected`. Missing or empty values use the
+built-in headline. These keys are read on a blocking worker when a failure
+occurs, with the same scoped e home as the failed turn.

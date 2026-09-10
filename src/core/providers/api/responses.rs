@@ -136,7 +136,8 @@ pub async fn run(
         require_success(send_request(with_attribution(builder, request).json(&body)).await?)
             .await?;
 
-    let mut sse = SseStream::new(response.bytes_stream());
+    let response_context = crate::core::providers::ResponseContext::from_response(&response);
+    let mut sse = SseStream::new(response.bytes_stream()).with_response(response_context);
     // function_call items accumulate argument deltas keyed by item id.
     let mut pending: std::collections::BTreeMap<String, ToolCall> = Default::default();
     let mut streamed_arguments: std::collections::BTreeMap<String, String> = Default::default();
@@ -319,7 +320,9 @@ pub async fn run(
                             _ => text_cause.unwrap_or(FailureCause::Rejected),
                         }
                     };
-                    return Err(ProviderError::frame(message, cause));
+                    return Err(ProviderError::frame(message, cause)
+                        .with_response(sse.response.clone())
+                        .with_code(value["response"]["error"]["code"].as_str()));
                 }
                 _ => {}
             }
