@@ -124,8 +124,11 @@ order; the first extension to consume or replace wins:
 {"consume":false,"replace":null}
 ```
 
-An empty result allows the line through untouched. A pasted API key is
-handled before the hook and never reaches it.
+An empty result allows the line through untouched; `{"notice":"…"}` allows
+it and posts the notice. Notices from every extension that allowed the line
+reach the transcript, alongside the notice of whichever finally consumed or
+replaced it. A pasted API key is handled before the hook and never reaches
+it.
 
 **hook.startup** → rewritten arguments and optional process changes, given
 `{cwd, argv, flags}` where `flags` are the parsed values of every typed
@@ -153,7 +156,8 @@ relaunch ends the chain.
 - Tool calls have 300 s, commands 60 s.
 - On quit e sends `shutdown`, waits a beat, then kills the process.
 - A crashed or missing extension is reported in the transcript and skipped;
-  it is never a reason e can't run.
+  it is never a reason e can't run. An exit immediately after a valid initialize
+  response still emits one notice, including which runtime hooks now fail open.
 
 ## Examples
 
@@ -244,6 +248,11 @@ configure the stdio server e should own in `~/.e/settings.json`:
   }
 }
 ```
+
+`npx -y` downloads the server on first use, which routinely takes longer
+than the 5 s initialize budget — the bridge is then skipped with
+`initialize timed out` until the package is cached. Run the `npx` line once
+by hand first, or point `command` at an installed binary.
 
 The bridge intentionally maps only MCP tools. Prompts, resources, sampling,
 elicitation, and authorization stay out of e's core and out of this example.

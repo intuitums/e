@@ -286,3 +286,49 @@ fn piped_stdin_is_refused_with_a_pointer_to_rpc() {
     assert!(stderr.contains("interactive terminal"), "stderr: {stderr}");
     assert!(stderr.contains("e rpc"), "stderr: {stderr}");
 }
+
+/// An extension's boolean flag before `doctor` hides the word from the raw
+/// pre-startup scan (it looks like the flag's value). Once extensions have
+/// stripped the flag, the leftover `doctor` must be a usage error — not a
+/// session opened with "doctor" as the first prompt.
+#[cfg(unix)]
+#[test]
+fn diagnostics_behind_an_extension_flag_are_a_usage_error_not_a_prompt() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = std::env::temp_dir().join(format!(
+        "e-cli-flagged-doctor-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    let extensions = home.join("extensions");
+    std::fs::create_dir_all(&extensions).unwrap();
+    let extension = extensions.join("plan");
+    std::fs::write(
+        &extension,
+        r##"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{"id":1000000,"result":{"name":"plan","version":"1","flags":[{"name":"plan","type":"boolean"}]}}'
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"shutdown"'*) exit 0 ;;
+  esac
+done
+"##,
+    )
+    .unwrap();
+    std::fs::set_permissions(&extension, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_e"))
+        .args(["--plan", "doctor"])
+        .env("E_HOME", &home)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot follow extension flags"),
+        "stderr: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(home);
+}

@@ -5,7 +5,10 @@
 //! new version takes effect on the next start, which the notice says.
 //!
 //! Dev builds are exempt: a binary living under a `target/` directory is a
-//! cargo artifact, and auto-update must never stomp one.
+//! cargo artifact, and auto-update must never stomp one. So is any platform
+//! off the release matrix (`target()` is `None`): a `cargo install` on musl,
+//! armv7, FreeBSD, … must never be overwritten with a tarball its host
+//! cannot run.
 
 use std::path::Path;
 
@@ -39,17 +42,28 @@ fn download_client() -> Result<&'static reqwest::Client, String> {
         .map_err(Clone::clone)
 }
 
-/// The compile-time target triple, matching the release artifact names.
-pub fn target() -> &'static str {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        "aarch64-apple-darwin"
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        "x86_64-apple-darwin"
-    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        "aarch64-unknown-linux-gnu"
-    } else {
-        "x86_64-unknown-linux-gnu"
-    }
+/// The release artifact name for this build's platform — `None` when the
+/// release matrix (`.github/workflows/release.yml`) ships nothing for it, so
+/// no update path may guess a tarball.
+pub fn target() -> Option<&'static str> {
+    release_target(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        cfg!(target_env = "gnu"),
+    )
+}
+
+/// `target()` as a pure function of the platform, so the off-matrix case
+/// can be pinned from a machine that is on it. Linux releases are glibc
+/// builds; a musl (Alpine) install is off the matrix.
+pub fn release_target(os: &str, arch: &str, gnu_libc: bool) -> Option<&'static str> {
+    Some(match (os, arch) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("linux", "aarch64") if gnu_libc => "aarch64-unknown-linux-gnu",
+        ("linux", "x86_64") if gnu_libc => "x86_64-unknown-linux-gnu",
+        _ => return None,
+    })
 }
 
 /// True when the running binary is a cargo build, not an installed release.
@@ -130,7 +144,7 @@ pub async fn latest_tag_from(url: &str) -> Result<Option<String>, String> {
 /// atomically replace `dest`. Returns the installed version. `base` is a
 /// parameter so tests can serve a fake release.
 pub async fn install_from(base: &str, tag: &str, dest: &Path) -> Result<String, String> {
-    let target = target();
+    let target = target().ok_or(NO_RELEASE)?;
     let tarball_url = format!("{base}/download/{tag}/e-{target}.tar.gz");
     let sums_url = format!("{base}/download/{tag}/checksums.txt");
 
@@ -200,12 +214,17 @@ async fn fetch(url: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Why an off-matrix platform cannot self-update; `e update` prints it.
+pub const NO_RELEASE: &str =
+    "no release is published for this platform — update from source, not e update";
+
 /// The whole flow for the running binary: check, install if newer. Ok(None)
 /// means already current (or not applicable).
 pub async fn self_update() -> Result<Option<String>, String> {
     // A build whose identity is not release SemVer — a source checkout —
-    // is never replaced by a published release.
-    if !is_release_version(crate::VERSION) {
+    // or whose platform has no release artifact is never replaced by a
+    // published release; the check is skipped, not just the install.
+    if !is_release_version(crate::VERSION) || target().is_none() {
         return Ok(None);
     }
     // No published release: nothing exists to update to — already current.

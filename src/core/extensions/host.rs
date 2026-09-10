@@ -31,10 +31,9 @@ const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_EXTENSION_LINE_BYTES: usize = 1024 * 1024;
-
-/// Requests awaiting a response, keyed by wire id.
-type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
-type ProgressMap = Arc<Mutex<HashMap<u64, mpsc::Sender<ToolProgress>>>>;
+/// How long to wait on a killed child before leaving it to tokio's orphan
+/// reaper — quitting must never hang on one.
+const REAP_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
 pub struct ToolProgress {
@@ -46,12 +45,84 @@ struct Extension {
     manifest: Manifest,
     /// Outgoing lines to the process's stdin.
     writer: mpsc::Sender<String>,
-    pending: PendingMap,
-    progress: ProgressMap,
-    /// False once either process pipe proves the extension has exited.
-    /// Pending requests fail immediately and new ones are refused.
-    alive: Arc<AtomicBool>,
-    child: Mutex<Option<tokio::process::Child>>,
+    link: Arc<Link>,
+}
+
+/// What one extension process shares between the host, its two pipe tasks,
+/// and shutdown: liveness, the waiters to fail when it goes, the child to
+/// reap, and the notice that announces an exit nobody asked for.
+struct Link {
+    /// False once either process pipe proves the extension has exited (or
+    /// shutdown retired it). Pending requests fail immediately and new
+    /// ones are refused.
+    alive: AtomicBool,
+    /// Requests awaiting a response, keyed by wire id.
+    pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
+    progress: Mutex<HashMap<u64, mpsc::Sender<ToolProgress>>>,
+    child: tokio::sync::Mutex<Option<tokio::process::Child>>,
+    /// Manifest notice and unexpected-exit flag, coordinated across handshake
+    /// and pipe tasks. Pre-initialize failures are reported by `start`.
+    exit_notice: Mutex<(Option<String>, bool)>,
+    notices: mpsc::Sender<String>,
+}
+
+impl Link {
+    /// Mark the extension dead and fail every waiter. True for the caller
+    /// that got there first; every later call is a no-op.
+    fn retire(&self) -> bool {
+        if !self.alive.swap(false, Ordering::SeqCst) {
+            return false;
+        }
+        // Dropping the senders wakes every request through its
+        // `Ok(Err(_)) => extension exited` path instead of its long timeout.
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        true
+    }
+
+    /// A pipe found the process gone without being asked: retire it and
+    /// say so in the transcript — exactly once, by whichever pipe noticed
+    /// first, and only after the handshake.
+    fn exited(&self) {
+        if self.retire() {
+            let mut state = self.exit_notice.lock().unwrap_or_else(|e| e.into_inner());
+            state.1 = true;
+            if let Some(notice) = &state.0 {
+                let _ = self.notices.try_send(notice.clone());
+            }
+        }
+    }
+
+    /// Install the manifest's notice, including an EOF that beat the handshake.
+    fn install_exit_notice(&self, notice: String) {
+        let mut state = self.exit_notice.lock().unwrap_or_else(|e| e.into_inner());
+        if state.1 {
+            let _ = self.notices.try_send(notice.clone());
+        }
+        state.0 = Some(notice);
+    }
+
+    /// Kill the child if it still runs and wait it, so it never lingers as
+    /// a zombie — for the session, or (on the relaunch path) across the
+    /// exec into the next e, where nothing could reap it any more. A child
+    /// that outlives `REAP_TIMEOUT` is dropped to tokio's orphan reaper.
+    /// The slot stays locked across the wait so a second reaper (the
+    /// reader task on EOF, `shutdown` a beat later) blocks until the first
+    /// has finished instead of returning while the wait is still pending.
+    async fn reap(&self) {
+        let mut slot = self.child.lock().await;
+        if let Some(child) = slot.as_mut() {
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(REAP_TIMEOUT, child.wait()).await;
+            *slot = None;
+        }
+    }
 }
 
 pub struct ExtensionHost {
@@ -201,7 +272,7 @@ impl ExtensionHost {
                 (
                     extension.manifest.name.clone(),
                     extension.manifest.version.clone(),
-                    extension.alive.load(Ordering::SeqCst),
+                    extension.link.alive.load(Ordering::SeqCst),
                 )
             })
             .collect()
@@ -607,7 +678,9 @@ impl ExtensionHost {
 
     /// Ask every extension with the `input` hook. The first extension to
     /// consume or replace a line wins; transport failures and timeouts allow
-    /// (fail open — a slow extension never eats a user's message).
+    /// (fail open — a slow extension never eats a user's message). An
+    /// allowing extension may still attach a `notice`; those accumulate,
+    /// one per line, onto whichever verdict is finally returned.
     pub async fn hook_input(&self, text: &str) -> InputVerdict {
         // Fast path: no extension listens at all.
         if !self
@@ -617,6 +690,7 @@ impl ExtensionHost {
         {
             return InputVerdict::default();
         }
+        let mut notices: Vec<String> = Vec::new();
         for ext in &self.extensions {
             if !ext.manifest.hooks.iter().any(|h| h == "input") {
                 continue;
@@ -625,13 +699,18 @@ impl ExtensionHost {
                 .request(ext, "hook.input", json!({"text": text}), HOOK_TIMEOUT)
                 .await
             {
-                let verdict: InputVerdict = serde_json::from_value(value).unwrap_or_default();
+                let mut verdict: InputVerdict = serde_json::from_value(value).unwrap_or_default();
+                notices.extend(verdict.notice.take().filter(|n| !n.trim().is_empty()));
                 if verdict.consume || verdict.replace.as_deref().is_some_and(|r| !r.is_empty()) {
+                    verdict.notice = join_notices(notices);
                     return verdict;
                 }
             }
         }
-        InputVerdict::default()
+        InputVerdict {
+            notice: join_notices(notices),
+            ..InputVerdict::default()
+        }
     }
 
     /// Fire-and-forget lifecycle event to every extension. try_send: a child
@@ -644,19 +723,19 @@ impl ExtensionHost {
         }
     }
 
-    /// Graceful shutdown: a notification, a beat, then the processes die.
-    /// try_send throughout — quitting must never block on a wedged child.
+    /// Graceful shutdown: a notification, a beat, then the processes die
+    /// and are reaped. try_send throughout — quitting must never block on
+    /// a wedged child.
     pub async fn shutdown(&self) {
         let line = json!({"method": "shutdown"}).to_string();
         for ext in &self.extensions {
+            // Retire before asking: an exit we requested is not news for
+            // the transcript, and no new request starts on a leaving child.
+            ext.link.retire();
             let _ = ext.writer.try_send(line.clone());
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
-        for ext in &self.extensions {
-            if let Some(child) = ext.child.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-                let _ = child.start_kill();
-            }
-        }
+        futures::future::join_all(self.extensions.iter().map(|ext| ext.link.reap())).await;
     }
 
     async fn request(
@@ -678,17 +757,19 @@ impl ExtensionHost {
         timeout: Duration,
         progress: Option<mpsc::Sender<ToolProgress>>,
     ) -> Result<Value, String> {
-        if !ext.alive.load(Ordering::SeqCst) {
+        if !ext.link.alive.load(Ordering::SeqCst) {
             return Err("extension exited".into());
         }
         let id = self.ids.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        ext.pending
+        ext.link
+            .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id, tx);
         if let Some(progress) = progress {
-            ext.progress
+            ext.link
+                .progress
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(id, progress);
@@ -697,13 +778,12 @@ impl ExtensionHost {
         // dropping the future on Esc — the pending entry goes with it: a
         // stale sender must not linger until the extension answers.
         let _guard = PendingGuard {
-            pending: ext.pending.clone(),
-            progress: ext.progress.clone(),
+            link: ext.link.clone(),
             id,
         };
         // Close the race with the stdout reader ending between the first
         // liveness check and inserting this request into the pending map.
-        if !ext.alive.load(Ordering::SeqCst) {
+        if !ext.link.alive.load(Ordering::SeqCst) {
             return Err("extension exited".into());
         }
         let line = json!({"id": id, "method": method, "params": params}).to_string();
@@ -727,21 +807,28 @@ impl ExtensionHost {
     }
 }
 
+/// One transcript notice from several extensions' `hook.input` notices, or
+/// none when nobody said anything.
+fn join_notices(notices: Vec<String>) -> Option<String> {
+    (!notices.is_empty()).then(|| notices.join("\n"))
+}
+
 /// Removes a pending-map entry when its request ends by any path, including
 /// the caller dropping the request future.
 struct PendingGuard {
-    pending: PendingMap,
-    progress: ProgressMap,
+    link: Arc<Link>,
     id: u64,
 }
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        self.pending
+        self.link
+            .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.id);
-        self.progress
+        self.link
+            .progress
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.id);
@@ -814,9 +901,9 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .current_dir(std::env::current_dir().unwrap_or_default())
-        // A failed handshake drops the child below; without this, a process
-        // that ignores stdin EOF would outlive every `?` early return as an
-        // untracked orphan.
+        // Every exit path reaps through `Link::reap`; this is the backstop
+        // for a child that outlives the reap timeout and lands in tokio's
+        // orphan queue instead.
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("failed to start: {e}"))?;
@@ -824,13 +911,18 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
     let stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr = child.stderr.take();
+    let source = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "extension".into());
 
     if let Some(stderr) = stderr {
         let notices = notices.clone();
-        let source = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "extension".into());
+        let source = source.clone();
+        // stderr is diagnostics, not protocol: an over-long line is reported
+        // and its remainder dropped, then reading goes on. The pipe must
+        // stay open as long as the child lives — closing it would turn the
+        // child's next stderr write into SIGPIPE/EPIPE and kill it.
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
             loop {
@@ -842,74 +934,58 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
                     Ok(None) => break,
                     Err(error) => {
                         let _ = notices.try_send(format!("extension {source}: {error}"));
-                        break;
+                        // Only the byte cap leaves the stream mid-line; a
+                        // UTF-8 failure has already consumed its line, and
+                        // resyncing there would eat the next one too.
+                        let mid_line = error
+                            .get_ref()
+                            .is_none_or(|inner| !inner.is::<std::string::FromUtf8Error>());
+                        if mid_line && discard_line(&mut reader).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
         });
     }
 
-    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-    let progress: ProgressMap = Arc::new(Mutex::new(HashMap::new()));
-    let alive = Arc::new(AtomicBool::new(true));
+    let link = Arc::new(Link {
+        alive: AtomicBool::new(true),
+        pending: Mutex::new(HashMap::new()),
+        progress: Mutex::new(HashMap::new()),
+        child: tokio::sync::Mutex::new(Some(child)),
+        exit_notice: Mutex::new((None, false)),
+        notices,
+    });
 
     // Writer task: serialized line output.
     let (writer, mut writer_rx) = mpsc::channel::<String>(64);
-    let pending_writer = pending.clone();
-    let progress_writer = progress.clone();
-    let alive_writer = alive.clone();
+    let link_writer = link.clone();
     tokio::spawn(async move {
         let mut stdin = stdin;
         while let Some(line) = writer_rx.recv().await {
-            if stdin.write_all(line.as_bytes()).await.is_err() {
-                alive_writer.store(false, Ordering::SeqCst);
-                pending_writer
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clear();
-                progress_writer
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clear();
-                break;
+            let written: std::io::Result<()> = async {
+                stdin.write_all(line.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+                stdin.flush().await
             }
-            if stdin.write_all(b"\n").await.is_err() {
-                alive_writer.store(false, Ordering::SeqCst);
-                pending_writer
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clear();
-                progress_writer
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clear();
-                break;
-            }
-            if stdin.flush().await.is_err() {
-                alive_writer.store(false, Ordering::SeqCst);
-                pending_writer
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clear();
-                progress_writer
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clear();
+            .await;
+            if written.is_err() {
+                link_writer.exited();
                 break;
             }
         }
     });
 
     // Reader task: route responses to pending waiters, notifies to the app.
-    let pending_reader = pending.clone();
-    let progress_reader = progress.clone();
-    let alive_reader = alive.clone();
+    let link_reader = link.clone();
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
         while let Ok(Some(line)) = read_bounded_line(&mut reader, MAX_EXTENSION_LINE_BYTES).await {
             match protocol::parse_incoming(&line) {
                 Some(Incoming::Response { id, result }) => {
-                    if let Some(tx) = pending_reader
+                    if let Some(tx) = link_reader
+                        .pending
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .remove(&id)
@@ -920,10 +996,11 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
                 Some(Incoming::Notify { message }) => {
                     // Notices are best-effort UI output. A full transcript
                     // channel must never hold up response dispatch.
-                    let _ = notices.try_send(message);
+                    let _ = link_reader.notices.try_send(message);
                 }
                 Some(Incoming::ToolUpdate { id, stream, chunk }) => {
-                    let target = progress_reader
+                    let target = link_reader
+                        .progress
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .get(&id)
@@ -937,27 +1014,18 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
                 None => {}
             }
         }
-        alive_reader.store(false, Ordering::SeqCst);
-        // Dropping the senders wakes every request through its
-        // `Ok(Err(_)) => extension exited` path instead of its long timeout.
-        pending_reader
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
-        progress_reader
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        // stdout is done: the process exited, closed its end, or broke the
+        // protocol past the line cap. It is finished either way — fail the
+        // waiters, say so, and reap it.
+        link_reader.exited();
+        link_reader.reap().await;
     });
 
     // Handshake.
     let ext = Extension {
         manifest: Manifest::default(),
         writer,
-        pending,
-        progress,
-        alive,
-        child: Mutex::new(Some(child)),
+        link: link.clone(),
     };
     let host_shim = ExtensionHost {
         extensions: Vec::new(),
@@ -972,16 +1040,47 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
         // {"extensions":{"<name>":{…}}} — each extension reads its own key.
         "extensions_config": crate::core::config::settings::extensions_config(),
     });
-    let manifest_value = host_shim
-        .request(&ext, "initialize", init, INIT_TIMEOUT)
-        .await
-        .map_err(|e| format!("initialize {e}"))?;
-    let manifest: Manifest =
-        serde_json::from_value(manifest_value).map_err(|e| format!("bad manifest: {e}"))?;
-    if manifest.name.is_empty() {
-        return Err("manifest has no name".into());
-    }
+    let handshake = async {
+        let value = host_shim
+            .request(&ext, "initialize", init, INIT_TIMEOUT)
+            .await
+            .map_err(|e| format!("initialize {e}"))?;
+        let manifest: Manifest =
+            serde_json::from_value(value).map_err(|e| format!("bad manifest: {e}"))?;
+        if manifest.name.is_empty() {
+            return Err("manifest has no name".into());
+        }
+        Ok::<Manifest, String>(manifest)
+    };
+    let manifest = match handshake.await {
+        Ok(manifest) => manifest,
+        Err(reason) => {
+            link.reap().await;
+            return Err(reason);
+        }
+    };
+    link.install_exit_notice(exit_notice(&source, &manifest));
     Ok(Extension { manifest, ..ext })
+}
+
+/// The transcript line for an extension that dies mid-session. A guard
+/// (`tool_call`/`input` hooks) that is gone deserves a louder line: the
+/// hooks fail open, so its protection has silently lapsed.
+fn exit_notice(source: &str, manifest: &Manifest) -> String {
+    let guards: Vec<&str> = manifest
+        .hooks
+        .iter()
+        .map(String::as_str)
+        .filter(|hook| matches!(*hook, "tool_call" | "input"))
+        .collect();
+    if guards.is_empty() {
+        format!("extension {source}: exited")
+    } else {
+        format!(
+            "extension {source}: exited — its {} hook no longer applies",
+            guards.join(" and ")
+        )
+    }
 }
 
 /// Read one line without allowing an unbounded peer to grow memory
@@ -993,9 +1092,10 @@ async fn spawn(path: &PathBuf, notices: mpsc::Sender<String>) -> Result<Extensio
 /// view — deliberately, not just as a memory bound: a still-growing line
 /// with no newline yet (a firehose, or a client that never terminates one)
 /// must be cut off promptly rather than read forever looking for a
-/// newline that may never come. Every caller therefore treats this error
-/// as fatal to its read loop, never as "skip this line and keep going" —
-/// the stream is left mid-line, not resynced to the next one.
+/// newline that may never come. The stream is left mid-line, never
+/// resynced: protocol readers treat the error as fatal to their loop, and
+/// the one diagnostics reader (extension stderr) resyncs itself with
+/// `discard_line`.
 pub async fn read_bounded_line<R>(
     reader: &mut R,
     max_bytes: usize,
@@ -1015,7 +1115,9 @@ where
 
         if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
             if line.len().saturating_add(newline) > max_bytes {
-                reader.consume(newline + 1);
+                // Leave the newline in place so the stream is mid-line
+                // here exactly as in the no-newline-yet case below.
+                reader.consume(newline);
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("line exceeded {max_bytes} bytes"),
@@ -1046,8 +1148,59 @@ where
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
+/// Skip to just past the next newline (or EOF): the resync after
+/// `read_bounded_line` hits its cap on a stream where dropping the rest of
+/// the line is the right call. Reads and discards without buffering, so a
+/// firehose costs nothing but time.
+async fn discard_line<R>(reader: &mut R) -> std::io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+{
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        match available.iter().position(|byte| *byte == b'\n') {
+            Some(newline) => {
+                reader.consume(newline + 1);
+                return Ok(());
+            }
+            None => {
+                let count = available.len();
+                reader.consume(count);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// EOF before or after manifest installation announces one unexpected exit.
+    #[test]
+    fn exit_notice_survives_eof_before_handshake_continuation() {
+        for early in [false, true] {
+            let (notices, mut rx) = tokio::sync::mpsc::channel(4);
+            let link = super::Link {
+                alive: std::sync::atomic::AtomicBool::new(true),
+                pending: std::sync::Mutex::new(std::collections::HashMap::new()),
+                progress: std::sync::Mutex::new(std::collections::HashMap::new()),
+                child: tokio::sync::Mutex::new(None),
+                exit_notice: std::sync::Mutex::new((None, false)),
+                notices,
+            };
+            if early {
+                link.exited();
+            }
+            link.install_exit_notice("guard exited; hooks fail open".into());
+            link.exited();
+            link.exited();
+            assert_eq!(rx.try_recv().unwrap(), "guard exited; hooks fail open");
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
     // The entry-point tests set file modes, so they are unix-only. Nested so
     // the module opens with a bare `#[cfg(test)]` (the guard's prod/test split
     // keys on that) without mixing an inner `#![cfg]` on the same module.

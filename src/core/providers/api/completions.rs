@@ -215,6 +215,13 @@ pub async fn run(
                     continue;
                 }
             };
+            // A failure after the headers arrives as a `data: {"error":…}`
+            // frame (OpenRouter also sets finish_reason "error"); without
+            // this the frame carries no delta, is skipped, and `[DONE]`
+            // ends the turn as a clean success.
+            if let Some(error) = value.get("error").filter(|e| !e.is_null()) {
+                return Err(ProviderError::from_error_frame(error));
+            }
             if let Some(delta) = value["choices"][0]["delta"].as_object() {
                 if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
                     if !text.is_empty() {

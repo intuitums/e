@@ -24,6 +24,26 @@ const CALLBACK_ADDR: &str = "127.0.0.1:1455";
 /// is present and can abort them.
 const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Serialize single-use refresh tokens per e home and provider. Waiters re-read
+/// credentials after acquiring; unrelated accounts never share a network wait.
+fn refresh_lock(provider: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    type Locks = std::collections::HashMap<
+        (std::path::PathBuf, String),
+        std::sync::Weak<tokio::sync::Mutex<()>>,
+    >;
+    static LOCKS: std::sync::LazyLock<std::sync::Mutex<Locks>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(Locks::new()));
+    let mut locks = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let key = (crate::core::config::home::home(), provider.to_owned());
+    if let Some(lock) = locks.get(&key).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, std::sync::Arc::downgrade(&lock));
+    lock
+}
+
 /// Shared cancellation for an interactive login. The TUI also aborts the
 /// async task, while this flag releases the blocking localhost callback wait.
 #[derive(Clone, Default)]
@@ -565,6 +585,22 @@ pub async fn xai_refresh(refresh: &str) -> Result<crate::core::auth::Credential,
 /// ChatGPT / Codex OAuth: refresh when within a minute of expiry; persist the
 /// rotated pair. Returns `(access_token, chatgpt_account_id)`.
 pub async fn codex_access(provider: &str) -> Result<(String, String), String> {
+    if let Some(Credential::OAuth {
+        access,
+        expires,
+        account_id,
+        ..
+    }) = auth::load().get(provider).cloned()
+    {
+        if auth::now_ms() + 60_000 < expires {
+            let account = account_id
+                .or_else(|| auth::account_id_from_jwt(&access))
+                .ok_or("credentials carry no account id")?;
+            return Ok((access, account));
+        }
+    }
+    let lock = refresh_lock(provider);
+    let _one_refresh_at_a_time = lock.lock().await;
     let Some(Credential::OAuth {
         access,
         refresh,
@@ -644,6 +680,36 @@ where
     Ok(access)
 }
 
+/// xAI OAuth: refresh when within a minute of expiry; persist the rotated
+/// pair. Serialized like `codex_access`, and re-checks the stored expiry once
+/// it holds the lock so a refresh another task just finished is reused.
+async fn xai_access(provider: &str) -> Result<String, String> {
+    if let Some(Credential::OAuth {
+        access, expires, ..
+    }) = auth::load().get(provider).cloned()
+    {
+        if auth::now_ms() + 60_000 < expires {
+            return Ok(access);
+        }
+    }
+    let lock = refresh_lock(provider);
+    let _one_refresh_at_a_time = lock.lock().await;
+    let Some(Credential::OAuth {
+        access,
+        refresh,
+        expires,
+        ..
+    }) = auth::load().get(provider).cloned()
+    else {
+        return Err(format!("no credentials for {provider} — run /login"));
+    };
+    if auth::now_ms() + 60_000 < expires {
+        return Ok(access);
+    }
+    let fresh = xai_refresh(&refresh).await?;
+    persist_xai_refresh(provider, fresh, auth::set)
+}
+
 /// A Bearer / x-api-key value for dialects that don't need an account header.
 /// API keys pass through; OAuth refreshes lazily via the provider's declared
 /// flow (`xai-device` or `codex`).
@@ -651,10 +717,7 @@ pub async fn access_token(provider: &str) -> Result<String, String> {
     match auth::load().get(provider).cloned() {
         Some(Credential::ApiKey { key }) => Ok(key),
         Some(Credential::OAuth {
-            access,
-            refresh,
-            expires,
-            ..
+            access, expires, ..
         }) => {
             if auth::now_ms() + 60_000 < expires {
                 return Ok(access);
@@ -662,10 +725,7 @@ pub async fn access_token(provider: &str) -> Result<String, String> {
             let flow =
                 crate::core::providers::registry::find(provider).and_then(|p| p.auth.oauth.clone());
             match flow.as_deref() {
-                Some("xai-device") => {
-                    let fresh = xai_refresh(&refresh).await?;
-                    persist_xai_refresh(provider, fresh, auth::set)
-                }
+                Some("xai-device") => xai_access(provider).await,
                 Some("codex") => codex_access(provider).await.map(|(access, _)| access),
                 other => Err(format!(
                     "cannot refresh {provider} (oauth flow {:?}) — run /login",
@@ -723,6 +783,39 @@ fn required(value: &serde_json::Value, field: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Token lookups bypass refresh waits; different providers have separate locks.
+    #[tokio::test]
+    async fn fresh_codex_credentials_do_not_wait_for_refresh() {
+        let home = std::env::temp_dir().join(format!("e-refresh-lock-{}", uuid::Uuid::new_v4()));
+        crate::core::config::home::scope(home.clone(), async {
+            crate::core::auth::set(
+                "mock",
+                crate::core::auth::Credential::OAuth {
+                    access: "synthetic-access".into(),
+                    refresh: "synthetic-refresh".into(),
+                    expires: crate::core::auth::now_ms() + 120_000,
+                    account_id: Some("account".into()),
+                },
+            )
+            .unwrap();
+            let lock = super::refresh_lock("mock");
+            let _held = lock.lock().await;
+            assert!(std::sync::Arc::ptr_eq(&lock, &super::refresh_lock("mock")));
+            assert!(super::refresh_lock("other").try_lock().is_ok());
+            let token = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                super::codex_access("mock"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(token, ("synthetic-access".into(), "account".into()));
+        })
+        .await;
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn malformed_and_idle_connections_do_not_abort_login() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

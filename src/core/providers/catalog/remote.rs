@@ -201,6 +201,19 @@ pub async fn refresh_remote_within(max_age_ms: u64) {
     }
 }
 
+/// `type` values a gateway uses for models that are not chat models.
+const NON_CHAT_TYPES: &[&str] = &[
+    "embedding",
+    "image",
+    "video",
+    "audio",
+    "speech",
+    "tts",
+    "transcription",
+    "moderation",
+    "rerank",
+];
+
 /// Ids that are plainly not chat models — keep the picker for models a
 /// coding agent can actually talk to.
 fn looks_like_chat_model(id: &str) -> bool {
@@ -256,9 +269,11 @@ async fn fetch_models(
             .ok()?;
     // Anthropic declares the bare host as its base (the dialect appends
     // /v1 for /v1/messages); the list endpoint lives under /v1 too, so
-    // fetching `{base}/models` would 404 silently on every refresh.
+    // fetching `{base}/models` would 404 silently on every refresh. Its
+    // default page is 20 entries and pagination is not followed, so ask
+    // for the whole list at once.
     let url = if catalog_strategy == crate::core::providers::registry::CatalogStrategy::Anthropic {
-        format!("{base}/v1/models")
+        format!("{base}/v1/models?limit=1000")
     } else {
         format!("{base}/models")
     };
@@ -327,7 +342,9 @@ async fn fetch_models(
         // models: Gemini says so via supportedGenerationMethods, ChatGPT
         // via the work-mode flag (the codex lane), OpenAI-style gateways via
         // a `type` field, falling back to the id heuristic when the provider
-        // doesn't say.
+        // doesn't say. `type` is a deny-list of known non-chat kinds, not an
+        // allow-list: Anthropic tags every entry `model`, Together tags
+        // instruct models `chat` and base models `language`.
         if chatgpt {
             if !entry["is_work_mode_model"].as_bool().unwrap_or(false) {
                 continue;
@@ -340,7 +357,7 @@ async fn fetch_models(
                 continue;
             }
         } else if let Some(kind) = entry["type"].as_str() {
-            if kind != "language" {
+            if NON_CHAT_TYPES.contains(&kind) {
                 continue;
             }
         }

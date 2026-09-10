@@ -328,8 +328,10 @@ pub fn catalog() -> Vec<Model> {
                     continue;
                 };
                 // Provider fields describe one deployment and apply to its
-                // built-in seed models too. Per-model declarations below can
-                // still narrow capabilities without changing what newly
+                // built-in seed models too — transport, capabilities, and
+                // the defaults (window, output ceiling, effort, thinking,
+                // pricing) alike. Per-model declarations below can still
+                // narrow capabilities without changing what newly
                 // discovered sibling ids inherit.
                 for existing in models.iter_mut().filter(|m| m.provider == provider) {
                     existing.base_url = base.clone();
@@ -343,6 +345,22 @@ pub fn catalog() -> Vec<Model> {
                     }
                     if let Some(image_input) = entry.image_input {
                         existing.image_input = image_input;
+                    }
+                    if let Some(window) = entry.context_window {
+                        existing.context_window = window;
+                        context_overrides.insert((provider.clone(), existing.id.clone()));
+                    }
+                    if let Some(max_output) = entry.max_output {
+                        existing.max_output = Some(max_output);
+                    }
+                    if let Some(effort) = entry.effort.as_ref().filter(|e| !e.is_empty()) {
+                        existing.effort = effort.clone();
+                    }
+                    if let Some(thinking) = entry.thinking.as_deref().and_then(Thinking::parse) {
+                        existing.thinking = thinking;
+                    }
+                    if let Some(pricing) = &entry.pricing {
+                        existing.pricing = Some(pricing.clone());
                     }
                 }
                 for model in entry.models {
