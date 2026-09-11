@@ -60,7 +60,8 @@ current terminal width after the tree gutter. A clipped label ends with `…`.
 Resize reflows from the original arguments, revealing more on wider terminals.
 Heredoc commands show their invocation through the header and `…`, never the
 script body. Ctrl+O retains the complete command, including line boundaries.
-Quoted `<<` text and here-strings are not treated as heredocs.
+Quoted or escaped `<<`, arithmetic shifts, shell comments, and here-strings
+are not treated as heredocs.
 
 `"tool_label_rows"` in `~/.e/settings.json` changes this budget from 1 through 20
 rows; missing or invalid values use 2. Apply with `/reload`. Existing groups,

@@ -892,27 +892,61 @@ fn label_rows(
 }
 
 /// Return the command through its first heredoc header, without the body.
-/// Ignore quoted/escaped operators and here-strings; this is a display-only
-/// abbreviation, never shell parsing used to authorize or execute a command.
+/// Ignore quotes, escapes, here-strings, comments, and arithmetic contexts.
+/// This display-only abbreviation never authorizes or executes a command.
 fn heredoc_header(command: &str) -> Option<&str> {
     let mut chars = command.char_indices().peekable();
     let mut quote = None;
     let mut heredoc = false;
+    let mut comment = false;
+    let mut word_start = true;
+    let mut arithmetic_depth = 0usize;
     while let Some((index, ch)) = chars.next() {
+        if comment {
+            if ch != '\n' {
+                continue;
+            }
+            comment = false;
+        }
         if ch == '\\' && quote != Some('\'') {
-            chars.next();
+            if chars.next().is_some_and(|(_, escaped)| escaped != '\n') {
+                word_start = false;
+            }
             continue;
         }
-        if ch == '\n' && heredoc && quote.is_none() {
+        if ch == '\n' && heredoc && quote.is_none() && arithmetic_depth == 0 {
             return Some(&command[..index]);
         }
         if let Some(delimiter) = quote {
             if ch == delimiter {
                 quote = None;
             }
-        } else if ch == '\'' || ch == '"' {
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
             quote = Some(ch);
-        } else if ch == '<' && chars.peek().is_some_and(|(_, next)| *next == '<') {
+            word_start = false;
+            continue;
+        }
+        if arithmetic_depth > 0 {
+            match ch {
+                '(' => arithmetic_depth += 1,
+                ')' => arithmetic_depth -= 1,
+                _ => {}
+            }
+            continue;
+        }
+        if ch == '#' && word_start {
+            comment = true;
+            continue;
+        }
+        if ch == '(' && chars.peek().is_some_and(|(_, next)| *next == '(') {
+            chars.next();
+            arithmetic_depth = 2;
+            word_start = false;
+            continue;
+        }
+        if ch == '<' && chars.peek().is_some_and(|(_, next)| *next == '<') {
             chars.next();
             if chars.peek().is_some_and(|(_, next)| *next == '<') {
                 chars.next();
@@ -920,6 +954,7 @@ fn heredoc_header(command: &str) -> Option<&str> {
                 heredoc = true;
             }
         }
+        word_start = ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
     }
     None
 }

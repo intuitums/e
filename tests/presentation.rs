@@ -227,6 +227,13 @@ fn heredoc_bodies_stay_in_review_not_in_the_transcript() {
         ("cat <<-EOF\nBODY_MARKER\nEOF", true),
         ("echo '<<EOF'\necho BODY_MARKER", false),
         ("cat <<< hello\necho BODY_MARKER", false),
+        ("echo $((1 << 2))\necho BODY_MARKER", false),
+        ("echo ok # <<EOF\necho BODY_MARKER", false),
+        ("((value = (1 << 2)))\necho BODY_MARKER", false),
+        ("echo $((1 << 2)); cat <<EOF\nBODY_MARKER\nEOF", true),
+        ("echo ok # <<FAKE\ncat <<EOF\nBODY_MARKER\nEOF", true),
+        ("cat <<EOF # don't parse this quote\nBODY_MARKER\nEOF", true),
+        ("echo word#suffix; cat <<EOF\nBODY_MARKER\nEOF", true),
         ("echo \\<\\<EOF\necho BODY_MARKER", false),
     ] {
         let presentation = e::core::tools::present("bash", &serde_json::json!({"command": source}));

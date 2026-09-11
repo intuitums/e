@@ -13,6 +13,7 @@ the pipeline publishes.
 - Tool labels use two terminal-width rows by default, adjustable through
   `tool_label_rows`. Wider windows reveal more text; heredoc bodies stay in
   Ctrl+O rather than filling the transcript. Full commands remain available.
+  Arithmetic shifts and `<<` inside shell comments do not hide subsequent lines.
 - Tool trees keep one closing review hint after completion. Ctrl+O branches
   stay connected through arguments, output, and omission rows without changing
   the review layout or controls.
