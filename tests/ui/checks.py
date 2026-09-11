@@ -24,6 +24,68 @@ class Frame:
         return next((i for i, row in enumerate(self.rows) if text in row), None)
 
 
+def tui_mode(frames):
+    """Default startup is compact; the settings switch pins and unpins the dock."""
+    first = frames[0]
+    row = first.find('┃ ')
+    assert row is not None and row < len(first.rows) - 3, 'startup is not inline'
+    assert any(frame.find('TUI Mode') is not None
+               and any('Inline  Fullscreen' in row for row in frame.rows)
+               for frame in frames), 'missing TUI Mode choices'
+    bare = [frame for frame in frames if frame.find('TUI Mode') is None]
+    assert any(frame.find('┃ ') == len(frame.rows) - 3 for frame in bare), 'Fullscreen option did not pin'
+    final = frames[-1]
+    row = final.find('┃ ')
+    assert row is not None and row < len(final.rows) - 3, 'inline option did not unpin'
+
+
+def single_tool(frames):
+    """A single wrapped call retains its rails and footer after completion."""
+    for action in ('Running', 'Ran'):
+        observed = [frame for frame in frames if frame.find(f'├ {action} printf') is not None]
+        assert observed, f'no wrapped {action} call captured'
+        for frame in observed:
+            start = frame.find(f'├ {action} printf')
+            end = frame.find('└ ctrl+o to view')
+            assert end is not None and end > start, 'missing closing hint below call'
+            for row in range(start + 1, end):
+                assert frame.rows[row].startswith('│ '), 'wrapped call has a broken rail'
+                assert frame.colors[row][0] == frame.colors[start][0], 'rail color changed'
+    completed = [frame for frame in frames if frame.find('SINGLE_TOOL_FINISHED') is not None]
+    assert {len(frame.rows[0]) for frame in completed} >= {44, 140}, 'completed label never resized'
+    for frame in completed:
+        start = frame.find('├ Ran printf')
+        end = frame.find('└ ctrl+o to view')
+        assert start is not None and end is not None
+        if len(frame.rows[0]) == 44:
+            assert end == start + 2, 'narrow label exceeded its two-row budget'
+            assert frame.rows[end - 1].rstrip().endswith('…'), 'missing truncation marker'
+        else:
+            assert end == start + 1, 'wide label did not reflow'
+            assert 'long enough to wrap' in frame.rows[start], 'resize did not reveal the source'
+    assert frames[-1].find('SINGLE_TOOL_FINISHED') is not None, 'single tool did not finish'
+
+
+def heredoc_tool(frames):
+    """The main tree hides heredoc bodies; Ctrl+O still shows the full command."""
+    final = frames[-1]
+    assert final.find('HEREDOC_FINISHED') is not None, 'heredoc turn did not finish'
+    row = final.find("├ Ran cat <<'E_LABEL_SCRIPT' >/dev/null …")
+    assert row is not None, 'missing abbreviated heredoc header'
+    assert final.rows[row + 1].startswith('└ ctrl+o to view'), 'heredoc body occupied preview rows'
+    assert final.find('HEREDOC_BODY_ONLY') is None, 'body leaked into the main tree'
+    assert any(frame.find('HEREDOC_BODY_ONLY') is not None for frame in frames), 'review lost the body'
+    for mode, ending in [('Review', '└ 1 more rows · → to expand'), ('Full detail', '└ REVIEW_LINE_FOUR')]:
+        observed = [frame for frame in frames if frame.find(f'┃ {mode} ·') is not None]
+        assert observed, f'{mode} was not opened'
+        for frame in observed:
+            start = frame.find("├ Ran cat <<'E_LABEL_SCRIPT'")
+            end = frame.find(ending)
+            assert start is not None and end is not None and end > start, 'review closed before its output'
+            assert all(frame.rows[row].startswith('│ ') for row in range(start + 1, end)), 'broken review rail'
+
+
+
 def tool_tree(frames):
     """Check the dock through live output, wrapping, resize, and completion."""
     observed = [frame for frame in frames if frame.find('┃ draft while tools run') is not None]
@@ -37,6 +99,7 @@ def tool_tree(frames):
     assert live, 'no connected running command was captured'
     assert any(frame.find('ctrl+o to view') is not None for frame in live), 'no in-tree output hint'
     for frame in live:
+        assert sum('ctrl+o to view' in row for row in frame.rows) == 1, 'duplicate review hints'
         row = frame.find('├ Running')
         assert frame.rows[row + 1].startswith('│'), 'wrapped command repeated or lost its branch'
         rail_color = frame.colors[row][0]
@@ -84,6 +147,9 @@ def diff_counts(frames):
 
 
 CHECKS = {
+    'heredoc-tool': heredoc_tool,
+    'single-tool': single_tool,
+    'tui-mode': tui_mode,
     'tool-tree': tool_tree,
     'shell-composer': shell_composer,
     'body-error': body_error,

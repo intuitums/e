@@ -1,8 +1,10 @@
 # Inline rendering contract
 
-The main screen shows a transcript above a bottom-pinned composer and status area. The renderer owns visible rows; the terminal owns rows that have
-scrolled out of view. Those historical rows are snapshots of what was shown
-at that time. They are not a second editable copy of the session document.
+The main screen starts inline beneath the shell prompt, with the composer and
+status area following the transcript. The renderer owns visible rows; the
+terminal owns rows that have scrolled out of view. Those historical rows are
+snapshots of what was shown at that time. They are not a second editable copy
+of the session document.
 
 - Streaming may change visible Markdown, tool rows, and the dock. A large
   append must paint every new row on its way into scrollback, even if an
@@ -10,9 +12,14 @@ at that time. They are not a second editable copy of the session document.
 - A shorter full-height frame repaints its visible tail in place. Its logical
   window moves backward without scrolling the terminal backward, keeping the
   dock at the bottom when tool previews disappear or panels close.
-- Short conversations leave blank space above the dock. Set
-  `"composer_position": "inline"` in `~/.e/settings.json` to retain the compact
-  startup layout instead. The default is `"bottom"`. Apply with `/reload`.
+- Short conversations use a compact layout by default. In `/settings`, change
+  **TUI Mode** from **Inline** to **Fullscreen** to pin the composer to the
+  bottom of the terminal, leaving blank space above it. Changes apply immediately
+  and persist in `~/.e/settings.json` as `"tui_mode": "inline"` or
+  `"tui_mode": "fullscreen"`. Missing or invalid values use `inline`.
+  Manual file edits apply with `/reload`. The older
+  `"composer_position": "bottom"` preference selects Fullscreen until a TUI mode
+  is saved. Both modes use the normal terminal screen and native scrollback.
 - Resize redraws only the new visible tail. It does not erase scrollback or
   print the entire transcript again. The terminal controls how existing
   history wraps. The full-detail viewer renders current source at the new
@@ -40,14 +47,33 @@ parsing or shared-row storage should be justified by a measured bottleneck.
 ## Tool trees and shell input
 
 Running and completed calls occupy the same tree positions, in provider order.
-A call's first row has a branch connector; wrapped continuation rows use `│`.
 Paths, commands, failure reasons, and edit statistics wrap by display-cell width.
-Review uses the same action-row layout and attaches details after the final row.
+Every visible tool has a `├` branch, with `│` on wrapped continuation rows.
+Groups close with `└ ctrl+o to view`, including single-tool and completed groups.
+If the closing hint wraps, its elbow stays on the final display row.
+Review attaches details after each action's final row. Its branch stays
+connected through the output and closes on the group's final displayed row,
+including any omission hint. Review adds no redundant shortcut to open itself.
 
-Running commands show a wrapped output tail inside their branch. The last
-command closes the tree with `└ ctrl+o to view`, or a count of omitted rows
-followed by that hint. Connectors share the theme's `muted` token; output text
-uses `dim`. File writes and edits do not stream their contents inline.
+Tool action labels use at most two display rows by default, measured at the
+current terminal width after the tree gutter. A clipped label ends with `…`.
+Resize reflows from the original arguments, revealing more on wider terminals.
+Heredoc commands show their invocation through the header and `…`, never the
+script body. Ctrl+O retains the complete command, including line boundaries.
+Quoted or escaped `<<`, arithmetic shifts, shell comments, and here-strings
+are not treated as heredocs.
+
+`"tool_label_rows"` in `~/.e/settings.json` changes this budget from 1 through 20
+rows; missing or invalid values use 2. Apply with `/reload`. Existing groups,
+new calls, and restored sessions use the same preference. Review is uncapped.
+Failure status and colored edit counts are not truncated with the arguments.
+Failure reasons have their own bounded continuation using the same row budget.
+
+Running commands show a wrapped output tail inside their branch, followed by
+an omission count when needed. There is one review hint per group, always on
+its own closing row, never embedded in a preview's omission count. Connectors
+share the theme's `muted` token; output text uses `dim`. File writes and edits
+do not stream their contents inline.
 Edit/write counts use the theme's green added-marker and red removed-marker
 tokens, including their 256-color fallbacks. The slash stays dim and zero counts
 are omitted. Wrapping and review preserve those colors.

@@ -399,7 +399,7 @@ fn finished_tool_runs_collapse_to_the_reference_group() {
     transcript.collapse_tools();
 
     // The reference's own literal shape, e's verbs: header with tallies
-    // ("1 read · 1 edit · 1 command · 1 failed"), ├ children, └ last.
+    // ("1 read · 1 edit · 1 command · 1 failed"), ├ children, └ review hint.
     assert_eq!(transcript.blocks.len(), 2);
     let group = &transcript.blocks[1];
     assert_eq!(group.kind, Kind::ToolGroup);
@@ -429,7 +429,8 @@ fn finished_tool_runs_collapse_to_the_reference_group() {
     );
     assert_eq!(plain[1], "├ Read runtime.rs");
     assert_eq!(plain[2], "├ Edited main.rs");
-    assert_eq!(plain[3], "└ Ran cargo build");
+    assert_eq!(plain[3], "├ Ran cargo build");
+    assert_eq!(plain[4], "└ ctrl+o to view");
 
     // The reference pluralization: "3 commands", but "2 read".
     let mut t2 = Transcript::default();
@@ -502,11 +503,13 @@ fn live_tool_group_replaces_running_state_and_streams_output() {
     group.start_tool(1);
     // A started call stays in its tree; pending siblings have no row yet.
     let running = group.lines_for_test(&theme, 80);
-    assert_eq!(running.len(), 2);
+    assert_eq!(running.len(), 3);
+    assert_eq!(e::core::tools::strip_ansi(&running[2]), "└ ctrl+o to view");
     assert!(running[1].contains("Reading src/core/mod.rs"));
     assert!(!running.iter().any(|line| line.contains("cargo test")));
     let narrow = group.lines_for_test(&theme, 20);
-    assert_eq!(narrow.len(), 3);
+    assert_eq!(narrow.len(), 4);
+    assert_eq!(e::core::tools::strip_ansi(&narrow[3]), "└ ctrl+o to view");
     assert!(narrow[1].contains("Reading"));
     assert!(narrow[2].contains("src/core/mod.rs"));
     assert!(narrow[2].contains('│'));
@@ -527,11 +530,14 @@ fn live_tool_group_replaces_running_state_and_streams_output() {
     assert!(streaming[2].contains('├'));
     assert!(!streaming.iter().any(|line| line.contains("one")));
     assert!(streaming.iter().any(|line| line.contains("six")));
-    assert!(streaming
-        .last()
-        .unwrap()
-        .contains("1 more row · ctrl+o to view"));
-    assert!(streaming.last().unwrap().contains('└'));
+    assert_eq!(
+        e::core::tools::strip_ansi(&streaming[streaming.len() - 2]),
+        "│ 1 more row"
+    );
+    assert_eq!(
+        e::core::tools::strip_ansi(streaming.last().unwrap()),
+        "└ ctrl+o to view"
+    );
 
     group.finish_tool(
         2,
@@ -581,9 +587,10 @@ fn running_write_and_edit_rows_stay_lean() {
     // File content never becomes a command-output preview.
     group.append_tool_output(1, "hello\nworld\n");
     let rows = group.lines_for_test(&theme, 80);
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3);
     assert!(rows[1].contains("Writing src/lib.rs"));
-    assert!(rows[1].contains('└'));
+    assert!(rows[1].contains('├'));
+    assert_eq!(e::core::tools::strip_ansi(&rows[2]), "└ ctrl+o to view");
     assert!(!rows.iter().any(|line| line.contains('│')));
 
     // Edits are the same; the completion summary rides the row itself.
@@ -641,10 +648,13 @@ fn silent_batches_continue_one_tree_and_long_trees_keep_rows() {
         t.blocks[2].start_tool(id);
     }
     let rows = t.blocks[2].lines_for_test(&theme, 80);
-    assert_eq!(rows.len(), 1 + 13);
+    assert_eq!(rows.len(), 1 + 13 + 1);
     assert!(rows[1].contains("Reading c.rs"));
-    assert!(rows.last().unwrap().contains("Reading 11.rs"));
-    assert!(rows.last().unwrap().contains('└'));
+    assert!(rows[13].contains("Reading 11.rs"));
+    assert_eq!(
+        e::core::tools::strip_ansi(rows.last().unwrap()),
+        "└ ctrl+o to view"
+    );
     assert!(!rows.iter().any(|line| line.contains("earlier tool calls")));
 }
 
@@ -944,7 +954,7 @@ fn review_projection_shows_every_child_with_its_detail_link() {
     assert!(rows[1].0.contains("Read a.rs"));
     assert_eq!(rows[1].1, Some(e::tui::transcript::ToolDetail::Stored(41)));
     assert!(rows[2].0.contains("Reading b.rs"), "{:?}", rows[2].0);
-    assert!(rows[2].0.contains('└'));
+    assert!(rows[2].0.contains('├'));
     assert_eq!(rows[2].1, None);
 }
 
@@ -972,7 +982,8 @@ fn sealed_groups_report_missing_results_instead_of_hiding_them() {
     group.finish_tool(1, e::core::tools::ToolOutcome::Completed, "done".into(), "");
     // Live: the second call is pending — no row, no unreported tally.
     let live = group.lines_for_test(&theme, 80);
-    assert_eq!(live.len(), 2);
+    assert_eq!(live.len(), 3);
+    assert_eq!(e::core::tools::strip_ansi(&live[2]), "└ ctrl+o to view");
     assert!(!group.text.contains("unreported"));
 
     // Sealed (a restored session): the recorded call whose result never
@@ -981,8 +992,9 @@ fn sealed_groups_report_missing_results_instead_of_hiding_them() {
     group.seal();
     assert!(group.text.contains("· 1 unreported"), "{}", group.text);
     let sealed = group.lines_for_test(&theme, 80);
-    assert_eq!(sealed.len(), 3);
+    assert_eq!(sealed.len(), 4);
     assert!(sealed[2].contains("Tool completion was not reported"));
+    assert_eq!(e::core::tools::strip_ansi(&sealed[3]), "└ ctrl+o to view");
 }
 
 #[test]

@@ -303,6 +303,7 @@ struct App {
     /// they refresh only via `refresh_status_cache`.
     bottom_pinned: bool,
     live_preview_rows: usize,
+    tool_label_rows: usize,
     signed_in: bool,
     status_effort: Option<String>,
 }
@@ -354,6 +355,7 @@ impl App {
             if !rows.is_empty() {
                 rows.push(String::new());
             }
+            let group_start = rows.len();
             for (row, detail) in lines {
                 rows.push(crate::tui::markdown::clip_styled(&row, width));
                 use crate::tui::transcript::ToolDetail;
@@ -411,6 +413,13 @@ impl App {
                             .theme
                             .fg("dim", &format!("{hidden} more rows · → to expand")),
                     ));
+                }
+            }
+            // Close after the final argument, output, or omission row. Closing
+            // the action first would leave its inserted output disconnected.
+            if block.kind == Kind::ToolGroup && width >= 3 && rows.len() > group_start + 1 {
+                if let Some(last) = rows.last_mut() {
+                    *last = last.replacen(['├', '│'], "└", 1);
                 }
             }
         }
@@ -1019,6 +1028,7 @@ impl App {
         // instead of splicing into a restored one.
         for block in &mut self.transcript.blocks {
             if block.kind == Kind::ToolGroup {
+                block.tool_label_rows = self.tool_label_rows;
                 block.seal();
             }
         }
@@ -1963,22 +1973,26 @@ impl App {
         self.keymap = crate::core::config::keybindings::load();
     }
 
-    /// Re-derive the cached sign-in and effort state from disk. Call after
-    /// anything that can change them: sign-in, model switch, effort cycle,
-    /// settings changes, /reload.
+    /// Refresh cached sign-in, effort, and layout preferences from disk.
+    /// Call after sign-in, model switches, effort cycles, settings changes,
+    /// and /reload.
     fn refresh_status_cache(&mut self) {
         self.signed_in =
             crate::core::auth::signed_in(&crate::core::auth::load(), &self.agent.model.provider);
         self.status_effort = self.agent.effort();
-        self.bottom_pinned = crate::core::config::settings::get_string("composer_position")
-            .as_deref()
-            != Some("inline");
+        self.bottom_pinned = crate::core::config::settings::tui_mode() == "fullscreen";
         self.live_preview_rows = crate::core::config::settings::get_u64("tool_preview_rows")
             .filter(|n| *n <= 20)
             .unwrap_or(5) as usize;
+        self.tool_label_rows = crate::core::config::settings::get_u64("tool_label_rows")
+            .filter(|n| (1..=20).contains(n))
+            .unwrap_or(2) as usize;
         for block in &mut self.transcript.blocks {
-            if block.live_preview_rows != self.live_preview_rows {
+            if block.live_preview_rows != self.live_preview_rows
+                || block.tool_label_rows != self.tool_label_rows
+            {
                 block.live_preview_rows = self.live_preview_rows;
+                block.tool_label_rows = self.tool_label_rows;
                 block.touch();
             }
         }
@@ -2546,8 +2560,9 @@ async fn run_scoped(
         rendering_delayed: false,
         last_paint_failure: None,
         light_background: detected,
-        bottom_pinned: true,
+        bottom_pinned: false,
         live_preview_rows: 5,
+        tool_label_rows: 2,
         signed_in: false,
         status_effort: None,
     };
@@ -3870,8 +3885,9 @@ mod tests {
             rendering_delayed: false,
             last_paint_failure: None,
             light_background: false,
-            bottom_pinned: true,
+            bottom_pinned: false,
             live_preview_rows: 5,
+            tool_label_rows: 2,
             signed_in: false,
             status_effort: None,
         }
@@ -3993,6 +4009,60 @@ mod tests {
         assert_ne!(running, reported);
     }
 
+    /// Review closes each group after its inserted output, at either depth.
+    #[test]
+    fn review_branches_connect_through_output_and_omission_rows() {
+        let mut app = session_app();
+        let detail = app.remember_output("output".into(), "one\ntwo\nthree\nfour".into());
+        let mut group = Block::tool_group(
+            (1..=2)
+                .map(|id| {
+                    crate::tui::transcript::ToolChild::pending(
+                        id,
+                        "command".into(),
+                        "Running".into(),
+                        "Ran".into(),
+                        format!("command {id}\nwrapped argument"),
+                    )
+                })
+                .collect(),
+        );
+        for id in 1..=2 {
+            group.start_tool(id);
+            group.finish_tool(
+                id,
+                crate::core::tools::ToolOutcome::Completed,
+                "done".into(),
+                "",
+            );
+        }
+        for child in &mut group.tool_children {
+            child.detail = Some(detail);
+        }
+        app.transcript.push(group);
+        for full in [false, true] {
+            let rows: Vec<_> = app
+                .viewer_rows(80, full)
+                .iter()
+                .map(|row| crate::core::tools::strip_ansi(row))
+                .collect();
+            assert_eq!(rows.iter().filter(|row| row.starts_with('└')).count(), 1);
+            assert_eq!(rows.iter().filter(|row| row.starts_with('├')).count(), 2);
+            assert_eq!(rows[2], "│ wrapped argument");
+            assert_eq!(
+                rows.last().unwrap(),
+                if full {
+                    "└ four"
+                } else {
+                    "└ 1 more rows · → to expand"
+                }
+            );
+            assert!(rows[1..rows.len() - 1]
+                .iter()
+                .all(|row| row.starts_with('├') || row.starts_with('│')));
+        }
+    }
+
     #[test]
     fn review_screen_clamps_scroll_when_the_body_shrinks() {
         let mut app = session_app();
@@ -4017,8 +4087,86 @@ mod tests {
     }
 
     #[test]
+    fn tui_mode_defaults_inline_and_settings_cycle_the_layout() {
+        let home = std::env::temp_dir().join(format!("e-composer-{}", uuid::Uuid::new_v4()));
+        crate::core::config::home::with_home(home.clone(), || {
+            let mut app = session_app();
+            app.refresh_status_cache();
+            assert!(!app.bottom_pinned);
+            assert!(app.frame(80, 30).len() < 30);
+
+            let setting = crate::core::config::settings::all(Vec::new())
+                .into_iter()
+                .find(|setting| setting.key == "tui_mode")
+                .unwrap();
+            assert_eq!(setting.current(), "inline");
+            crate::core::config::settings::set_string("composer_position", "bottom").unwrap();
+            app.refresh_status_cache();
+            assert!(app.bottom_pinned);
+            assert_eq!(setting.current(), "fullscreen");
+            setting.cycle(-1).unwrap();
+            assert_eq!(setting.current(), "inline");
+            setting.cycle(1).unwrap();
+            app.refresh_status_cache();
+            assert!(app.bottom_pinned);
+            assert_eq!(app.frame(80, 30).len(), 30);
+
+            setting.cycle(-1).unwrap();
+            app.refresh_status_cache();
+            assert!(!app.bottom_pinned);
+            assert!(app.frame(80, 30).len() < 30);
+
+            crate::core::config::settings::set_string("tui_mode", "invalid").unwrap();
+            app.refresh_status_cache();
+            assert_eq!(setting.current(), "inline");
+            assert!(!app.bottom_pinned);
+        });
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    /// Reloaded label budgets invalidate existing frames and apply to new groups.
+    #[test]
+    fn tool_label_preference_updates_existing_and_new_groups() {
+        let home = std::env::temp_dir().join(format!("e-tool-labels-{}", uuid::Uuid::new_v4()));
+        crate::core::config::home::with_home(home.clone(), || {
+            let mut app = session_app();
+            app.refresh_status_cache();
+            app.on_session_event(SessionEvent::TurnStart);
+            let batch = || SessionEvent::ToolBatchStart {
+                calls: vec![crate::core::agent::ToolCallPresentation {
+                    id: 1,
+                    category: "command".into(),
+                    running: "Running".into(),
+                    completed: "Ran".into(),
+                    target: "long-command".repeat(20),
+                }],
+            };
+            app.on_session_event(batch());
+            app.on_session_event(SessionEvent::ToolStart { id: 1 });
+            let original = app.transcript.blocks[0].lines_for_test(&app.theme, 40);
+            crate::core::config::store::update_versioned(
+                &home.join("settings.json"),
+                0o644,
+                1,
+                |settings| {
+                    settings.insert("tool_label_rows".into(), serde_json::json!(1));
+                },
+            )
+            .unwrap();
+            app.refresh_status_cache();
+            let shorter = app.transcript.blocks[0].lines_for_test(&app.theme, 40);
+            assert_eq!(shorter.len() + 1, original.len());
+            app.notice("separate group".into());
+            app.on_session_event(batch());
+            assert_eq!(app.transcript.blocks.last().unwrap().tool_label_rows, 1);
+        });
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn command_output_and_completion_do_not_move_the_composer_dock() {
         let mut app = session_app();
+        app.bottom_pinned = true;
         app.on_session_event(SessionEvent::TurnStart);
         app.on_session_event(SessionEvent::ToolBatchStart {
             calls: vec![crate::core::agent::ToolCallPresentation {
