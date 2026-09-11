@@ -7,6 +7,16 @@ the pipeline publishes.
 
 ## Unreleased
 
+- Restore compact Inline mode by default. `/settings` now offers TUI Mode with
+  Inline and Fullscreen choices; existing `composer_position: bottom` preferences
+  remain supported until a new mode is saved.
+- Tool labels use two terminal-width rows by default, adjustable through
+  `tool_label_rows`. Wider windows reveal more text; heredoc bodies stay in
+  Ctrl+O rather than filling the transcript. Full commands remain available.
+- Tool trees keep one closing review hint after completion. Ctrl+O branches
+  stay connected through arguments, output, and omission rows without changing
+  the review layout or controls.
+
 - Review follow-ups: partial tool arguments prevent retries, SSE error messages
   are bounded before publication, and failed diagnostic rollback retires the
   session handle. Error-summary settings load off async workers. Ctrl+C closes
@@ -15,8 +25,8 @@ the pipeline publishes.
   scans tooling filenames containing spaces or quotes.
 
 - Running tools stay in connected, wrapped trees with live output tails and
-  Ctrl+O review. The composer stays at the bottom by default, leading `!` uses
-  a green gutter marker, and edit counts show green additions and red deletions.
+  Ctrl+O review. Leading `!` uses a green gutter marker, and edit counts show
+  green additions and red deletions.
 - Provider failures show brief UI errors and retain local diagnostic details in
   private session sidecars and headless JSON. Partial completions with error
   frames fail instead of appearing successful. Display-off time is not sleep.

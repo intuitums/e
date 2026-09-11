@@ -15,7 +15,7 @@ python3 -m venv /tmp/e-ui-env
 PYTHON=/tmp/e-ui-env/bin/python ./x ui
 ```
 
-`./x ui` builds the current binary and runs the four checked scenarios. It
+`./x ui` builds the current binary and runs the seven checked scenarios. It
 prints the temporary artifact directory and exits nonzero if a check fails.
 Both Linux and macOS CI run it after `./x check` and retain artifacts on failure.
 Rust rendering and PTY tests remain part of `./x test` without Python packages.
@@ -28,7 +28,10 @@ PYTHON=/tmp/e-ui-env/bin/python ./x ui --out /tmp/e-ui-review diff-counts
 
 | Scenario | Contract |
 | --- | --- |
-| `tool-tree` | Composer stays bottom-pinned during concurrent command output, wrapping, resize, and completion. Running commands retain connected rails and output hints. |
+| `single-tool` | One command stays within two label rows, retains connected rails, and reveals its full label after widening the terminal. |
+| `heredoc-tool` | The main tree shows only the heredoc invocation; Ctrl+O retains its body and connects the branch through output in both review depths. |
+| `tui-mode` | Startup is inline by default; the settings switch pins and unpins the composer. |
+| `tool-tree` | With `tui_mode` set to `fullscreen`, composer stays bottom-pinned during concurrent command output, wrapping, resize, and completion. Running commands retain connected rails and output hints. |
 | `shell-composer` | Only the leading `!` turns green; wrapped rails stay neutral; deleting `!` restores the normal gutter. |
 | `body-error` | A truncated provider response retains partial text and displays only the short error. |
 | `diff-counts` | A real file edit displays green `+2` and red `-1`, with neutral labels and separator. |
@@ -62,8 +65,8 @@ PYTHON=/tmp/e-ui-env/bin/python ./x ui --record-only narrow-trust paste-control
 
 Each scenario gets fresh `HOME`, `E_HOME`, and workspace directories. Fixtures
 use dummy credentials, disable extensions and auto-update, and send requests only
-to the local mock provider. Only `tool-tree` and `diff-counts` enable tools.
-They run generated `printf`/`sleep` commands or edit a generated file. No real
+to the local mock provider. Only `tool-tree`, `single-tool`, `heredoc-tool`, and `diff-counts` enable tools.
+They run generated `printf`/`sleep`/`cat` commands or edit a generated file. No real
 provider credentials, paid requests, or repository files are used.
 
 ## Limits

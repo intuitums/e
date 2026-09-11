@@ -202,7 +202,9 @@ fn target_command(args: &Value) -> String {
         .as_str()
         .or_else(|| args["handle"].as_str())
         .unwrap_or("");
-    sanitize_inline(value)
+    // Keep shell line boundaries so the TUI can hide heredoc bodies without
+    // losing the full command in review or restored sessions.
+    sanitize_display(value)
 }
 fn target_pattern(args: &Value) -> String {
     sanitize_inline(args["pattern"].as_str().unwrap_or(""))

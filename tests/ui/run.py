@@ -61,14 +61,21 @@ class Provider(http.server.BaseHTTPRequestHandler):
                         'name': 'edit', 'arguments': json.dumps({
                             'path': 'sample.txt', 'old_string': 'old line', 'new_string': 'new line\nextra line'})}}
                     events = [{'choices': [{'delta': {'tool_calls': [call]}, 'finish_reason': 'tool_calls'}]}]
-            elif prompt == 'tool-tree':
+            elif prompt in ('tool-tree', 'single-tool', 'heredoc-tool'):
                 if any(message['role'] == 'tool' for message in request['messages']):
-                    events = [{'choices': [{'delta': {'content': 'CONNECTED_TOOLS_FINISHED'}}]}]
+                    marker = {'single-tool': 'SINGLE_TOOL_FINISHED', 'heredoc-tool': 'HEREDOC_FINISHED'}.get(prompt, 'CONNECTED_TOOLS_FINISHED')
+                    events = [{'choices': [{'delta': {'content': marker}}]}]
                 else:
                     commands = [
                         "printf 'A long command summary that wraps without losing its arguments\\n'; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'first command output row %s with a long suffix\\n' \"$i\"; sleep 0.2; done",
                         "printf 'Second concurrent command\\n'; sleep 0.8; printf 'SECOND_FINISHED\\n'",
                     ]
+                    if prompt == 'single-tool':
+                        commands = ["printf 'SINGLE_OUTPUT\\n'; sleep 1 # a single command with arguments long enough to wrap"]
+                    if prompt == 'heredoc-tool':
+                        commands = ["cat <<'E_LABEL_SCRIPT' >/dev/null\n" +
+                                    'HEREDOC_BODY_ONLY ctrl+o to view\n' * 3 +
+                                    "E_LABEL_SCRIPT\nprintf 'REVIEW_LINE_ONE\\nREVIEW_LINE_TWO\\nREVIEW_LINE_THREE\\nREVIEW_LINE_FOUR\\n'"]
                     calls = [{'index': i, 'id': f'tool-{i}', 'type': 'function',
                               'function': {'name': 'bash', 'arguments': json.dumps({'command': command})}}
                              for i, command in enumerate(commands)]
@@ -100,6 +107,9 @@ class Provider(http.server.BaseHTTPRequestHandler):
 # Each step waits, then sends keys or resizes. Frames are taken before the
 # next step, so transient streaming states survive alongside the final view.
 SCENARIOS = {
+    'single-tool': [(0.8, (44, 30)), (0.3, 'single-tool\r'), (0.5, ''), (2, ''), (0.3, (140, 30)), (0.3, (44, 30)), (0.3, '')],
+    'heredoc-tool': [(0.8, 'heredoc-tool\r'), (2, '\x0f'), (0.5, '\x1b[C'), (0.5, '\x1b'), (0.5, '')],
+    'tui-mode': [(0.8, '/settings\r'), (0.4, '\x1b[B\x1b[C'), (0.4, '\x1b'), (0.4, '/settings\r'), (0.4, '\x1b[B\x1b[D'), (0.4, '\x1b'), (0.4, '')],
     'diff-counts': [(0.8, 'diff-counts\r'), (2, '')],
     'tool-tree': [(0.8, 'tool-tree\r'), (0.3, 'draft while tools run'), (0.5, (44, 18)), (0.6, ''), (2, ''), (1, '')],
     'shell-composer': [(0.8, '!'), (0.3, "printf 'A command that wraps across the composer'"), (0.4, (36, 14)), (0.4, '\x01\x1b[3~'), (0.4, '')],
@@ -126,6 +136,9 @@ SCENARIOS = {
 
 # Bounded readiness checks supplement the pacing used to exercise live frames.
 WAIT_FOR = {
+    ('heredoc-tool', 1): b'HEREDOC_FINISHED',
+    ('single-tool', 2): b'Running',
+    ('single-tool', 3): b'SINGLE_TOOL_FINISHED',
     ('tool-tree', 1): b'Running',
     ('tool-tree', 5): b'CONNECTED_TOOLS_FINISHED',
     ('diff-counts', 1): b'DIFF_FINISHED',
@@ -150,7 +163,10 @@ def capture(name, steps, out, port):
         'api': 'openai-completions', 'models': ['audit']}}}))
     (state / 'auth.json').write_text('{"mock":{"key":"synthetic-test-key"}}')
     (state / 'auth.json').chmod(0o600)
-    (state / 'settings.json').write_text('{"auto_update":"off"}')
+    settings = {'auto_update': 'off'}
+    if name == 'tool-tree':
+        settings['tui_mode'] = 'fullscreen'
+    (state / 'settings.json').write_text(json.dumps(settings))
     if name not in ('trust-exit', 'narrow-trust', 'path-control'):
         (state / 'trust.json').write_text(json.dumps({str(workspace): {'trusted': True}}))
     env = {'HOME': str(home), 'E_HOME': str(state), 'PATH': '/usr/bin:/bin',
@@ -159,7 +175,7 @@ def capture(name, steps, out, port):
     if pid == 0:
         os.chdir(workspace)
         args = ['e', '--no-save', '--no-extensions', '--model', 'mock/audit']
-        if name not in ('tool-tree', 'diff-counts'):
+        if name not in ('tool-tree', 'single-tool', 'heredoc-tool', 'diff-counts'):
             args.append('--no-tools')
         os.execve(str(ROOT / 'target/debug/e'), args, env)
     raw = bytearray()

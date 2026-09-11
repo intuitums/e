@@ -136,6 +136,8 @@ pub struct Block {
     pub more: usize,
     /// Maximum wrapped rows in a live command preview.
     pub live_preview_rows: usize,
+    /// Maximum action-label rows in the transcript; review remains unabridged.
+    pub tool_label_rows: usize,
     cache: Option<RenderCache>,
     /// True while provider deltas are appending to this text block.
     streaming: bool,
@@ -163,6 +165,7 @@ impl Block {
             preview: Vec::new(),
             more: 0,
             live_preview_rows: 5,
+            tool_label_rows: 2,
             cache: None,
             streaming: false,
             generation: 0,
@@ -361,12 +364,13 @@ impl Block {
     /// The review screen's projection of this block: every row, with child
     /// rows carrying their stored-detail id so the screen can splice the
     /// full output beneath. Details attach to the final wrapped action row.
+    /// Branches stay open; the caller closes the group after inserting output.
     pub fn review_lines(
         &mut self,
         theme: &Theme,
         width: usize,
     ) -> Vec<(String, Option<ToolDetail>)> {
-        if self.kind != Kind::ToolGroup || self.tool_children.is_empty() {
+        if self.kind != Kind::ToolGroup {
             // The cached path: the projection pays only for blocks whose
             // content actually changed, sharing the main transcript's cache.
             return self
@@ -379,16 +383,17 @@ impl Block {
         let marker = theme.fg("muted", "●");
         let header = clip_plain(&self.text, width.saturating_sub(2));
         let mut rows = vec![(format!("{marker} {}", theme.fg("muted", &header)), None)];
-        let last_visible = self
-            .tool_children
-            .iter()
-            .rposition(|child| child.state != ToolState::Pending || self.done);
+        if self.tool_children.is_empty() {
+            for child in &self.children {
+                rows.extend(
+                    tree_rows(theme, width, "├", &theme.fg("muted", child))
+                        .into_iter()
+                        .map(|row| (row, None)),
+                );
+            }
+            return rows;
+        }
         for (index, child) in self.tool_children.iter().enumerate() {
-            let connector = if Some(index) == last_visible {
-                "└"
-            } else {
-                "├"
-            };
             if child.state == ToolState::Pending && !self.done {
                 continue;
             }
@@ -397,7 +402,7 @@ impl Block {
                     tree_rows(
                         theme,
                         width,
-                        connector,
+                        "├",
                         &theme.fg("muted", "Tool completion was not reported"),
                     )
                     .into_iter()
@@ -405,7 +410,7 @@ impl Block {
                 );
                 continue;
             }
-            let wrapped = child_rows(theme, width, child, connector);
+            let wrapped = child_rows(theme, width, child, "├", None);
             let last = wrapped.len().saturating_sub(1);
             rows.extend(wrapped.into_iter().enumerate().map(|(i, row)| {
                 (
@@ -549,16 +554,15 @@ impl Block {
                 let header = clip_plain(&self.text, width.saturating_sub(2));
                 let mut rows = vec![format!("{marker} {}", theme.fg("muted", &header))];
                 if self.tool_children.is_empty() {
-                    for (i, child) in self.children.iter().enumerate() {
-                        let connector = if i + 1 == self.children.len() {
-                            "└"
-                        } else {
-                            "├"
-                        };
-                        rows.push(format!(
-                            "{} {}",
-                            theme.fg("muted", connector),
-                            theme.fg("muted", child)
+                    for child in &self.children {
+                        rows.extend(label_rows(theme, width, "├", child, self.tool_label_rows));
+                    }
+                    if !self.children.is_empty() {
+                        rows.extend(tree_rows(
+                            theme,
+                            width,
+                            "└",
+                            &theme.fg("muted", "ctrl+o to view"),
                         ));
                     }
                     return rows;
@@ -568,7 +572,7 @@ impl Block {
                     .iter()
                     .filter(|child| child.state != ToolState::Pending || self.done)
                     .collect();
-                for (index, child) in visible.iter().enumerate() {
+                for child in &visible {
                     if child.state == ToolState::Pending {
                         // Mid-run, a pending call has no row yet. In a sealed
                         // group the call is on record and its result never
@@ -576,31 +580,34 @@ impl Block {
                         if !self.done {
                             continue;
                         }
-                        let last = index + 1 == visible.len();
-                        let connector = if last { "└" } else { "├" };
                         rows.extend(tree_rows(
                             theme,
                             width,
-                            connector,
+                            "├",
                             &theme.fg("muted", "Tool completion was not reported"),
                         ));
                         continue;
                     }
-                    let last = index + 1 == visible.len();
                     let live_command =
                         child.state == ToolState::Running && child.category == "command";
-                    let connector = if last && !live_command { "└" } else { "├" };
-                    rows.extend(child_rows(theme, width, child, connector));
+                    rows.extend(child_rows(
+                        theme,
+                        width,
+                        child,
+                        "├",
+                        Some(self.tool_label_rows),
+                    ));
                     if live_command {
-                        append_tool_preview(
-                            &mut rows,
-                            child,
-                            theme,
-                            width,
-                            self.live_preview_rows,
-                            last,
-                        );
+                        append_tool_preview(&mut rows, child, theme, width, self.live_preview_rows);
                     }
+                }
+                if !visible.is_empty() {
+                    rows.extend(tree_rows(
+                        theme,
+                        width,
+                        "└",
+                        &theme.fg("muted", "ctrl+o to view"),
+                    ));
                 }
                 rows
             }
@@ -805,15 +812,29 @@ fn diff_stat_suffix(theme: &Theme, result: &str) -> String {
     format!(" {suffix}")
 }
 
-/// Wrap one tree label without repeating its branch on continuation rows.
-/// Styling and display-cell widths are shared by action rows and previews.
+/// Wrap a tree label with one branch and connected continuation rows.
+/// A closing elbow belongs on the final display row, never above a trailing rail.
 pub(crate) fn tree_rows(theme: &Theme, width: usize, connector: &str, label: &str) -> Vec<String> {
     let gutter = if width >= 3 { 2 } else { 0 };
-    wrap_styled(label, width.saturating_sub(gutter).max(1))
+    let wrapped = wrap_styled(label, width.saturating_sub(gutter).max(1));
+    let last = wrapped.len().saturating_sub(1);
+    wrapped
         .into_iter()
         .enumerate()
         .map(|(i, line)| {
-            let marker = if i == 0 { connector } else { "│" };
+            let marker = if connector == "└" {
+                if i == last {
+                    "└"
+                } else if i == 0 {
+                    "├"
+                } else {
+                    "│"
+                }
+            } else if i == 0 {
+                connector
+            } else {
+                "│"
+            };
             let prefix = if gutter == 2 {
                 format!("{marker} ")
             } else {
@@ -824,8 +845,93 @@ pub(crate) fn tree_rows(theme: &Theme, width: usize, connector: &str, label: &st
         .collect()
 }
 
+/// Wrap a plain action to the current terminal width, eliding only the preview.
+/// Bound the input before word wrapping so a pasted script cannot allocate
+/// thousands of hidden rows. The original label stays on the child for review.
+fn label_rows(
+    theme: &Theme,
+    width: usize,
+    connector: &str,
+    label: &str,
+    budget: usize,
+) -> Vec<String> {
+    let columns = width.saturating_sub(if width >= 3 { 2 } else { 0 }).max(1);
+    let budget = budget.clamp(1, 20);
+    let max_cells = columns.saturating_mul(budget + 1);
+    let mut prefix = String::new();
+    let mut cells = 0;
+    let mut omitted = false;
+    for ch in label
+        .split_whitespace()
+        .flat_map(|word| word.chars().chain(std::iter::once(' ')))
+    {
+        cells += UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cells > max_cells {
+            omitted = true;
+            break;
+        }
+        prefix.push(ch);
+    }
+    let mut lines = wrap_styled(prefix.trim_end(), columns);
+    omitted |= lines.len() > budget;
+    lines.truncate(budget);
+    if omitted {
+        if let Some(last) = lines.last_mut() {
+            *last = format!(
+                "{}…",
+                prefix_by_width(last, columns.saturating_sub(1)).trim_end()
+            );
+        }
+    }
+    tree_rows(
+        theme,
+        width,
+        connector,
+        &theme.fg("muted", &lines.join("\n")),
+    )
+}
+
+/// Return the command through its first heredoc header, without the body.
+/// Ignore quoted/escaped operators and here-strings; this is a display-only
+/// abbreviation, never shell parsing used to authorize or execute a command.
+fn heredoc_header(command: &str) -> Option<&str> {
+    let mut chars = command.char_indices().peekable();
+    let mut quote = None;
+    let mut heredoc = false;
+    while let Some((index, ch)) = chars.next() {
+        if ch == '\\' && quote != Some('\'') {
+            chars.next();
+            continue;
+        }
+        if ch == '\n' && heredoc && quote.is_none() {
+            return Some(&command[..index]);
+        }
+        if let Some(delimiter) = quote {
+            if ch == delimiter {
+                quote = None;
+            }
+        } else if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+        } else if ch == '<' && chars.peek().is_some_and(|(_, next)| *next == '<') {
+            chars.next();
+            if chars.peek().is_some_and(|(_, next)| *next == '<') {
+                chars.next();
+            } else {
+                heredoc = true;
+            }
+        }
+    }
+    None
+}
+
 /// One child's wrapped action, shared by the transcript and review screen.
-fn child_rows(theme: &Theme, width: usize, child: &ToolChild, connector: &str) -> Vec<String> {
+fn child_rows(
+    theme: &Theme,
+    width: usize,
+    child: &ToolChild,
+    connector: &str,
+    budget: Option<usize>,
+) -> Vec<String> {
     // Labels and connectors stay neutral; diff counts carry their own hues.
     // State belongs in the verb and result, not in selected-looking branches.
     let action = match child.state {
@@ -848,6 +954,40 @@ fn child_rows(theme: &Theme, width: usize, child: &ToolChild, connector: &str) -
     } else {
         String::new()
     };
+    if let Some(budget) = budget {
+        let target = if child.category == "command" {
+            heredoc_header(&child.target)
+                .map(|header| format!("{header} …"))
+                .unwrap_or_else(|| child.target.clone())
+        } else {
+            child.target.clone()
+        };
+        let label = format!("{action} {target}");
+        let mut rows = label_rows(theme, width, connector, label.trim_end(), budget);
+        // Outcome details are not arguments: truncating a path must not hide
+        // its failure reason or the colored counts from a completed edit.
+        if !suffix.is_empty() {
+            if let Some(last) = rows.last_mut().filter(|last| {
+                crate::tui::markdown::visible_width(last)
+                    + crate::tui::markdown::visible_width(&suffix)
+                    <= width
+            }) {
+                last.push_str(&suffix);
+            } else {
+                rows.extend(tree_rows(theme, width, "│", suffix.trim_start()));
+            }
+        }
+        if child.state == ToolState::Failed && child.category != "command" {
+            if let Some(reason) = child
+                .result
+                .as_deref()
+                .filter(|r| !r.is_empty() && *r != "error")
+            {
+                rows.extend(label_rows(theme, width, "│", reason, budget));
+            }
+        }
+        return rows;
+    }
     // The reference's failed rows name the reason: `Failed path: preflight
     // failed`. A generic "error" summary adds nothing and stays off the row.
     let target_plain = match (&child.state, child.result.as_deref()) {
@@ -871,15 +1011,14 @@ fn child_rows(theme: &Theme, width: usize, child: &ToolChild, connector: &str) -
     )
 }
 
-/// Show the live tail in the tool's own branch, closing with an output hint.
-/// The budget counts wrapped display rows, not source lines.
+/// Show a bounded live tail and any omission count inside the tool branch.
+/// The group owns the single closing review hint.
 fn append_tool_preview(
     rows: &mut Vec<String>,
     child: &ToolChild,
     theme: &Theme,
     width: usize,
     budget: usize,
-    last: bool,
 ) {
     let output: Vec<String> = child
         .output
@@ -890,21 +1029,18 @@ fn append_tool_preview(
     let more = output.len().saturating_sub(budget);
     rows.extend(output.into_iter().skip(more));
     let hint = if child.output_truncated {
-        "earlier output omitted · ctrl+o to view".into()
+        Some("earlier output omitted".into())
     } else if more > 0 {
-        format!(
-            "{more} more {} · ctrl+o to view",
+        Some(format!(
+            "{more} more {}",
             if more == 1 { "row" } else { "rows" }
-        )
+        ))
     } else {
-        "ctrl+o to view".into()
+        None
     };
-    rows.extend(tree_rows(
-        theme,
-        width,
-        if last { "└" } else { "│" },
-        &theme.fg("muted", &hint),
-    ));
+    if let Some(hint) = hint {
+        rows.extend(tree_rows(theme, width, "│", &theme.fg("muted", &hint)));
+    }
 }
 
 /// Collapse legacy restored rows. Live batches use `tool_children` instead.
@@ -1186,7 +1322,7 @@ mod tests {
 
         block.finish_tool(1, ToolOutcome::Completed, "done".into(), "");
         let done = block.lines_for_test(&theme, 80);
-        assert_eq!(done.len(), 2);
+        assert_eq!(done.len(), 3);
         assert!(done[1].contains("Ran true"));
     }
 

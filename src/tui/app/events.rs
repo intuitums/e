@@ -121,6 +121,7 @@ impl App {
                         .collect();
                     let idx = self.transcript.extend_tool_group(children);
                     self.transcript.blocks[idx].live_preview_rows = self.live_preview_rows;
+                    self.transcript.blocks[idx].tool_label_rows = self.tool_label_rows;
                     for call in calls {
                         s.tool_blocks.insert(call.id, idx);
                     }

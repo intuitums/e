@@ -90,10 +90,15 @@ impl SettingsPanel {
                 .options
                 .iter()
                 .map(|option| {
+                    let label = match (setting.key.as_str(), option.as_str()) {
+                        ("tui_mode", "inline") => "Inline",
+                        ("tui_mode", "fullscreen") => "Fullscreen",
+                        _ => option,
+                    };
                     if *option == current {
-                        bold(&theme.fg("userMessageText", option))
+                        bold(&theme.fg("userMessageText", label))
                     } else {
-                        theme.fg("dim", option)
+                        theme.fg("dim", label)
                     }
                 })
                 .collect();
