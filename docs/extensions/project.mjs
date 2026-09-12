@@ -2,8 +2,8 @@
 /** project routes a launch to another directory with `e --project <path>`.
  *
  * This startup-hook example uses a typed string flag and a same-binary
- * relaunch. The bootstrap marker prevents a relaunch loop; the second process
- * removes it before the session starts.
+ * relaunch. The bootstrap marker names the e process that requested the
+ * relaunch, preventing a loop without trusting an inherited fixed value.
  *
  * Copy scaffold.mjs + project.mjs into ~/.e/extensions/ (chmod +x), restart
  * e, then run `e --project ../another-project "inspect this repository"`.
@@ -50,7 +50,10 @@ const ext = connect({
     hooks: ["startup"],
   },
   startup({ cwd, argv }) {
-    if (process.env[BOOTSTRAP_ENV] === "1") {
+    // The extension is a child of e. Relaunch replaces that same parent
+    // process, so its PID identifies only the relaunch this hook requested.
+    const hostPid = String(process.ppid);
+    if (process.env[BOOTSTRAP_ENV] === hostPid) {
       return { argv, env: { [BOOTSTRAP_ENV]: null } };
     }
     const requested = ext.flag("project");
@@ -59,7 +62,7 @@ const ext = connect({
       argv,
       relaunch: {
         cwd: projectDirectory(cwd, requested),
-        env: { [BOOTSTRAP_ENV]: "1" },
+        env: { [BOOTSTRAP_ENV]: hostPid },
       },
     };
   },
