@@ -70,8 +70,8 @@ the pipeline publishes.
   when the extension owned a `tool_call` or `input` hook); an over-long
   stderr line is discarded instead of closing the pipe and killing the
   extension; children are reaped on exit and shutdown; notice-only input
-  verdicts are shown; the worktree example no longer fetches inside its
-  5 s startup budget, and the MCP guide notes the `npx -y` cold start; the
+  verdicts are shown; the startup-hook example now routes launches to existing
+  project directories, and the MCP guide notes the `npx -y` cold start; the
   protocol.rs header matches what the host sends.
 - Config and CLI: self-update declines on platforms with no release
   artifact instead of installing the x86_64-gnu tarball over a source build;
