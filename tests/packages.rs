@@ -721,7 +721,7 @@ fn the_settings_fixture_with_filtered_entries_still_reads() {
     assert_eq!(
         sources,
         [
-            "npm:e-diff",
+            "npm:@fschrhunt1/e-diff",
             "git:github.com/fschrhunt/e-diff@v2",
             "npm:@team/e-tools@1.4.0",
             "/Users/me/src/local-pack"

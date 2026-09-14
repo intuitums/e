@@ -24,7 +24,7 @@ carrying the `e-package` keyword) or on npmjs.com.
 ## Install and manage
 
 ```sh
-e install npm:e-diff                            # from npm, follows latest
+e install npm:@fschrhunt1/e-diff                # from npm, follows latest
 e install npm:@team/e-tools@1.4.0               # pinned to a version
 e install git:github.com/fschrhunt/e-diff       # a git repository, default branch
 e install git:github.com/fschrhunt/e-diff@v2    # pin a tag, branch, or commit
@@ -33,7 +33,7 @@ e install git:git@github.com:user/repo@main     # SSH, with your keys
 e install ~/src/my-package                      # a local directory, in place
 
 e packages                                      # what is listed, and its state
-e remove npm:e-diff                             # forget it, delete the install
+e remove npm:@fschrhunt1/e-diff                 # forget it, delete the install
 e install                                       # make disk match settings
 ```
 
@@ -94,7 +94,7 @@ package root; `!` excludes.
 ```json
 {
   "packages": [
-    "npm:e-diff",
+    "npm:@fschrhunt1/e-diff",
     {
       "source": "npm:@team/e-tools@1.4.0",
       "extensions": ["!extensions/legacy.mjs"],
