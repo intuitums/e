@@ -32,8 +32,15 @@ pub struct Skill {
 /// skill wins.
 pub fn list(cwd: &Path) -> Vec<Skill> {
     let mut skills = read_dir(&home::skills_dir());
-    for dir in packages::dirs("skills") {
+    for (dir, filter) in packages::dirs("skills") {
         for skill in read_dir(&dir) {
+            let folder = skill
+                .dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned());
+            if !filter.allows("skills", folder.as_deref().unwrap_or(&skill.name)) {
+                continue;
+            }
             if !skills.iter().any(|s| s.name == skill.name) {
                 skills.push(skill);
             }

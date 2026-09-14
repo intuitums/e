@@ -156,9 +156,15 @@ pub fn load_bundled(light: bool) -> Result<Theme, String> {
 /// installed package's `themes/` (settings order), if present and valid.
 pub fn load_user(name: &str) -> Option<Theme> {
     let file = format!("{name}.json");
-    let mut dirs = vec![crate::core::config::home::themes_dir()];
+    let mut dirs = vec![(
+        crate::core::config::home::themes_dir(),
+        crate::core::resources::packages::Filter::default(),
+    )];
     dirs.extend(crate::core::resources::packages::dirs("themes"));
-    dirs.into_iter().find_map(|dir| {
+    dirs.into_iter().find_map(|(dir, filter)| {
+        if !filter.allows("themes", &file) {
+            return None;
+        }
         let json = std::fs::read_to_string(dir.join(&file)).ok()?;
         Theme::from_json(&json).ok()
     })

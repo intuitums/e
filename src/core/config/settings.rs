@@ -68,6 +68,27 @@ pub fn get_strings(key: &str) -> Option<Vec<String>> {
         })
 }
 
+/// A top-level array as stored, elements of any shape.
+pub fn get_array(key: &str) -> Option<Vec<Value>> {
+    crate::core::config::store::read_object(&home::settings_path())
+        .unwrap_or_default()
+        .get(key)
+        .and_then(|v| v.as_array())
+        .cloned()
+}
+
+pub fn set_array(key: &str, values: Vec<Value>) -> std::io::Result<()> {
+    crate::core::config::store::update_versioned(
+        &home::settings_path(),
+        0o644,
+        FORMAT_VERSION,
+        |obj| {
+            stamp_format(obj);
+            obj.insert(key.to_string(), Value::Array(values));
+        },
+    )
+}
+
 pub fn set_strings(key: &str, values: &[String]) -> std::io::Result<()> {
     crate::core::config::store::update_versioned(
         &home::settings_path(),
@@ -143,14 +164,21 @@ impl Setting {
 /// `<name>.json` in and it appears here.
 pub fn theme_names() -> Vec<String> {
     let mut names = vec!["auto".to_string(), "light".to_string(), "dark".to_string()];
-    let mut dirs = vec![home::themes_dir()];
+    let mut dirs = vec![(
+        home::themes_dir(),
+        crate::core::resources::packages::Filter::default(),
+    )];
     dirs.extend(crate::core::resources::packages::dirs("themes"));
-    for dir in dirs {
+    for (dir, filter) in dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            let file = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            if !filter.allows("themes", file.as_deref().unwrap_or_default()) {
+                continue;
+            }
             if path.extension().map(|x| x == "json").unwrap_or(false) {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     if !names.iter().any(|n| n == stem) {

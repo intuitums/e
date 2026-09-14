@@ -582,6 +582,7 @@ impl ToolRuntime {
 }
 
 pub use crate::core::text::{sanitize_display, strip_ansi};
+pub(crate) use fs::glob_regex;
 
 /// Resolve carriage-return overwrites the way a terminal would: within each
 /// line only the text after the last `\r` survives, so a progress bar that

@@ -13,7 +13,7 @@ OVERVIEW:
  - Small, fast coding agent for the terminal.
  - One Rust binary with tools, commands, themes, prompts, and skills.
  - Executable JSONL extensions add tools, commands, hooks, and startup behavior.
- - Packages share extensions, skills, prompts, and themes: e install git:<host>/<user>/<repo>
+ - Packages share extensions, skills, prompts, and themes: e install npm:<name>, or git:<host>/<user>/<repo>
 
 ///
 

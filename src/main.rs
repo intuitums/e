@@ -35,6 +35,7 @@ e update              update e to the latest release\n  \
 e install [source]    install a package, or make every listed one current\n  \
 e remove <source>     forget a package and delete its clone\n  \
 e packages            list installed packages\n  \
+e packages init <dir> start a package to publish\n  \
 e auth                show sign-in status\n  \
 e doctor [--no-network]\n                      print paste-safe, local-only runtime diagnostics\n  \
 e providers           list provider support and sign-in state\n  \
@@ -226,6 +227,23 @@ async fn package_command(sub: &str, rest: &[String]) -> i32 {
                 println!("{:<width$}  {status}", package.spec);
             }
             0
+        }
+        ("packages", [word, dir]) if word == "init" => {
+            let dir = std::path::PathBuf::from(dir);
+            match packages::init(&dir) {
+                Ok(written) => {
+                    println!("started a package in {}:", dir.display());
+                    for path in written {
+                        println!("  {}", path.strip_prefix(&dir).unwrap_or(&path).display());
+                    }
+                    println!("try it with `e --package {}`", dir.display());
+                    0
+                }
+                Err(message) => {
+                    eprintln!("{message}");
+                    1
+                }
+            }
         }
         _ => {
             eprintln!("{}", cli::subcommand_usage(sub).unwrap_or("usage: e help"));

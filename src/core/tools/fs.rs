@@ -480,7 +480,7 @@ fn glob_allows(glob: Option<&(regex::Regex, bool)>, path: &Path, cwd: &Path) -> 
 /// Compile a glob into an anchored regex: `*` matches within one path
 /// segment, `?` one character, `**` across segments (`**/` also matches the
 /// empty prefix so `**/x` finds a root-level `x`).
-fn glob_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+pub(crate) fn glob_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
     let mut re = String::from("^");
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {

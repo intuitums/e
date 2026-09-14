@@ -1638,9 +1638,12 @@ impl App {
             }
             "/reload" => self.reload(),
             "/trust" => match crate::core::config::trust::set(&self.agent.cwd(), true) {
-                Ok(()) => self.notice(
-                    "directory trusted — its AGENTS.md and .e skills/prompts now load".into(),
-                ),
+                Ok(()) => {
+                    self.notice(
+                        "directory trusted — its AGENTS.md and .e skills/prompts now load".into(),
+                    );
+                    self.install_project_packages();
+                }
                 Err(e) => self.notice(format!("trust: {e}")),
             },
             _ if trimmed.starts_with('/') => {
@@ -1961,6 +1964,47 @@ impl App {
     /// that is the extension host (restarted) and the theme (re-resolved) —
     /// skills, prompts, AGENTS.md, settings, and models.json are read fresh
     /// on every use already.
+    /// A just-trusted repository's `.e/packages` may list packages not on
+    /// disk: install them now, in the background, and say so — the one
+    /// moment trust and a network fetch belong together. The result lands
+    /// as a notice; `/reload` picks the packages up.
+    fn install_project_packages(&mut self) {
+        let cwd = self.agent.cwd().to_path_buf();
+        let missing = crate::core::resources::packages::project_missing(&cwd);
+        if missing.is_empty() {
+            return;
+        }
+        self.notice(format!(
+            "installing {} from .e/packages…",
+            match missing.len() {
+                1 => "1 package".to_string(),
+                n => format!("{n} packages"),
+            }
+        ));
+        let results = self.results.clone();
+        let epoch = self.session_epoch;
+        crate::core::config::home::spawn(async move {
+            let outcomes = crate::core::resources::packages::install_project(&cwd).await;
+            let failed = outcomes.iter().filter(|r| r.is_err()).count();
+            let lines: Vec<String> = outcomes
+                .into_iter()
+                .map(|r| r.unwrap_or_else(|e| e))
+                .collect();
+            let notice = if failed == 0 {
+                format!("{} — /reload to use them", lines.join("; "))
+            } else {
+                format!("{} — fix and run `e install`", lines.join("; "))
+            };
+            let result = crate::core::extensions::CommandResult {
+                notice: Some(notice),
+                show: None,
+                prompt: None,
+                session_name: None,
+            };
+            let _ = results.send(AppJob::Command { result, epoch }).await;
+        });
+    }
+
     fn reload(&mut self) {
         if self.agent.is_streaming() {
             self.notice("wait for the turn to finish before /reload".into());
@@ -2882,7 +2926,9 @@ async fn run_scoped(
                                         Err(e) => app.notice(format!("trust: {e}")),
                                         Ok(()) => {
                                             app.trust = None;
-                                            if !trusted {
+                                            if trusted {
+                                                app.install_project_packages();
+                                            } else {
                                                 app.notice("working untrusted — project AGENTS.md and .e skills/prompts ignored (/trust to allow)".into());
                                             }
                                             // An open -r picker still owns

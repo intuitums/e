@@ -43,3 +43,23 @@ Discovery is a GitHub topic (`e-package`), not a hosted gallery.
 - Filtering what a package loads, project-scoped installs, and try-once
   installs are not provided. Each is a settings-shape change to be made
   deliberately when a package needs it.
+
+## Amendment — npm as a source, filters, 2026-09-14
+
+The shape stands; the distribution rails grew. A package may also be an npm
+package (`npm:name[@version]`), installed with the user's own `npm` into one
+project directory of e's, `~/.e/packages/npm/`, always with lifecycle
+scripts off: a package's code runs when e loads it, never when npm unpacks
+it. npm was chosen over a GitHub topic for discovery because it gives a
+registry, versions, download counts, and a search API the catalog page can
+read without a server of its own, and because the extension authors most
+likely to share are the ones already publishing there. The `e-package`
+keyword lists a package in the catalog. e still reads no manifest: the
+`package.json` is npm's, and the only thing e takes from it is the
+dependency list, which it installs (scripts off) for a git package too.
+
+A settings entry may be an object — `source` plus per-kind glob lists — so
+one resource of a good package can be left unloaded without forking it.
+Try-once installs (`--package`) and a trusted repository's `.e/packages` list
+arrived with the first release; trusting a directory now offers to install
+what that list names.

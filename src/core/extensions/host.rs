@@ -1236,8 +1236,18 @@ impl Drop for PendingGuard {
 /// matching the directory name, then a sole executable.
 fn discover() -> Vec<PathBuf> {
     let mut paths = scan(&home::extensions_dir());
-    for dir in crate::core::resources::packages::dirs("extensions") {
-        paths.extend(scan(&dir));
+    for (dir, filter) in crate::core::resources::packages::dirs("extensions") {
+        // A package's filter names the top-level file or bundle directory,
+        // never the entry point inside a bundle.
+        paths.extend(scan(&dir).into_iter().filter(|path| {
+            let top = path
+                .strip_prefix(&dir)
+                .ok()
+                .and_then(|rel| rel.components().next())
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .unwrap_or_default();
+            filter.allows("extensions", &top)
+        }));
     }
     paths
 }

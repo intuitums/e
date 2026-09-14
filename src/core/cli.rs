@@ -101,7 +101,7 @@ pub fn subcommand_usage(sub: &str) -> Option<&'static str> {
         "update" => Some("usage: e update"),
         "install" => Some("usage: e install [source]"),
         "remove" => Some("usage: e remove <source>"),
-        "packages" => Some("usage: e packages"),
+        "packages" => Some("usage: e packages [init <dir>]"),
         "auth" => Some("usage: e auth"),
         "doctor" => Some("usage: e doctor [--no-network]"),
         "providers" => Some("usage: e providers"),

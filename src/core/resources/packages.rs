@@ -1,19 +1,22 @@
 //! Packages: shareable bundles of extensions, skills, prompt templates, and
 //! themes.
 //!
-//! A package is a git repository (or a local directory) laid out like `~/.e/`
-//! itself — `extensions/`, `skills/`, `prompts/`, `themes/`, any subset, no
-//! manifest. `e install <source>` clones it under
-//! `~/.e/packages/<host>/<path>` and records the source string in the
-//! `packages` list of `settings.json`; every loader then reads each package's
-//! directory after `~/.e/`'s own, so a resource in the home shadows a
-//! package's, and a trusted repo's `.e/` shadows both.
+//! A package is an npm package, a git repository, or a local directory laid
+//! out like `~/.e/` itself — `extensions/`, `skills/`, `prompts/`, `themes/`,
+//! any subset, no manifest of e's own. `e install <source>` fetches it under
+//! `~/.e/packages/` (`npm/node_modules/<name>` for npm, `<host>/<path>` for
+//! git) and records the source in the `packages` list of `settings.json`;
+//! every loader then reads each package's directory after `~/.e/`'s own, so
+//! a resource in the home shadows a package's, and a trusted repo's `.e/`
+//! shadows both. A settings entry may carry per-kind glob filters
+//! ([`Filter`]) that leave part of a package unloaded.
 //!
-//! Settings are the source of truth, not the directory: delete a clone and
-//! `e install` with no arguments puts it back. Startup never touches the
+//! Settings are the source of truth, not the directory: delete an install
+//! and `e install` with no arguments puts it back. Startup never touches the
 //! network — a listed package missing on disk is reported in the transcript.
-//! Git runs as a subprocess, so installing needs `git` on `PATH` and speaks
-//! whatever protocols and credentials the user's git does.
+//! git and npm run as subprocesses, always with lifecycle scripts off, so
+//! installing needs them on `PATH` and speaks whatever registries and
+//! credentials the user's own do.
 //!
 //! A release package (`release:<owner>/<repo>/<name>[@tag]`) is a compiled
 //! extension published as a GitHub release asset, `<name>-<target>.tar.gz`
@@ -34,6 +37,13 @@ const SETTINGS_KEY: &str = "packages";
 /// A parsed package source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
+    /// An npm package, installed under `~/.e/packages/npm/node_modules/<name>`.
+    Npm {
+        /// The package name, `@scope/name` included.
+        name: String,
+        /// A version, range, or dist-tag to pin; `None` follows `latest`.
+        version: Option<String>,
+    },
     /// A git remote, cloned under `~/.e/packages/<host>/<path>`.
     Git {
         /// The URL handed to `git clone`, ref stripped.
@@ -60,6 +70,8 @@ pub enum Source {
 impl Source {
     /// Parse a source string, the grammar `e install` accepts:
     ///
+    /// - `npm:name[@version]`, `npm:@scope/name[@version]` — from the
+    ///   user's npm registry
     /// - `git:host/user/repo[@ref]` — shorthand, cloned over HTTPS
     /// - `git:git@host:user/repo[@ref]` — scp-style SSH
     /// - `https://…`, `ssh://…`, `git://…`, `file://…` — any git URL, with
@@ -72,6 +84,9 @@ impl Source {
         }
         if spec.starts_with('-') {
             return Err(format!("`{spec}` is not a package source"));
+        }
+        if let Some(rest) = spec.strip_prefix("npm:") {
+            return parse_npm(rest, spec);
         }
         if let Some(rest) = spec.strip_prefix("git:") {
             return parse_git(rest, spec);
@@ -92,7 +107,7 @@ impl Source {
             return Ok(Source::Local(expand_local(spec)));
         }
         Err(format!(
-            "`{spec}` is not a package source — use git:<host>/<user>/<repo>[@ref], a git URL, or a directory path"
+            "`{spec}` is not a package source — use npm:<name>[@version], git:<host>/<user>/<repo>[@ref], a git URL, or a directory path"
         ))
     }
 
@@ -100,6 +115,7 @@ impl Source {
     /// directory itself.
     pub fn root(&self) -> PathBuf {
         match self {
+            Source::Npm { name, .. } => npm_prefix().join("node_modules").join(name),
             Source::Git { host, path, .. } => home::packages_dir().join(host).join(path),
             Source::Local(path) => path.clone(),
             Source::Release {
@@ -116,6 +132,7 @@ impl Source {
     /// credentials, `.git`, case of the host, or the pinned ref.
     pub fn identity(&self) -> String {
         match self {
+            Source::Npm { name, .. } => format!("npm:{}", name.to_lowercase()),
             Source::Git { host, path, .. } => format!("{host}/{}", path.to_lowercase()),
             Source::Local(path) => path
                 .canonicalize()
@@ -132,6 +149,51 @@ impl Source {
             ),
         }
     }
+}
+
+/// `npm:[@scope/]name[@version]`. Names follow npm's rules closely enough
+/// to be safe as a directory and as an argument: lowercase, URL-safe
+/// characters, no leading dot or dash, one optional `@scope/`.
+fn parse_npm(rest: &str, spec: &str) -> Result<Source, String> {
+    let rest = rest.trim();
+    let (name, version) = match rest.strip_prefix('@') {
+        // A scoped name has its own leading `@`; the version's comes after.
+        Some(scoped) => match scoped.split_once('@') {
+            Some((name, version)) => (format!("@{name}"), Some(version)),
+            None => (format!("@{scoped}"), None),
+        },
+        None => match rest.split_once('@') {
+            Some((name, version)) => (name.to_string(), Some(version)),
+            None => (rest.to_string(), None),
+        },
+    };
+    let bare = name.strip_prefix('@').unwrap_or(&name);
+    let segments: Vec<&str> = bare.split('/').collect();
+    let valid_segment = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 214
+            && !s.starts_with(['.', '-', '_'])
+            && s.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.')
+            })
+    };
+    let shape_ok = match (name.starts_with('@'), segments.as_slice()) {
+        (false, [only]) => valid_segment(only),
+        (true, [scope, pkg]) => valid_segment(scope) && valid_segment(pkg),
+        _ => false,
+    };
+    if !shape_ok {
+        return Err(format!("`{spec}` is not an npm package name"));
+    }
+    let version = match version {
+        Some("") => return Err(format!("`{spec}` has an empty version")),
+        Some(v) if v.starts_with('-') || v.chars().any(char::is_whitespace) => {
+            return Err(format!("`{spec}` has an unsafe version"))
+        }
+        Some(v) => Some(v.to_string()),
+        None => None,
+    };
+    Ok(Source::Npm { name, version })
 }
 
 /// `release:<owner>/<repo>/<name>[@tag]`.
@@ -337,17 +399,130 @@ pub enum Status {
     Invalid(String),
 }
 
-/// The sources recorded in `settings.json`, in order — what `e install` and
-/// `e remove` edit.
-pub fn settings_entries() -> Vec<String> {
-    settings::get_strings(SETTINGS_KEY).unwrap_or_default()
+/// Per-kind glob filters on one package: which of its resources load. An
+/// empty list for a kind loads everything of that kind. Patterns are
+/// relative to the package root (`extensions/legacy.mjs`, `skills/*`); a
+/// leading `!` excludes. With only exclusions, everything else loads; with
+/// any inclusion, only what an inclusion names — minus the exclusions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Filter {
+    /// One pattern list per kind, in [`KINDS`] order.
+    patterns: [Vec<String>; 4],
+}
+
+impl Filter {
+    pub fn is_empty(&self) -> bool {
+        self.patterns.iter().all(Vec::is_empty)
+    }
+
+    /// Whether `name` — a file or directory directly under the package's
+    /// `<kind>/` — loads.
+    pub fn allows(&self, kind: &str, name: &str) -> bool {
+        let Some(index) = KINDS.iter().position(|k| *k == kind) else {
+            return true;
+        };
+        let patterns = &self.patterns[index];
+        if patterns.is_empty() {
+            return true;
+        }
+        let candidate = format!("{kind}/{name}");
+        let matches = |pattern: &str| {
+            crate::core::tools::glob_regex(pattern).is_ok_and(|re| re.is_match(&candidate))
+        };
+        let mut included = !patterns.iter().any(|p| !p.starts_with('!'));
+        for pattern in patterns {
+            match pattern.strip_prefix('!') {
+                Some(excluded) if matches(excluded) => return false,
+                Some(_) => {}
+                None if matches(pattern) => included = true,
+                None => {}
+            }
+        }
+        included
+    }
+
+    /// The filter's settings form: the kind keys of an object entry.
+    fn from_object(object: &serde_json::Map<String, serde_json::Value>) -> Filter {
+        let mut filter = Filter::default();
+        for (index, kind) in KINDS.iter().enumerate() {
+            if let Some(list) = object.get(*kind).and_then(|v| v.as_array()) {
+                filter.patterns[index] = list
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+        }
+        filter
+    }
+}
+
+/// One `packages` entry of `settings.json`: the source as typed, and any
+/// filters. Written back as a plain string when it has none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub source: String,
+    pub filter: Filter,
+}
+
+impl Entry {
+    fn plain(source: &str) -> Entry {
+        Entry {
+            source: source.to_string(),
+            filter: Filter::default(),
+        }
+    }
+
+    fn from_value(value: &serde_json::Value) -> Option<Entry> {
+        if let Some(source) = value.as_str() {
+            return Some(Entry::plain(source));
+        }
+        let object = value.as_object()?;
+        let source = object.get("source")?.as_str()?;
+        Some(Entry {
+            source: source.to_string(),
+            filter: Filter::from_object(object),
+        })
+    }
+
+    fn to_value(&self) -> serde_json::Value {
+        if self.filter.is_empty() {
+            return serde_json::Value::String(self.source.clone());
+        }
+        let mut object = serde_json::Map::new();
+        object.insert("source".into(), self.source.clone().into());
+        for (index, kind) in KINDS.iter().enumerate() {
+            let patterns = &self.filter.patterns[index];
+            if !patterns.is_empty() {
+                object.insert((*kind).into(), serde_json::json!(patterns));
+            }
+        }
+        serde_json::Value::Object(object)
+    }
+}
+
+/// The entries recorded in `settings.json`, in order — what `e install` and
+/// `e remove` edit. A malformed entry is dropped here and rewritten away by
+/// the next edit.
+pub fn settings_entries() -> Vec<Entry> {
+    settings::get_array(SETTINGS_KEY)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(Entry::from_value)
+        .collect()
+}
+
+fn set_entries(entries: &[Entry]) -> std::io::Result<()> {
+    settings::set_array(SETTINGS_KEY, entries.iter().map(Entry::to_value).collect())
 }
 
 /// A trusted repository's own list: `<cwd>/.e/packages`, one source per
 /// line, `#` comments. Shared by the team through the repository; installs
-/// land in the user's managed roots like any other package. Only git and
-/// release sources are honoured: a local directory would run in place, and
-/// trusting a checkout must not be enough to execute code it carries.
+/// land in the user's managed roots like any other package. Only npm, git,
+/// and release sources are honoured: a local directory would run in place,
+/// and trusting a checkout must not be enough to execute code it carries.
 pub fn project_entries(cwd: &Path) -> Vec<String> {
     if !crate::core::config::trust::trusted(cwd) {
         return Vec::new();
@@ -363,21 +538,31 @@ pub fn project_entries(cwd: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Every configured source: settings first, then the current directory's
-/// project list (entries already in settings are not repeated).
-pub fn configured() -> Vec<String> {
+/// Every configured entry: settings first, then the current directory's
+/// project list (a package already in settings is not repeated, so the
+/// user's filters on it stand).
+pub fn configured() -> Vec<Entry> {
     let mut entries = settings_entries();
     let cwd = std::env::current_dir().unwrap_or_default();
-    for entry in project_entries(&cwd) {
+    for source in project_entries(&cwd) {
         let same = |a: &str, b: &str| match (Source::parse(a), Source::parse(b)) {
             (Ok(a), Ok(b)) => a.identity() == b.identity(),
             _ => a == b,
         };
-        if !entries.iter().any(|known| same(known, &entry)) {
-            entries.push(entry);
+        if !entries.iter().any(|known| same(&known.source, &source)) {
+            entries.push(Entry::plain(&source));
         }
     }
     entries
+}
+
+/// Project-list packages not on disk — what trusting the directory offers
+/// to install.
+pub fn project_missing(cwd: &Path) -> Vec<String> {
+    project_entries(cwd)
+        .into_iter()
+        .filter(|spec| Source::parse(spec).is_ok_and(|s| !s.root().is_dir()))
+        .collect()
 }
 
 /// Roots loaded for this process only (`--package`), kept beside the
@@ -399,6 +584,22 @@ pub async fn use_once(spec: &str) -> Result<PathBuf, String> {
             }
             path.clone()
         }
+        Source::Npm { name, .. } => {
+            // A throwaway prefix: the package lands at
+            // `<dir>/node_modules/<name>`, and the whole prefix goes at exit.
+            let dir = std::env::temp_dir().join(format!(
+                "e-package-{}-{}",
+                std::process::id(),
+                once_roots().lock().unwrap_or_else(|e| e.into_inner()).len()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            npm_install(&dir, &source)?;
+            once_roots()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(dir.clone());
+            return Ok(dir.join("node_modules").join(name));
+        }
         Source::Git { url, rev, .. } => {
             let dir = std::env::temp_dir().join(format!(
                 "e-package-{}-{}",
@@ -413,6 +614,7 @@ pub async fn use_once(spec: &str) -> Result<PathBuf, String> {
             if let Some(rev) = rev {
                 checkout(&dir, rev)?;
             }
+            install_dependencies(&dir)?;
             dir
         }
         Source::Release {
@@ -465,7 +667,8 @@ pub fn forget_once() {
 pub fn list() -> Vec<Package> {
     configured()
         .into_iter()
-        .map(|spec| {
+        .map(|entry| {
+            let spec = entry.source;
             let status = match Source::parse(&spec) {
                 Err(reason) => Status::Invalid(reason),
                 Ok(source) => {
@@ -487,30 +690,40 @@ pub fn list() -> Vec<Package> {
 /// The roots of every package present on disk, in settings order, then
 /// the project's, then this run's `--package` roots.
 pub fn roots() -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = configured()
-        .iter()
-        .filter_map(|spec| Source::parse(spec).ok())
-        .map(|source| source.root())
-        .filter(|root| root.is_dir())
+    loaded().into_iter().map(|(root, _)| root).collect()
+}
+
+/// Every package present on disk with its filter, in settings order, then
+/// the one-run roots (unfiltered).
+fn loaded() -> Vec<(PathBuf, Filter)> {
+    let mut roots: Vec<(PathBuf, Filter)> = configured()
+        .into_iter()
+        .filter_map(|entry| {
+            Source::parse(&entry.source)
+                .ok()
+                .map(|s| (s.root(), entry.filter))
+        })
+        .filter(|(root, _)| root.is_dir())
         .collect();
     for root in once_roots()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
     {
-        if !roots.contains(root) {
-            roots.push(root.clone());
+        if !roots.iter().any(|(known, _)| known == root) {
+            roots.push((root.clone(), Filter::default()));
         }
     }
     roots
 }
 
-/// Each installed package's `<kind>/` directory, when it has one.
-pub fn dirs(kind: &str) -> Vec<PathBuf> {
-    roots()
+/// Each installed package's `<kind>/` directory, when it has one, with the
+/// filter a loader asks before taking a resource from it.
+pub fn dirs(kind: &str) -> Vec<(PathBuf, Filter)> {
+    loaded()
         .into_iter()
-        .map(|root| root.join(kind))
-        .filter(|dir| dir.is_dir())
+        .map(|(root, filter)| (root.join(kind), filter))
+        .filter(|(dir, _)| dir.is_dir())
         .collect()
 }
 
@@ -577,6 +790,7 @@ pub async fn install(spec: &str) -> Result<(PathBuf, [usize; 4]), String> {
                 return Err(format!("{} is not a directory", path.display()));
             }
         }
+        Source::Npm { .. } => npm_install(&npm_prefix(), &source)?,
         Source::Git { .. } => sync(&source)?,
         Source::Release { .. } => install_release(&source).await?,
     }
@@ -603,7 +817,17 @@ pub async fn install(spec: &str) -> Result<(PathBuf, [usize; 4]), String> {
 /// line per package for the report; the first failure stops nothing else.
 pub async fn install_all() -> Vec<Result<String, String>> {
     let mut results = Vec::new();
-    for spec in configured() {
+    for entry in configured() {
+        results.push(install_one(&entry.source).await);
+    }
+    results
+}
+
+/// Install the sources a trusted repository lists that are not on disk —
+/// what `/trust` offers. One line per package, like [`install_all`].
+pub async fn install_project(cwd: &Path) -> Vec<Result<String, String>> {
+    let mut results = Vec::new();
+    for spec in project_missing(cwd) {
         results.push(install_one(&spec).await);
     }
     results
@@ -616,6 +840,19 @@ async fn install_one(spec: &str) -> Result<String, String> {
             Err(format!("{spec}: {} is not a directory", path.display()))
         }
         Source::Local(_) => Ok(format!("{spec}: in place")),
+        Source::Npm { .. } => {
+            let before = installed_npm_version(&source.root());
+            npm_install(&npm_prefix(), &source).map_err(|e| format!("{spec}: {e}"))?;
+            let after = installed_npm_version(&source.root());
+            Ok(format!(
+                "{spec}: {}",
+                match (before, after) {
+                    (None, Some(version)) => format!("installed {version}"),
+                    (Some(old), Some(new)) if old != new => format!("updated {old} → {new}"),
+                    _ => "up to date".to_string(),
+                }
+            ))
+        }
         Source::Git { .. } => {
             let fresh = !source.root().is_dir();
             sync(&source).map_err(|e| format!("{spec}: {e}"))?;
@@ -650,17 +887,30 @@ pub fn remove(spec: &str) -> Result<PathBuf, String> {
     let mut entries = settings_entries();
     let before = entries.len();
     entries.retain(|entry| {
-        Source::parse(entry)
+        Source::parse(&entry.source)
             .map(|s| s.identity() != identity)
             .unwrap_or(true)
     });
     if entries.len() == before {
         return Err(format!("{spec} is not installed"));
     }
-    settings::set_strings(SETTINGS_KEY, &entries)
-        .map_err(|e| format!("could not update settings.json: {e}"))?;
+    set_entries(&entries).map_err(|e| format!("could not update settings.json: {e}"))?;
     let root = source.root();
-    if matches!(source, Source::Git { .. } | Source::Release { .. }) {
+    if let Source::Npm { name, .. } = &source {
+        if root.is_dir() {
+            npm(
+                &npm_prefix(),
+                &[
+                    "uninstall",
+                    "--ignore-scripts",
+                    "--no-audit",
+                    "--no-fund",
+                    "--",
+                    name,
+                ],
+            )?;
+        }
+    } else if matches!(source, Source::Git { .. } | Source::Release { .. }) {
         let managed = home::packages_dir();
         if root.starts_with(&managed) && root != managed && root.exists() {
             std::fs::remove_dir_all(&root)
@@ -679,17 +929,24 @@ pub fn remove(spec: &str) -> Result<PathBuf, String> {
 }
 
 /// Append the source as typed, replacing any entry for the same package so
-/// `e install …@v2` moves a pin instead of duplicating it.
+/// `e install …@v2` moves a pin instead of duplicating it. Filters the
+/// replaced entry carried stay with it.
 fn record(source: &Source, spec: &str) -> std::io::Result<()> {
     let identity = source.identity();
     let mut entries = settings_entries();
+    let mut filter = Filter::default();
     entries.retain(|entry| {
-        Source::parse(entry)
-            .map(|s| s.identity() != identity)
-            .unwrap_or(true)
+        let same = Source::parse(&entry.source).is_ok_and(|s| s.identity() == identity);
+        if same {
+            filter = entry.filter.clone();
+        }
+        !same
     });
-    entries.push(spec.to_string());
-    settings::set_strings(SETTINGS_KEY, &entries)
+    entries.push(Entry {
+        source: spec.to_string(),
+        filter,
+    });
+    set_entries(&entries)
 }
 
 /// Bring a git package's clone to the requested state: a fresh clone when
@@ -719,10 +976,10 @@ fn sync(source: &Source) -> Result<(), String> {
             let _ = std::fs::remove_dir_all(&root);
             return Err(e);
         }
-        return Ok(());
+        return install_dependencies(&root);
     }
     git(&root, &["fetch", "--quiet", "--tags", "origin"])?;
-    match rev {
+    let synced = match rev {
         Some(rev) => checkout(&root, rev),
         None => {
             // A clone that was pinned earlier sits detached; return to the
@@ -743,7 +1000,114 @@ fn sync(source: &Source) -> Result<(), String> {
             }
             git(&root, &["pull", "--quiet", "--ff-only"]).map(|_| ())
         }
+    };
+    synced.and_then(|()| install_dependencies(&root))
+}
+
+/// The npm project every npm package installs into. One `package.json` of
+/// e's own marks it, so npm treats it as a project rather than walking up
+/// to whatever the user has above `~/.e`.
+pub fn npm_prefix() -> PathBuf {
+    home::packages_dir().join("npm")
+}
+
+/// Install (or bring current) one npm package into the project at `prefix`,
+/// creating the project on first use. Lifecycle scripts never run: the
+/// package's code runs when e loads it, not when npm unpacks it. An
+/// unpinned package asks for `latest`, which is how `e install` updates it.
+fn npm_install(prefix: &Path, source: &Source) -> Result<(), String> {
+    let Source::Npm { name, version } = source else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(prefix).map_err(|e| e.to_string())?;
+    let manifest = prefix.join("package.json");
+    if !manifest.is_file() {
+        std::fs::write(
+            &manifest,
+            "{\n  \"name\": \"e-packages\",\n  \"private\": true,\n  \"description\": \"npm packages e installed; edit with `e install` and `e remove`\"\n}\n",
+        )
+        .map_err(|e| e.to_string())?;
     }
+    let spec = format!("{name}@{}", version.as_deref().unwrap_or("latest"));
+    npm(
+        prefix,
+        &[
+            "install",
+            "--ignore-scripts",
+            "--omit=dev",
+            "--no-audit",
+            "--no-fund",
+            "--save-exact",
+            "--",
+            &spec,
+        ],
+    )
+    .map(|_| ())
+}
+
+/// The version an npm package is installed at, from its own `package.json`.
+fn installed_npm_version(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("package.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json.get("version")?.as_str().map(str::to_string)
+}
+
+/// A git package whose `package.json` declares dependencies gets them
+/// installed beside it, scripts off, so an extension that imports a library
+/// runs after `e install` the way an npm package's would. A package without
+/// a manifest, or without dependencies, is left exactly as cloned.
+fn install_dependencies(root: &Path) -> Result<(), String> {
+    let manifest = root.join("package.json");
+    let Ok(text) = std::fs::read_to_string(&manifest) else {
+        return Ok(());
+    };
+    let json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    let has_dependencies = json
+        .get("dependencies")
+        .and_then(|d| d.as_object())
+        .is_some_and(|d| !d.is_empty());
+    if !has_dependencies {
+        return Ok(());
+    }
+    let subcommand = if root.join("package-lock.json").is_file() {
+        "ci"
+    } else {
+        "install"
+    };
+    npm(
+        root,
+        &[
+            subcommand,
+            "--ignore-scripts",
+            "--omit=dev",
+            "--no-audit",
+            "--no-fund",
+        ],
+    )
+    .map(|_| ())
+}
+
+/// Run npm in `cwd`, returning stdout; a failure carries npm's own stderr.
+/// Every call names its directory, and none may run a package's scripts.
+fn npm(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    debug_assert!(args.contains(&"--ignore-scripts"));
+    let output = Command::new("npm")
+        .current_dir(cwd)
+        .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
+        .args(args)
+        .output()
+        .map_err(|e| format!("could not run npm: {e} (npm packages need npm on PATH)"))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    Err(if stderr.is_empty() {
+        format!("npm {} failed", args.first().unwrap_or(&""))
+    } else {
+        format!("npm {}: {stderr}", args.first().unwrap_or(&""))
+    })
 }
 
 /// Detach at `rev`: the remote branch of that name first (so a branch pin
@@ -780,6 +1144,120 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     })
 }
 
+/// `e packages init <dir>`: a package to start from. One extension on the
+/// optional scaffold, the three other directories ready, a `package.json`
+/// carrying the `e-package` keyword so `npm publish` lists it in the
+/// catalog, and a README that says what to change. Refuses a directory that
+/// already has files.
+pub fn init(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    if dir.is_dir()
+        && std::fs::read_dir(dir)
+            .map_err(|e| e.to_string())?
+            .next()
+            .is_some()
+    {
+        return Err(format!("{} is not empty", dir.display()));
+    }
+    let name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| parse_npm(n, n).is_ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| "my-e-package".to_string());
+    let files: [(&str, String); 7] = [
+        ("extensions/scaffold.mjs", SCAFFOLD.to_string()),
+        ("extensions/hello.mjs", HELLO.to_string()),
+        ("skills/.keep", String::new()),
+        ("prompts/.keep", String::new()),
+        ("themes/.keep", String::new()),
+        (
+            "package.json",
+            format!(
+                "{{\n  \"name\": \"{name}\",\n  \"version\": \"0.1.0\",\n  \"description\": \"an e package\",\n  \"keywords\": [\"e-package\"],\n  \"license\": \"MIT\",\n  \"files\": [\"extensions\", \"skills\", \"prompts\", \"themes\", \"README.md\"]\n}}\n"
+            ),
+        ),
+        ("README.md", README.replace("{name}", &name)),
+    ];
+    let mut written = Vec::new();
+    for (relative, contents) in files {
+        let path = dir.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, contents).map_err(|e| format!("{}: {e}", path.display()))?;
+        #[cfg(unix)]
+        if relative.starts_with("extensions/") {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| e.to_string())?;
+        }
+        written.push(path);
+    }
+    Ok(written)
+}
+
+const SCAFFOLD: &str = include_str!("../../../docs/extensions/scaffold.mjs");
+
+const HELLO: &str = r#"#!/usr/bin/env node
+// hello — the smallest useful extension: one tool the model can call and
+// one command the user can run. Rename it, then grow it; the protocol is
+// docs/extensions.md, the helper beside this file is optional.
+import { connect } from "./scaffold.mjs";
+
+const ext = connect({
+  manifest: {
+    name: "hello",
+    version: "0.1",
+    description: "greets, as a tool and as a command",
+    tools: [
+      {
+        name: "hello",
+        description: "Greet someone by name.",
+        parameters: { type: "object", properties: { name: { type: "string" } } },
+      },
+    ],
+    commands: [{ name: "hello", description: "say hello from this package" }],
+  },
+  tool({ arguments: { name } }) {
+    return { content: `hello, ${name || "world"}` };
+  },
+  command() {
+    return { notice: "hello from your package" };
+  },
+});
+
+ext.run();
+"#;
+
+const README: &str = r#"# {name}
+
+An [e](https://github.com/intuitums/e) package: any subset of `extensions/`,
+`skills/`, `prompts/`, and `themes/`, laid out like `~/.e/` itself.
+
+Try it in place while you work on it:
+
+```sh
+e --package . 
+```
+
+Install it for good:
+
+```sh
+e install .
+```
+
+Publish it so `e install npm:{name}` works for everyone — the `e-package`
+keyword in `package.json` is what lists it in the catalog:
+
+```sh
+npm publish
+```
+
+Extensions must be executable (`chmod +x extensions/*.mjs`, and commit the
+mode). Delete the directories you do not use; the `.keep` files only hold
+them in git.
+"#;
+
 /// True when a path sits inside the managed packages root — the skills
 /// picker uses it to label a skill's scope.
 pub fn is_packaged(path: &Path) -> bool {
@@ -798,7 +1276,9 @@ mod tests {
                 path,
                 rev,
             } => (url, host, path, rev),
-            Source::Local(_) | Source::Release { .. } => panic!("{spec} parsed as another kind"),
+            Source::Local(_) | Source::Release { .. } | Source::Npm { .. } => {
+                panic!("{spec} parsed as another kind")
+            }
         }
     }
 
@@ -849,6 +1329,73 @@ mod tests {
         assert!(Source::parse("git:github.com/intuitums/e@-bad").is_err());
         assert!(Source::parse("--upload-pack=x").is_err());
         assert!(Source::parse("git:github.com").is_err());
+    }
+
+    #[test]
+    fn npm_names_are_scoped_versioned_and_kept_safe() {
+        let plain = Source::parse("npm:e-diff").unwrap();
+        assert_eq!(
+            plain,
+            Source::Npm {
+                name: "e-diff".into(),
+                version: None
+            }
+        );
+        assert_eq!(
+            plain.root(),
+            npm_prefix().join("node_modules").join("e-diff")
+        );
+        let scoped = Source::parse("npm:@fschr/e-diff@1.2.0").unwrap();
+        assert_eq!(
+            scoped,
+            Source::Npm {
+                name: "@fschr/e-diff".into(),
+                version: Some("1.2.0".into())
+            }
+        );
+        assert_eq!(scoped.identity(), "npm:@fschr/e-diff");
+        assert_eq!(
+            Source::parse("npm:@fschr/E-Diff@2").map(|s| s.identity()),
+            Err("`npm:@fschr/E-Diff@2` is not an npm package name".into())
+        );
+        for bad in [
+            "npm:",
+            "npm:.hidden",
+            "npm:-x",
+            "npm:a/b",
+            "npm:@s",
+            "npm:x@",
+            "npm:x@-y",
+        ] {
+            assert!(Source::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn filters_include_exclude_and_round_trip_through_settings() {
+        let value = serde_json::json!({
+            "source": "npm:pack",
+            "extensions": ["!extensions/legacy.mjs"],
+            "prompts": ["prompts/review.md", "prompts/r*.md", "!prompts/rough.md"],
+        });
+        let entry = Entry::from_value(&value).unwrap();
+        let filter = &entry.filter;
+        // Only exclusions: everything else loads.
+        assert!(filter.allows("extensions", "diff.mjs"));
+        assert!(!filter.allows("extensions", "legacy.mjs"));
+        // An inclusion: only what it names, minus exclusions.
+        assert!(filter.allows("prompts", "review.md"));
+        assert!(filter.allows("prompts", "recap.md"));
+        assert!(!filter.allows("prompts", "rough.md"));
+        assert!(!filter.allows("prompts", "other.md"));
+        // A kind with no list is untouched.
+        assert!(filter.allows("skills", "anything"));
+        assert_eq!(entry.to_value(), value);
+        assert_eq!(
+            Entry::plain("git:github.com/u/r").to_value(),
+            serde_json::Value::String("git:github.com/u/r".into())
+        );
+        assert!(Entry::from_value(&serde_json::json!({"extensions": []})).is_none());
     }
 
     #[test]

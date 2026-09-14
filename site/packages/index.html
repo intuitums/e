@@ -1,0 +1,172 @@
+<!doctype html>
+<!--
+  The e package catalog: one static page, no build, no server. It asks the
+  npm registry's search API for every package carrying the `e-package`
+  keyword and renders the answer. Host it anywhere that serves a file;
+  the registry answers cross-origin requests.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>e packages</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1f1f1f; --bg: #fff; --muted: #6b6b6b; --box: #f4f4f5; --border: #e4e4e7; --accent: #7c3aed;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e6e6e6; --bg: #111; --muted: #9a9a9a; --box: #1b1b1f; --border: #2a2a2e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h1 span { color: var(--accent); }
+  .lead { color: var(--muted); margin: 0 0 20px; }
+  .lead code, .card code, .empty code { font-family: ui-monospace, monospace; font-size: 13px; background: var(--box); padding: 1px 5px; border-radius: 4px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .controls input, .controls select { font: inherit; color: var(--fg); background: var(--box); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+  .controls input { flex: 1 1 240px; min-width: 0; }
+  .count { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; background: var(--box); }
+  .card .head { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: baseline; }
+  .card .name { font-weight: 600; font-size: 16px; text-decoration: none; color: var(--fg); }
+  .card .name:hover { color: var(--accent); }
+  .card .version, .card .meta { color: var(--muted); font-size: 13px; }
+  .card .desc { margin: 6px 0 8px; }
+  .card .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .card .tag { font-size: 12px; border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; color: var(--muted); }
+  .card .install { font-family: ui-monospace, monospace; font-size: 13px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; display: inline-block; user-select: all; }
+  .card .links { float: right; font-size: 13px; }
+  .card .links a { color: var(--muted); margin-left: 10px; }
+  .empty, .error { color: var(--muted); padding: 24px 0; }
+  footer { color: var(--muted); font-size: 13px; margin-top: 32px; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <h1><span>e</span> packages</h1>
+  <p class="lead">Extensions, skills, prompt templates, and themes for <a href="https://github.com/intuitums/e">e</a>. Every npm package with the <code>e-package</code> keyword, straight from the registry. Install one with <code>e install npm:&lt;name&gt;</code>.</p>
+  <div class="controls">
+    <input id="q" type="search" placeholder="filter by name, description, author, or keyword" autocomplete="off">
+    <select id="sort">
+      <option value="downloads">most downloaded</option>
+      <option value="recent">recently published</option>
+      <option value="name">a–z</option>
+    </select>
+  </div>
+  <div class="count" id="count">loading…</div>
+  <div id="list"></div>
+  <footer>Publish one: <code>e packages init my-package</code>, then <code>npm publish</code> — see <a href="https://github.com/intuitums/e/blob/main/docs/packages.md">docs/packages.md</a>. A package runs with your full permissions; read the source before installing.</footer>
+</main>
+<script>
+(async () => {
+  const REGISTRY = "https://registry.npmjs.org/-/v1/search";
+  const KINDS = ["extensions", "skills", "prompts", "themes"];
+  const list = document.getElementById("list");
+  const count = document.getElementById("count");
+  const q = document.getElementById("q");
+  const sort = document.getElementById("sort");
+  let packages = [];
+
+  // The search API pages at 250; walk it until the total is in hand.
+  async function fetchAll() {
+    const out = [];
+    for (let from = 0; ; from += 250) {
+      const url = `${REGISTRY}?text=keywords:e-package&size=250&from=${from}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`registry answered ${res.status}`);
+      const data = await res.json();
+      out.push(...data.objects);
+      if (out.length >= data.total || data.objects.length === 0) break;
+    }
+    return out.map((o) => ({
+      name: o.package.name,
+      version: o.package.version,
+      description: o.package.description || "",
+      author: (o.package.publisher && o.package.publisher.username) || "",
+      keywords: (o.package.keywords || []).filter((k) => k !== "e-package"),
+      kinds: KINDS.filter((k) => (o.package.keywords || []).includes(k)),
+      date: o.package.date ? new Date(o.package.date) : null,
+      downloads: (o.downloads && o.downloads.monthly) || 0,
+      npm: o.package.links && o.package.links.npm,
+      repo: o.package.links && o.package.links.repository,
+    }));
+  }
+
+  function ago(date) {
+    if (!date) return "";
+    const days = Math.floor((Date.now() - date.getTime()) / 86400000);
+    if (days < 1) return "today";
+    if (days < 30) return `${days}d ago`;
+    if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+    return `${Math.floor(days / 365)}y ago`;
+  }
+
+  function compact(n) {
+    if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+    return String(n);
+  }
+
+  function escape(text) {
+    return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  // Only registry-provided http(s) links are rendered.
+  function safeUrl(url) {
+    return typeof url === "string" && /^https?:\/\//i.test(url) ? url : null;
+  }
+
+  function render() {
+    const needle = q.value.trim().toLowerCase();
+    let shown = packages.filter((p) =>
+      !needle ||
+      [p.name, p.description, p.author, ...p.keywords].some((s) => s.toLowerCase().includes(needle))
+    );
+    const by = sort.value;
+    shown.sort((a, b) =>
+      by === "name" ? a.name.localeCompare(b.name)
+      : by === "recent" ? (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0)
+      : b.downloads - a.downloads
+    );
+    count.textContent = `${shown.length} of ${packages.length} package${packages.length === 1 ? "" : "s"}`;
+    if (shown.length === 0) {
+      list.innerHTML = packages.length === 0
+        ? `<p class="empty">Nothing published yet. Be first: <code>e packages init my-package</code>.</p>`
+        : `<p class="empty">Nothing matches.</p>`;
+      return;
+    }
+    list.innerHTML = shown.map((p) => {
+      const npm = safeUrl(p.npm);
+      const repo = safeUrl(p.repo && p.repo.replace(/^git\+/, "").replace(/\.git$/, ""));
+      const tags = [...p.kinds, ...p.keywords.filter((k) => !KINDS.includes(k)).slice(0, 6)];
+      return `<div class="card">
+        <div class="links">${npm ? `<a href="${escape(npm)}">npm</a>` : ""}${repo ? `<a href="${escape(repo)}">source</a>` : ""}</div>
+        <div class="head">
+          ${npm ? `<a class="name" href="${escape(npm)}">${escape(p.name)}</a>` : `<span class="name">${escape(p.name)}</span>`}
+          <span class="version">${escape(p.version)}</span>
+          <span class="meta">${p.author ? `by ${escape(p.author)} · ` : ""}${compact(p.downloads)}/mo · ${ago(p.date)}</span>
+        </div>
+        ${p.description ? `<div class="desc">${escape(p.description)}</div>` : ""}
+        ${tags.length ? `<div class="tags">${tags.map((t) => `<span class="tag">${escape(t)}</span>`).join("")}</div>` : ""}
+        <code class="install">e install npm:${escape(p.name)}</code>
+      </div>`;
+    }).join("");
+  }
+
+  q.addEventListener("input", render);
+  sort.addEventListener("change", render);
+  try {
+    packages = await fetchAll();
+    render();
+  } catch (error) {
+    count.textContent = "";
+    list.innerHTML = `<p class="error">Could not reach the npm registry (${escape(error.message)}). Search it directly: <a href="https://www.npmjs.com/search?q=keywords:e-package">npmjs.com/search?q=keywords:e-package</a>.</p>`;
+  }
+})();
+</script>
+</body>
+</html>

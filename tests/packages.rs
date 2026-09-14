@@ -431,7 +431,10 @@ fn a_trusted_repository_lists_its_own_packages_and_once_roots_are_forgotten() {
     e::core::config::trust::set(&ws, true).unwrap();
     // The local directory line is not honoured: trust must not run code in
     // place. The git source is.
-    let listed = packages::configured();
+    let listed: Vec<String> = packages::configured()
+        .into_iter()
+        .map(|e| e.source)
+        .collect();
     assert_eq!(listed, vec![repo.source(Some("v1"))]);
     assert_eq!(packages::missing(), vec![repo.source(Some("v1"))]);
     // `e install` installs the project's packages into the user's roots.
@@ -455,4 +458,280 @@ fn a_trusted_repository_lists_its_own_packages_and_once_roots_are_forgotten() {
     assert!(extra.is_dir(), "the local directory is not ours to delete");
     assert_eq!(packages::roots().len(), 1);
     std::env::set_current_dir(previous).unwrap();
+}
+
+/// A registry for one package: the packument at `/<name>`, the tarball at
+/// `/<name>/-/<name>-<version>.tgz`, served until the handle is dropped.
+/// npm talks to it through `npm_config_registry`.
+struct Registry {
+    port: u16,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Registry {
+    fn serve(name: &str, version: &str, tarball: Vec<u8>) -> Registry {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let tarball_path = format!(
+            "/{name}/-/{}-{version}.tgz",
+            name.rsplit('/').next().unwrap()
+        );
+        let packument = serde_json::json!({
+            "name": name,
+            "dist-tags": {"latest": version},
+            "versions": {version: {
+                "name": name, "version": version,
+                "dist": {"tarball": format!("http://127.0.0.1:{port}{tarball_path}")}
+            }}
+        })
+        .to_string();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (seen, halt, name) = (requests.clone(), stop.clone(), name.to_string());
+        std::thread::spawn(move || loop {
+            if halt.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let Ok((mut sock, _)) = listener.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            };
+            sock.set_nonblocking(false).unwrap();
+            let mut buf = vec![0u8; 65536];
+            let n = sock.read(&mut buf).unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+            seen.lock().unwrap().push(path.clone());
+            let encoded = name.replace('/', "%2f");
+            let (status, kind, body): (&str, &str, Vec<u8>) = if path == tarball_path {
+                ("200 OK", "application/octet-stream", tarball.clone())
+            } else if path == format!("/{name}") || path == format!("/{encoded}") {
+                ("200 OK", "application/json", packument.clone().into_bytes())
+            } else {
+                (
+                    "404 Not Found",
+                    "application/json",
+                    b"{\"error\":\"not found\"}".to_vec(),
+                )
+            };
+            let _ = write!(
+                sock,
+                "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(&body);
+        });
+        Registry {
+            port,
+            requests,
+            stop,
+        }
+    }
+}
+
+impl Drop for Registry {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// `package/…` tarball of a one-prompt, one-extension package, as `npm
+/// publish` would produce it.
+fn package_tarball(label: &str, version: &str) -> Vec<u8> {
+    let stage = std::env::temp_dir().join(format!("e-npm-{label}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage);
+    let root = stage.join("package");
+    write(
+        &root.join("package.json"),
+        &format!(r#"{{"name":"e-npm-{label}","version":"{version}","keywords":["e-package"]}}"#),
+    );
+    write(
+        &root.join("prompts/npmhi.md"),
+        "---\ndescription: from npm\n---\nhi\n",
+    );
+    write(&root.join("extensions/npmext.sh"), "#!/bin/sh\nexit 0\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            root.join("extensions/npmext.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let out = stage.join("pkg.tgz");
+    let status = Command::new("tar")
+        // macOS tar would add `._` resource forks; none of those.
+        .env("COPYFILE_DISABLE", "1")
+        .args([
+            "-czf",
+            &out.to_string_lossy(),
+            "-C",
+            &stage.to_string_lossy(),
+            "package",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let bytes = std::fs::read(&out).unwrap();
+    let _ = std::fs::remove_dir_all(&stage);
+    bytes
+}
+
+/// Requires `npm` on PATH; the registry is the test's own.
+#[test]
+fn an_npm_package_installs_without_scripts_updates_and_removes() {
+    if Command::new("npm").arg("--version").output().is_err() {
+        eprintln!("npm not available; skipping");
+        return;
+    }
+    let _lock = env_lock();
+    let home = Home::new("pkg-npm");
+    let cache = home.dir.join("npm-cache");
+    let registry = Registry::serve("e-npm-one", "1.0.0", package_tarball("one", "1.0.0"));
+    std::env::set_var(
+        "npm_config_registry",
+        format!("http://127.0.0.1:{}/", registry.port),
+    );
+    std::env::set_var("npm_config_cache", &cache);
+
+    let (root, counts) = block(packages::install("npm:e-npm-one")).unwrap();
+    assert_eq!(
+        root,
+        packages::npm_prefix()
+            .join("node_modules")
+            .join("e-npm-one")
+    );
+    assert_eq!(
+        counts,
+        [1, 0, 1, 0],
+        "the extension and the prompt are seen"
+    );
+    assert!(root.join("prompts/npmhi.md").is_file());
+    assert_eq!(settings_packages(&home), vec!["npm:e-npm-one".to_string()]);
+    assert!(
+        packages::npm_prefix().join("package.json").is_file(),
+        "the prefix is a project of e's own"
+    );
+    let prompts = e::core::resources::prompts::list(&home.dir);
+    assert!(prompts.iter().any(|p| p.name == "npmhi"));
+
+    // A newer version on the registry: `e install` brings it current.
+    drop(registry);
+    let registry = Registry::serve("e-npm-one", "1.1.0", package_tarball("one", "1.1.0"));
+    std::env::set_var(
+        "npm_config_registry",
+        format!("http://127.0.0.1:{}/", registry.port),
+    );
+    let results = block(packages::install_all());
+    assert_eq!(
+        results,
+        vec![Ok("npm:e-npm-one: updated 1.0.0 → 1.1.0".to_string())]
+    );
+    assert!(
+        registry
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|p| !p.contains("audit")),
+        "no audit calls: {:?}",
+        registry.requests.lock().unwrap()
+    );
+
+    // A pinned spec moves the entry, not duplicates it; remove deletes the
+    // install and the entry.
+    block(packages::install("npm:e-npm-one@1.1.0")).unwrap();
+    assert_eq!(
+        settings_packages(&home),
+        vec!["npm:e-npm-one@1.1.0".to_string()]
+    );
+    packages::remove("npm:e-npm-one").unwrap();
+    assert!(!root.exists(), "npm uninstall removed it");
+    assert!(settings_packages(&home).is_empty());
+    std::env::remove_var("npm_config_registry");
+    std::env::remove_var("npm_config_cache");
+}
+
+#[test]
+fn a_filtered_entry_loads_only_what_it_names_and_survives_a_reinstall() {
+    let _lock = env_lock();
+    let home = Home::new("pkg-filter");
+    let repo = Repo::new("filter");
+    block(packages::install(&repo.source(Some("v1")))).unwrap();
+    // Hand-edit settings the way a user would: an object entry with filters.
+    let entry = serde_json::json!({
+        "source": repo.source(Some("v1")),
+        "prompts": ["!prompts/hi.md"],
+        "skills": ["skills/nothing-*"],
+    });
+    e::core::config::settings::set_array("packages", vec![entry]).unwrap();
+    let prompts = e::core::resources::prompts::list(&home.dir);
+    assert!(!prompts.iter().any(|p| p.name == "hi"), "excluded prompt");
+    let skills = e::core::resources::skills::list(&home.dir);
+    assert!(!skills.iter().any(|s| s.name == "hello"), "not included");
+    assert!(
+        e::core::config::settings::theme_names().contains(&"pkgtheme".to_string()),
+        "an unfiltered kind loads"
+    );
+    // Moving the pin keeps the filters.
+    block(packages::install(&repo.source(None))).unwrap();
+    let saved = e::core::config::settings::get_array("packages").unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["source"], repo.source(None));
+    assert_eq!(saved[0]["prompts"], serde_json::json!(["!prompts/hi.md"]));
+}
+
+#[test]
+fn init_starts_a_package_that_loads_in_place() {
+    let _lock = env_lock();
+    let home = Home::new("pkg-init");
+    let dir = home.dir.join("my-pack");
+    let written = packages::init(&dir).unwrap();
+    assert!(written.iter().any(|p| p.ends_with("extensions/hello.mjs")));
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
+    assert_eq!(manifest["name"], "my-pack");
+    assert_eq!(manifest["keywords"], serde_json::json!(["e-package"]));
+    assert_eq!(
+        packages::counts(&dir)[0],
+        2,
+        "two executables in extensions/"
+    );
+    assert!(
+        packages::init(&dir).is_err(),
+        "never over an existing package"
+    );
+}
+
+/// The released shape of the `packages` list: strings, and objects with a
+/// `source` and per-kind filters, side by side. A future e keeps reading it.
+#[test]
+fn the_settings_fixture_with_filtered_entries_still_reads() {
+    let _lock = env_lock();
+    let home = Home::new("pkg-fixture");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/config/settings-v1-packages.json");
+    std::fs::copy(fixture, home.dir.join("settings.json")).unwrap();
+    let entries = packages::settings_entries();
+    let sources: Vec<&str> = entries.iter().map(|e| e.source.as_str()).collect();
+    assert_eq!(
+        sources,
+        [
+            "npm:e-diff",
+            "git:github.com/fschrhunt/e-diff@v2",
+            "npm:@team/e-tools@1.4.0",
+            "/Users/me/src/local-pack"
+        ]
+    );
+    assert!(entries[0].filter.is_empty());
+    assert!(!entries[2].filter.allows("extensions", "legacy.mjs"));
+    assert!(entries[2].filter.allows("extensions", "diff.mjs"));
+    assert!(!entries[2].filter.allows("prompts", "other.md"));
+    for entry in &entries {
+        assert!(Source::parse(&entry.source).is_ok(), "{}", entry.source);
+    }
 }

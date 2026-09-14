@@ -99,6 +99,14 @@
   listed package missing on disk is reported at startup; startup itself never
   touches the network. The `$` picker labels package skills `Package`.
   `e docs packages` carries the guide.
+- Packages from npm: `e install npm:<name>[@version]` installs with your own
+  `npm` into `~/.e/packages/npm/`, lifecycle scripts always off, and the
+  `e-package` keyword lists a package in the catalog (`site/packages/`). A
+  git package with a `package.json` gets its dependencies installed the same
+  way. A `packages` entry may be an object with `source` and per-kind glob
+  filters (`"extensions": ["!extensions/legacy.mjs"]`) so part of a package
+  stays unloaded. `e packages init <dir>` starts a package to publish, and
+  trusting a repository installs what its `.e/packages` lists.
 - `/diff` ships as an optional extension (`packages/diff`), not part of the e binary. Build `e-diff`, drop it in `~/.e/extensions/`, and the command prints the continuous Git review — file summaries, per-file patches, syntax colors, and word-level changes — into the transcript. `/diff <path>` reviews one file. See `docs/diff.md`.
 - Ctrl+O adopts fx's full-output reader layout: spliced tool details, vertical rails, and a navigation footer. Review folds each detail to three lines; `→` expands to Full. Scroll with the keyboard or mouse; returning to the bottom resumes following new output.
 - Extensions can live in directories under `~/.e/extensions/`, keeping their entry point and helper files together.

@@ -59,11 +59,15 @@ fi
 
 # 4. Config and credential writes go through core/store.rs — the merge-write
 #    path that never wipes unknown keys and chmods auth to 0600. Direct write
-#    APIs in core are limited to the files that own a format.
+#    APIs in core are limited to the files that own a format: packages.rs
+#    owns ~/.e/packages/ (the npm project file there) and the files
+#    `e packages init` scaffolds into a directory the user names; its
+#    settings entries still go through the store.
 if out=$(prod_rs $(find src/core -name '*.rs' 2>/dev/null) | grep -E 'fs::write|File::create|OpenOptions' |
     grep -v '^src/core/config/store.rs:' | grep -v '^src/core/session.rs:' |
     grep -v '^src/core/config/home.rs:' | grep -v '^src/core/tools/' |
-    grep -v '^src/core/update.rs:' | grep -v '^src/core/providers/diagnostics.rs:'); then
+    grep -v '^src/core/update.rs:' | grep -v '^src/core/providers/diagnostics.rs:' |
+    grep -v '^src/core/resources/packages.rs:'); then
   bad "direct file write in src/core outside audited store/session/tool/update/diagnostics paths:"
   say "$out"
 fi

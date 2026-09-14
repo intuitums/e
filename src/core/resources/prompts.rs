@@ -25,8 +25,11 @@ pub struct Template {
 /// template wins.
 pub fn list(cwd: &Path) -> Vec<Template> {
     let mut templates = read_dir(&home::prompts_dir());
-    for dir in packages::dirs("prompts") {
+    for (dir, filter) in packages::dirs("prompts") {
         for template in read_dir(&dir) {
+            if !filter.allows("prompts", &format!("{}.md", template.name)) {
+                continue;
+            }
             if !templates.iter().any(|t| t.name == template.name) {
                 templates.push(template);
             }
