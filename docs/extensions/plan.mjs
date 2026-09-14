@@ -9,12 +9,12 @@
  *                      planning paragraph in its system prompt
  *   ctrl+alt+p       — the same toggle as a shortcut
  *   /plan pick       — choose the mode from a picker instead
- *   /plan show       — a panel listing the current plan steps; while it is
- *                      open, ↑/↓ move the cursor and x checks a step off
+ *   /plan show       — the plan steps in a side pane; ↑/↓ move, Enter or x
+ *                      checks a step off, Esc closes (ctrl+t moves focus)
  *
- * Every surface here is data e paints: the picker is e's picker, the panel
- * is framed like /settings, the status slot sits on e's status row. Nothing
- * in this file touches the terminal.
+ * Every surface here is data e paints: the picker is e's picker, the pane
+ * sits where ~/.e/layout.json says, the status slot sits on e's status row.
+ * Nothing in this file touches the terminal.
  */
 
 import { connect } from "./scaffold.mjs";
@@ -56,7 +56,7 @@ const ext = connect({
       return {};
     }
     if (word === "show") {
-      await drawPanel();
+      await drawPane();
       return {};
     }
     await setPlanning(!planning);
@@ -69,7 +69,7 @@ const ext = connect({
   complete({ prefix }) {
     const items = ["pick", "show"]
       .filter((word) => word.startsWith(prefix))
-      .map((value) => ({ value, description: value === "pick" ? "choose the mode" : "the step panel" }));
+      .map((value) => ({ value, description: value === "pick" ? "choose the mode" : "the step pane" }));
     return { items };
   },
   beforeTurn() {
@@ -84,14 +84,23 @@ const ext = connect({
     // itself, this keeps the status slot honest.
     if (name === "session_start" && planning) setPlanning(false);
   },
-  key({ key }) {
-    if (key === "up") cursor = Math.max(0, cursor - 1);
-    else if (key === "down") cursor = Math.min(steps.length - 1, cursor + 1);
-    else if (key === "x" || key === "space") steps[cursor].done = !steps[cursor].done;
-    else return;
-    drawPanel();
+  // e moves the cursor and tells us; Enter (or x) checks the step off.
+  paneSelect({ id }) {
+    cursor = Number(id) || 0;
+  },
+  paneActivate({ id }) {
+    toggle(Number(id) || 0);
+  },
+  paneKey({ key }) {
+    if (key === "x" || key === "space") toggle(cursor);
   },
 });
+
+function toggle(index) {
+  if (!steps[index]) return;
+  steps[index].done = !steps[index].done;
+  drawPane();
+}
 
 async function setPlanning(on) {
   planning = on;
@@ -100,15 +109,25 @@ async function setPlanning(on) {
   await ext.ui.notify(on ? "plan mode: read and grep only" : "build mode: every tool");
 }
 
-function drawPanel() {
-  return ext.ui.panel({
+function drawPane() {
+  const done = steps.filter((step) => step.done).length;
+  return ext.ui.pane({
+    id: "plan",
     title: "Plan",
-    interactive: true,
-    lines: steps.map((step, i) => [
-      { text: i === cursor ? "› " : "  ", token: "accent" },
-      { text: step.done ? "[x] " : "[ ] ", token: step.done ? "success" : "dim" },
-      { text: step.text, token: i === cursor ? "userMessageText" : "dim" },
-    ]),
+    side: "left",
+    sections: [
+      {
+        kind: "list",
+        id: "steps",
+        title: `${done} of ${steps.length} done`,
+        selected: String(cursor),
+        items: steps.map((step, i) => ({
+          id: String(i),
+          label: `${step.done ? "[x]" : "[ ]"} ${step.text}`,
+          token: step.done ? "success" : undefined,
+        })),
+      },
+    ],
   });
 }
 

@@ -424,7 +424,7 @@ docs/extensions/
   project.mjs    a startup-hook directory router (e --project <path>)
   mcp.mjs        one MCP stdio server's tools as extension tools
   scaffold.mjs   an optional wire-protocol helper (not required, never installed)
-  plan.mjs       a plan mode on the new surface: session.tools, a shortcut,
+  plan.mjs       a plan mode on the new surface: session.tools, a shortcut, a pane,
                  ui.select, a status slot, and a panel
 ```
 
