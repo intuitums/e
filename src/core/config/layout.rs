@@ -16,7 +16,8 @@
 //!   "status": {
 //!     "left":  ["{model} / {effort}", "{context}"],
 //!     "right": ["{status}"]
-//!   }
+//!   },
+//!   "activity": "{phase} {elapsed} {tokens} · {activity}"
 //! }
 //! ```
 //!
@@ -29,14 +30,23 @@
 //!
 //! Status templates are lists of segments; each segment's `{tokens}`
 //! expand and a segment whose tokens all came up empty is dropped, as is
-//! a ` / ` part around an empty token, so `"{model} / {effort}"` reads
-//! `model` alone for a model without an effort knob. Tokens: `{model}`,
+//! a ` / ` or ` · ` part around an empty token, so `"{model} / {effort}"`
+//! reads `model` alone for a model without an effort knob. Tokens: `{model}`,
 //! `{effort}`, `{context}` (percent, blank under 1%), `{cwd}`, `{session}`,
 //! `{status}` (every extension's slot, ` · ` joined), `{status:<ext>}`.
+//!
+//! `activity` is the row below the transcript while a turn runs: `{phase}`
+//! (`Thinking`, `Compacting context`, the retry line), `{elapsed}`
+//! (`(3s)`), `{tokens}` (`(↑1k ↓20)`), and `{activity}`, what extensions
+//! put there with `ui.activity`. Runs of spaces collapse, so a token that
+//! came up empty leaves no gap.
 
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
+
+/// The activity row's built-in template.
+pub const DEFAULT_ACTIVITY: &str = "{phase} {elapsed} {tokens} · {activity}";
 
 /// Which side of the conversation a pane sits on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -76,6 +86,8 @@ pub struct Layout {
     panes: BTreeMap<String, Placement>,
     pub status_left: Vec<String>,
     pub status_right: Vec<String>,
+    /// The activity row's template.
+    pub activity: String,
 }
 
 impl Default for Layout {
@@ -87,6 +99,7 @@ impl Default for Layout {
             panes: BTreeMap::new(),
             status_left: vec!["{model} / {effort}".into(), "{context}".into()],
             status_right: vec!["{status}".into()],
+            activity: DEFAULT_ACTIVITY.into(),
         }
     }
 }
@@ -130,6 +143,7 @@ struct Raw {
     banner: Option<bool>,
     panes: Option<BTreeMap<String, RawPlacement>>,
     status: Option<RawStatus>,
+    activity: Option<String>,
 }
 
 /// Load `~/.e/layout.json`. A missing or malformed file fails open to the
@@ -179,11 +193,15 @@ pub fn parse(json: &str) -> Option<Layout> {
             layout.status_right = right;
         }
     }
+    if let Some(activity) = raw.activity.filter(|a| !a.trim().is_empty()) {
+        layout.activity = activity;
+    }
     Some(layout)
 }
 
-/// Expand one status template: every `{token}` through `lookup`, ` / `
-/// parts around an empty token dropped, and `None` when nothing is left.
+/// Expand one template: every `{token}` through `lookup`; ` · ` and ` / `
+/// parts that came up empty dropped with their separator; runs of spaces
+/// collapsed; `None` when nothing is left.
 pub fn expand(segment: &str, lookup: &dyn Fn(&str) -> String) -> Option<String> {
     let mut out = String::new();
     let mut rest = segment;
@@ -207,12 +225,19 @@ pub fn expand(segment: &str, lookup: &dyn Fn(&str) -> String) -> Option<String> 
     if any_token && !any_value {
         return None;
     }
-    let parts: Vec<&str> = out
-        .split(" / ")
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
+    let groups: Vec<String> = out
+        .split(" · ")
+        .map(|group| {
+            group
+                .split(" / ")
+                .map(|part| part.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join(" / ")
+        })
+        .filter(|g| !g.is_empty())
         .collect();
-    let joined = parts.join(" / ");
+    let joined = groups.join(" · ");
     (!joined.is_empty()).then_some(joined)
 }
 
@@ -274,5 +299,21 @@ mod tests {
         assert_eq!(expand("{status}", &lookup).as_deref(), Some("plan mode"));
         assert_eq!(expand("plain text", &lookup).as_deref(), Some("plain text"));
         assert_eq!(expand("{unknown}", &lookup), None);
+        // An empty token leaves no gap behind.
+        assert_eq!(
+            expand("{model} {effort} {status}", &lookup).as_deref(),
+            Some("gpt-5 plan mode")
+        );
+        assert_eq!(
+            expand("{model} {effort} · {context}", &lookup).as_deref(),
+            Some("gpt-5"),
+            "a dot-separated part that came up empty goes with its separator"
+        );
+        let layout = parse(r#"{"activity":"{phase} {activity}"}"#).unwrap();
+        assert_eq!(layout.activity, "{phase} {activity}");
+        assert_eq!(
+            parse(r#"{"activity":"  "}"#).unwrap().activity,
+            DEFAULT_ACTIVITY
+        );
     }
 }

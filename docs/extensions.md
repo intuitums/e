@@ -277,6 +277,8 @@ ui.confirm  {title, message?}                    → {confirmed}
 ui.input    {title, placeholder?, prefill?, secret?} → {text} | {cancelled:true}
 ui.status   {text | null, key?}                  → {}            your slot on the status row (40 columns);
                                                                  `key` keeps several
+ui.activity {text | null, key?}                  → {}            your text on the activity row below the
+                                                                 transcript (`Thinking (3s) …`), 40 columns
 ui.compose  {text}                               → {}            put text in the composer
 ui.panel    {title, lines, interactive?} | null  → {}            a footer panel; null closes yours
 ui.editor   {title, text?, placeholder?}         → {text} | {cancelled:true}   a multi-line answer
@@ -301,6 +303,11 @@ the keyboard: every key arrives as `{"method":"ui.key","params":{"key":
 the panel and ctrl+c stays e's) and you redraw by sending `ui.panel`
 again. That is pi's custom component, declaratively: you own the state
 and the keys, e owns the frame.
+
+`activity` is the row that reads `Thinking (3s) (↑1k ↓20)` during a turn:
+your text joins it through the `{activity}` token of the user's template
+(`docs/layout.md`) and stands alone there between turns — a test count,
+a build step, a clock.
 
 `widget` rows use the same span grammar and sit above the composer, every
 extension's together in key order, eight rows at most; `{"lines": null}`

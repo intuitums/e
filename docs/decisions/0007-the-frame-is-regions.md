@@ -45,6 +45,7 @@ The regions and how each is set:
 | --- | --- | --- |
 | banner | — | `banner: false` hides it |
 | transcript | `ui.show`, tool `display`, the `render` hook | — |
+| activity row below the transcript | `ui.activity {key, text}` | the `activity` template |
 | pane (left or right) | `ui.pane {id, title, side, sections}` | `panes.<id>.side`, `.width`, `split_min`, `focus` |
 | widget strip above the composer | `ui.widget {key, lines}` | — |
 | composer | `ui.compose`, `ui.input` | `keybindings.json` |
@@ -65,7 +66,10 @@ The status row is a template of tokens (`{model}`, `{effort}`,
 `{context}`, `{cwd}`, `{session}`, `{status}`, `{status:<name>}`) whose
 default reproduces the previous row byte for byte; a segment whose tokens
 came up empty drops out, so the template never paints a dangling
-separator.
+separator. The activity row (`Thinking (3s) (↑1k ↓20)`) is the same kind
+of template — `{phase}`, `{elapsed}`, `{tokens}`, `{activity}` — so the
+clock or the token counts are the user's to keep or drop, and an
+extension's `ui.activity` text has a place on it.
 
 ## Consequences
 

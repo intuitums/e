@@ -16,7 +16,8 @@ A missing or malformed file falls back to e's built-in layout untouched.
   "status": {
     "left":  ["{model} / {effort}", "{context}"],
     "right": ["{status}"]
-  }
+  },
+  "activity": "{phase} {elapsed} {tokens} · {activity}"
 }
 ```
 
@@ -56,6 +57,23 @@ clipboard read, a hidden pane).
 | `{session}` | the session's name, once it has one |
 | `{status}` | every extension's `ui.status` slot, ` · ` joined |
 | `{status:<name>}` | one extension's slots |
+
+## The activity row
+
+`activity` is the row below the transcript while a turn runs, `Thinking
+(3s) (↑1k ↓20)` by default. It is one template:
+
+| Token | Value |
+| --- | --- |
+| `{phase}` | `Thinking`, `Compacting context`, the retry line, or the recovered flash |
+| `{elapsed}` | the turn's clock, `(3s)` |
+| `{tokens}` | the turn's token flow, `(↑1k ↓20)` |
+| `{activity}` | what extensions put there with `ui.activity`, ` · ` joined |
+
+`"activity": "{phase} {elapsed}"` drops the token counts; `"{phase}"`
+leaves just the word. An empty token leaves no gap, and a ` · ` or ` / `
+part that came up empty goes with its separator. Between turns the row
+shows extension text alone, when there is any.
 
 ## The banner
 

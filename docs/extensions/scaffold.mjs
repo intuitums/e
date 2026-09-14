@@ -55,6 +55,7 @@
  *   ext.ui.input(title, {placeholder, prefill, secret}?)
  *   ext.ui.editor(title, text?)            a multi-line answer
  *   ext.ui.status(text | null, key?)       ext.ui.compose(text)
+ *   ext.ui.activity(text | null, key?)     the row below the transcript
  *   ext.ui.panel({title, lines, interactive}) / ext.ui.panel(null)
  *   ext.ui.widget(lines | null, key?)      ext.ui.pane({id, title, side, sections}) / ext.ui.pane(null)
  *   ext.session.send(content, {internal, run}?)   ext.session.info()
@@ -149,6 +150,7 @@ export function connect({ manifest = {}, ...handlers } = {}) {
       input: (title, options = {}) => ask("ui.input", { title, ...options }),
       editor: (title, text) => ask("ui.editor", text === undefined ? { title } : { title, text }),
       status: (text, key) => ask("ui.status", key === undefined ? { text } : { text, key }),
+      activity: (text, key) => ask("ui.activity", key === undefined ? { text } : { text, key }),
       widget: (lines, key) => ask("ui.widget", key === undefined ? { lines } : { lines, key }),
       pane: (pane) => ask("ui.pane", pane === null || pane === undefined ? null : pane),
       compose: (text) => ask("ui.compose", { text }),

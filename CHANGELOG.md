@@ -99,8 +99,10 @@
   several slots. `~/.e/layout.json` decides where every pane goes and how
   wide it is, the chord that moves focus (`ctrl+t`), whether the banner
   shows, and what the status row says, as templates of tokens (`{model}`,
-  `{effort}`, `{context}`, `{cwd}`, `{session}`, `{status}`). `e docs
-  layout` carries the guide. A `render` hook lets an extension re-render
+  `{effort}`, `{context}`, `{cwd}`, `{session}`, `{status}`), and the
+  activity row (`Thinking (3s) (↑1k ↓20)`) the same way (`{phase}`,
+  `{elapsed}`, `{tokens}`, `{activity}`), with `ui.activity` giving
+  extensions a place on it. `e docs layout` carries the guide. A `render` hook lets an extension re-render
   a tool's finished result or a completed reply from data (`renders:
   ["tool:bash", "assistant"]`), and `ui.editor` asks for a multi-line
   answer.

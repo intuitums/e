@@ -539,6 +539,28 @@ impl App {
                 }
                 request.ok();
             }
+            "ui.activity" => {
+                // The `{activity}` token of the row below the transcript,
+                // one slot per extension or several under `key`.
+                let slot = match params.get("key").and_then(Value::as_str) {
+                    Some(key) if !key.trim().is_empty() => {
+                        format!("{}/{}", request.extension, flat(key))
+                    }
+                    _ => request.extension.clone(),
+                };
+                match params.get("text") {
+                    Some(Value::String(text)) if !text.trim().is_empty() => {
+                        self.ext_activity.insert(
+                            slot,
+                            one_line(&crate::core::tools::sanitize_display(text), STATUS_COLUMNS),
+                        );
+                    }
+                    _ => {
+                        self.ext_activity.remove(&slot);
+                    }
+                }
+                request.ok();
+            }
             "ui.widget" => {
                 // Rows above the composer, keyed so an extension can keep
                 // several; null lines remove one. Bounded across all.

@@ -118,41 +118,24 @@ impl Turn {
         }
     }
 
-    /// The `Thinking (Ns) (↑… ↓…)` activity label, the reference's one
-    /// word for a turn in progress. The phase still steers the dot and the
-    /// supervisor, but the row reads the same through provider waits,
-    /// reasoning, tool calls, and reply streaming: the clock and token tail
-    /// carry the progress, so the row never vanishes or flickers mid-turn.
-    fn activity_label(&self, elapsed_secs: u64) -> Option<String> {
-        if self.recovered.is_some() || self.phase == TurnPhase::Retrying {
-            return None;
-        }
-        let tokens = self.tokens();
-        let suffix = if tokens.is_empty() {
-            String::new()
-        } else {
-            format!(" {tokens}")
-        };
-        let verb = if self.phase == TurnPhase::Compacting {
-            "Compacting context"
-        } else {
-            "Thinking"
-        };
-        Some(format!("{verb} ({}){suffix}", format_elapsed(elapsed_secs)))
-    }
-
-    /// A recovered flash overrides everything else until it expires.
-    pub fn label(&self, elapsed_secs: u64) -> Option<String> {
+    /// The `{phase}` token of the activity row: the reference's one word
+    /// for a turn in progress (`Thinking`, or `Compacting context`), the
+    /// whole retry line while backing off, or the recovered flash. The
+    /// phase still steers the dot and the supervisor, but the row reads the
+    /// same through provider waits, reasoning, tool calls, and reply
+    /// streaming: the clock and token tail carry the progress, so the row
+    /// never vanishes or flickers mid-turn.
+    pub fn phase_label(&self) -> Option<String> {
         if let Some(r) = &self.recovered {
             return Some(format!("Recovered · attempt {}/{}", r.attempt, r.limit));
         }
         match self.phase {
+            TurnPhase::Compacting => Some("Compacting context".into()),
             TurnPhase::Waiting
             | TurnPhase::Thinking
             | TurnPhase::ToolCall
             | TurnPhase::Tool
-            | TurnPhase::Compacting
-            | TurnPhase::AssistantText => self.activity_label(elapsed_secs),
+            | TurnPhase::AssistantText => Some("Thinking".into()),
             TurnPhase::Retrying => {
                 let r = self.retry.as_ref()?;
                 let waited = r.since.elapsed().as_secs();
@@ -176,6 +159,47 @@ impl Turn {
                 })
             }
         }
+    }
+
+    /// The `{elapsed}` token: `(3s)` while a turn works; nothing during a
+    /// retry or the recovered flash, which carry their own timing.
+    pub fn elapsed_label(&self, elapsed_secs: u64) -> String {
+        if self.recovered.is_some() || self.phase == TurnPhase::Retrying {
+            String::new()
+        } else {
+            format!("({})", format_elapsed(elapsed_secs))
+        }
+    }
+
+    /// The activity row through a layout template (`docs/layout.md`):
+    /// `{phase}`, `{elapsed}`, `{tokens}` from the turn, `{activity}` from
+    /// extensions. None when there is no phase to show.
+    pub fn label_with(&self, elapsed_secs: u64, template: &str, activity: &str) -> Option<String> {
+        let phase = self.phase_label()?;
+        let tokens = if self.recovered.is_some() || self.phase == TurnPhase::Retrying {
+            String::new()
+        } else {
+            self.tokens()
+        };
+        let lookup = |token: &str| -> String {
+            match token {
+                "phase" => phase.clone(),
+                "elapsed" => self.elapsed_label(elapsed_secs),
+                "tokens" => tokens.clone(),
+                "activity" => activity.to_string(),
+                _ => String::new(),
+            }
+        };
+        crate::core::config::layout::expand(template, &lookup)
+    }
+
+    /// The row as e's default template paints it.
+    pub fn label(&self, elapsed_secs: u64) -> Option<String> {
+        self.label_with(
+            elapsed_secs,
+            crate::core::config::layout::DEFAULT_ACTIVITY,
+            "",
+        )
     }
 }
 

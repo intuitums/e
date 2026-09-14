@@ -336,6 +336,9 @@ struct App {
     ui_prompt: Option<extui::UiPrompt>,
     /// Each extension's `ui.status` text, by extension name.
     ext_status: std::collections::BTreeMap<String, String>,
+    /// Each extension's `ui.activity` text, the `{activity}` token of the
+    /// row below the transcript.
+    ext_activity: std::collections::BTreeMap<String, String>,
     /// The extension panel below the composer, one slot.
     ext_panel: Option<extui::ExtPanel>,
     /// The side pane an extension opened, one at a time.
@@ -443,6 +446,12 @@ impl App {
             .transcript
             .render_animated(&self.theme, width, blink_on);
         let dock_start = lines.len();
+        let activity = self
+            .ext_activity
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" · ");
         if let Some(s) = &self.active {
             if self.rendering_delayed {
                 lines.push(String::new());
@@ -451,7 +460,11 @@ impl App {
                     self.theme
                         .fg("warning", &format!("{dot} Rendering delayed")),
                 );
-            } else if let Some(label) = s.turn.label(s.started.elapsed().as_secs()) {
+            } else if let Some(label) = s.turn.label_with(
+                s.started.elapsed().as_secs(),
+                &self.layout.activity,
+                &activity,
+            ) {
                 lines.push(String::new());
                 if s.turn.recovered.is_some() {
                     // A brief, non-blinking confirmation — not an ongoing
@@ -491,6 +504,10 @@ impl App {
         }
         if self.active.is_some() {
             lines.resize(lines.len().max(dock_start + 2), String::new());
+        } else if !activity.is_empty() {
+            // Between turns the row is the extensions' alone.
+            lines.push(String::new());
+            lines.push(self.theme.fg("dim", &activity));
         }
         lines
     }
@@ -2312,6 +2329,7 @@ impl App {
         self.pane = None;
         self.widgets.clear();
         self.ext_status.clear();
+        self.ext_activity.clear();
         let old = self.host.clone();
         let jobs = self.jobs.clone();
         let results = self.results.clone();
@@ -3005,6 +3023,7 @@ async fn run_scoped(
         ui_queue: extui::UiQueue::new(),
         ui_prompt: None,
         ext_status: std::collections::BTreeMap::new(),
+        ext_activity: std::collections::BTreeMap::new(),
         ext_panel: None,
         pane: None,
         pane_hidden: false,
@@ -4681,6 +4700,7 @@ mod tests {
             ui_queue: extui::UiQueue::new(),
             ui_prompt: None,
             ext_status: std::collections::BTreeMap::new(),
+            ext_activity: std::collections::BTreeMap::new(),
             ext_panel: None,
             pane: None,
             pane_hidden: false,
@@ -5061,6 +5081,54 @@ mod tests {
             app.session_epoch,
         );
         assert_eq!(app.transcript.blocks[index].text, "**bold reply**");
+    }
+
+    #[test]
+    fn the_activity_row_follows_its_template_and_carries_extension_text() {
+        let mut app = session_app();
+        // Between turns: only the extensions' text, dim, below the transcript.
+        let (request, _) = fake_request(
+            "tests",
+            "ui.activity",
+            serde_json::json!({"text": "3 tests running"}),
+        );
+        app.on_host_request(request);
+        let plain: Vec<String> = app
+            .transcript_frame(80)
+            .iter()
+            .map(|r| crate::core::tools::strip_ansi(r))
+            .collect();
+        assert_eq!(plain.last().map(String::as_str), Some("3 tests running"));
+        // During a turn the template composes the row; the user's template
+        // can drop the clock and the tokens.
+        app.active = Some(ActiveTurn {
+            block: None,
+            thinking_block: None,
+            turn: Turn::new(),
+            started: Instant::now(),
+            error: None,
+            error_summary: None,
+            sleep_stopped: false,
+            tool_blocks: std::collections::HashMap::new(),
+            tool_names: std::collections::HashMap::new(),
+            pending_tools: 0,
+            cost_usd: None,
+        });
+        if let Some(turn) = app.active.as_mut() {
+            turn.turn.note_usage(1_000, 20);
+        }
+        let row = |app: &mut App| -> String {
+            let rows = app.transcript_frame(80);
+            crate::core::tools::strip_ansi(rows.last().unwrap())
+                .trim()
+                .to_string()
+        };
+        assert_eq!(row(&mut app), "• Thinking (0s) (↑1k ↓20) · 3 tests running");
+        app.layout.activity = "{phase} — {activity}".into();
+        assert_eq!(row(&mut app), "• Thinking — 3 tests running");
+        let (request, _) = fake_request("tests", "ui.activity", serde_json::json!({"text": null}));
+        app.on_host_request(request);
+        assert_eq!(row(&mut app), "• Thinking —");
     }
 
     #[test]
