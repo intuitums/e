@@ -175,12 +175,20 @@ impl Section {
                     })
                     .unwrap_or_default(),
             ),
-            "diff" => Content::Diff(
-                crate::core::tools::diffview::from_unified(&body())
+            "diff" => {
+                // The row grammar names the file on its first row; a
+                // section titled with the same name would say it twice.
+                let title = value.get("title").and_then(Value::as_str).map(flat);
+                let rows: Vec<String> = crate::core::tools::diffview::from_unified(&body())
                     .lines()
                     .map(str::to_string)
-                    .collect(),
-            ),
+                    .collect();
+                let rows = match (&title, rows.first()) {
+                    (Some(title), Some(first)) if first == title => rows[1..].to_vec(),
+                    _ => rows,
+                };
+                Content::Diff(rows)
+            }
             "text" => Content::Text(body()),
             "markdown" => Content::Markdown(body()),
             "rows" => Content::Rows(
@@ -478,8 +486,10 @@ impl Pane {
     }
 
     /// Snapshot the selected rows (or the cursor row) for the composer.
+    /// The label names the section when it has a title (a file path, say),
+    /// else the pane.
     fn attach(&mut self, width: usize) -> Action {
-        let title = self.title.clone();
+        let pane_title = self.title.clone();
         let section = self.section();
         let lines = section.lines(width);
         if lines.is_empty() {
@@ -488,16 +498,21 @@ impl Pane {
         let anchor = section.anchor.unwrap_or(section.cursor);
         let lo = anchor.min(section.cursor).min(lines.len() - 1);
         let hi = anchor.max(section.cursor).min(lines.len() - 1);
-        let mut content = format!("From the {title} pane");
+        let name = if section.title.is_empty() {
+            pane_title.clone()
+        } else {
+            section.title.clone()
+        };
+        let mut content = format!("From the {pane_title} pane");
         if !section.title.is_empty() {
-            content.push_str(&format!(", {}", section.title));
+            content.push_str(&format!(" ({})", section.title));
         }
         content.push_str(":\n");
         content.push_str(&lines[lo..=hi].join("\n"));
         section.anchor = None;
         self.focused = false;
         Action::Attach {
-            label: format!("[{} {} lines]", clip_plain(&title, 36), hi - lo + 1),
+            label: format!("[{} {} lines]", clip_plain(&name, 36), hi - lo + 1),
             content,
         }
     }

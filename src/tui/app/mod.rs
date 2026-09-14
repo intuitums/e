@@ -320,6 +320,9 @@ struct App {
     ext_panel: Option<extui::ExtPanel>,
     /// The side pane an extension opened, one at a time.
     pane: Option<crate::tui::pane::Pane>,
+    /// Set by each paint: the pane is open but off screen (too narrow,
+    /// unfocused), so the status row says how to reach it.
+    pane_hidden: bool,
     /// Extensions' widget rows above the composer, by `extension/key`.
     widgets: std::collections::BTreeMap<String, Vec<Vec<extui::Span>>>,
     /// Where the regions go and what the status row says
@@ -346,12 +349,14 @@ impl App {
     fn frame(&mut self, width: usize, height: usize) -> Vec<String> {
         self.pump_ui_queue();
         let Some(pane) = self.pane.as_ref() else {
+            self.pane_hidden = false;
             return self.conversation_frame(width, height);
         };
         let split = pane.split(width, &self.layout);
         let focused = pane.focused;
         let side = pane.side(&self.layout);
         let theme = self.theme.clone();
+        self.pane_hidden = split.is_none() && !focused;
         let Some((conversation_width, pane_width)) = split else {
             if focused {
                 if let Some(pane) = self.pane.as_mut() {
@@ -588,10 +593,11 @@ impl App {
         // app overlay (armed exit, clipboard) takes the right side while
         // shown, and a hidden pane says how to reach it.
         let (left, right) = self.status_segments();
-        let hidden_pane = self.pane.as_ref().and_then(|p| {
-            (p.split(width, &self.layout).is_none() && !p.focused)
-                .then(|| format!("{} pane · {}", p.title, self.layout.focus))
-        });
+        let hidden_pane = self
+            .pane
+            .as_ref()
+            .filter(|_| self.pane_hidden)
+            .map(|p| format!("{} pane · {}", p.title, self.layout.focus));
         let overlay = self
             .overlay
             .clone()
@@ -2909,6 +2915,7 @@ async fn run_scoped(
         ext_status: std::collections::BTreeMap::new(),
         ext_panel: None,
         pane: None,
+        pane_hidden: false,
         widgets: std::collections::BTreeMap::new(),
         layout: crate::core::config::layout::load(),
         external_edit: false,
@@ -3674,7 +3681,10 @@ async fn run_scoped(
             } else {
                 app.frame(cols as usize, rows as usize)
             };
-            painter.frame_in_view(frame, app.viewer.is_some());
+            // A split beside a pane is a fixed-height frame: it paints on
+            // the alternate screen, like the viewer, so the transcript and
+            // the terminal's scrollback come back untouched when it closes.
+            painter.frame_in_view(frame, app.viewer.is_some() || app.pane.is_some());
             next_paint = now + FRAME_INTERVAL;
             paint_deferred = false;
         } else {
@@ -4578,6 +4588,7 @@ mod tests {
             ext_status: std::collections::BTreeMap::new(),
             ext_panel: None,
             pane: None,
+            pane_hidden: false,
             widgets: std::collections::BTreeMap::new(),
             layout: crate::core::config::layout::Layout::default(),
             external_edit: false,
@@ -4855,6 +4866,50 @@ mod tests {
             reply.blocking_recv().unwrap().is_err(),
             "a pane needs sections"
         );
+    }
+
+    /// The exact request the diff package sends, painted at a real size:
+    /// every row of the split carries the divider and the pane.
+    #[test]
+    fn a_package_shaped_pane_paints_every_row_of_the_split() {
+        let mut app = session_app();
+        let (request, _) = fake_request(
+            "diff",
+            "ui.pane",
+            serde_json::json!({"id":"diff","title":"3 files changed +6 -4","side":"right","sections":[
+                {"kind":"list","id":"files","items":[
+                    {"id":"list.txt","label":"list.txt","detail":"+1 -1"},
+                    {"id":"main.rs","label":"main.rs","detail":"+5 -3"},
+                    {"id":"notes.txt","label":"notes.txt","detail":"new"}],"selected":"list.txt"},
+                {"kind":"diff","id":"patch","body":"diff --git a/list.txt b/list.txt\nindex de98044..6372083 100644\n--- a/list.txt\n+++ b/list.txt\n@@ -1,3 +1,3 @@\n a\n-b\n c\n+d"}]}),
+        );
+        app.on_host_request(request);
+        let frame = app.frame(130, 32);
+        assert_eq!(frame.len(), 32);
+        let plain: Vec<String> = frame
+            .iter()
+            .map(|r| crate::core::tools::strip_ansi(r))
+            .collect();
+        for (i, row) in plain.iter().enumerate() {
+            assert!(row.contains(" │ "), "row {i} lost the divider: {row:?}");
+            assert!(
+                row.chars().count() <= 130,
+                "row {i} is wider than the terminal: {row:?}"
+            );
+            // What the painter does with every row, styled.
+            let styled = &frame[i];
+            assert!(
+                crate::tui::markdown::visible_width(styled) <= 130,
+                "row {i} measures wider than the terminal: {styled:?}"
+            );
+            let _ = crate::tui::markdown::clip_styled(styled, 130);
+        }
+        assert!(
+            plain[3].contains("list.txt") && plain[3].ends_with("+1 -1"),
+            "{:?}",
+            plain[3]
+        );
+        assert!(plain.iter().any(|r| r.contains("2 - b")), "{plain:?}");
     }
 
     #[test]
