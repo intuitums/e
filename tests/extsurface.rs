@@ -40,7 +40,7 @@ while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*)
       printf '%s\n' "$line" | grep -o '"ui":[a-z]*' >> "$log"
-      printf '{"id":%s,"result":{"name":"surface","version":"2","events":["turn_start","tool_end"],"hooks":["before_turn","tool_result","compact_summary"],"tools":[{"name":"diff","description":"d","parameters":{"type":"object"},"label":{"category":"diff","running":"Diffing","completed":"Diffed","target":"path"}}],"commands":[{"name":"deploy","description":"ship it","arguments":"<env>","completions":true}],"shortcuts":[{"key":"Ctrl+Shift+G","description":"go"},{"key":"enter","description":"steal"}]}}\n' "$id"
+      printf '{"id":%s,"result":{"name":"surface","version":"2","events":["turn_start","tool_end"],"hooks":["before_turn","tool_result","compact_summary","render"],"renders":["tool:bash","assistant"],"tools":[{"name":"diff","description":"d","parameters":{"type":"object"},"label":{"category":"diff","running":"Diffing","completed":"Diffed","target":"path"}}],"commands":[{"name":"deploy","description":"ship it","arguments":"<env>","completions":true}],"shortcuts":[{"key":"Ctrl+Shift+G","description":"go"},{"key":"enter","description":"steal"}]}}\n' "$id"
       printf '{"id":"q1","method":"session.info","params":{}}\n'
       printf '{"id":"q2","method":"ui.select","params":{"title":"pick","options":["a","b"]}}\n' ;;
     *'"method":"hook.before_turn"'*)
@@ -52,6 +52,11 @@ while IFS= read -r line; do
       esac ;;
     *'"method":"hook.compact_summary"'*)
       printf '{"id":%s,"result":{"summary":"edited summary"}}\n' "$id" ;;
+    *'"method":"hook.render"'*)
+      case "$line" in
+        *'"kind":"tool"'*) printf '{"id":%s,"result":{"body":"rendered: bash","format":"markdown"}}\n' "$id" ;;
+        *) printf '{"id":%s,"result":{}}\n' "$id" ;;
+      esac ;;
     *'"method":"command.complete"'*)
       case "$line" in
         *'"prefix":"st"'*) printf '{"id":%s,"result":{"items":[{"value":"staging","description":"pre-prod"}]}}\n' "$id" ;;
@@ -167,6 +172,16 @@ async fn events_go_only_to_subscribers_and_hooks_chain_their_answers() {
         host.hook_compact_summary("draft").await,
         Some("edited summary".into())
     );
+
+    // The render hook is asked only about what the manifest lists, and an
+    // empty answer leaves the entry as e paints it.
+    assert!(host.renders("tool:bash") && host.renders("assistant"));
+    assert!(!host.renders("tool:read"));
+    let rendered = host.hook_render("tool:bash", "bash", "raw").await.unwrap();
+    assert_eq!(rendered.body, "rendered: bash");
+    assert_eq!(rendered.format, e::core::extensions::Format::Markdown);
+    assert!(host.hook_render("assistant", "", "reply").await.is_none());
+    assert!(host.hook_render("tool:read", "read", "x").await.is_none());
     host.shutdown().await;
 }
 

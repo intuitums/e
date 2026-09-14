@@ -44,7 +44,7 @@ The regions and how each is set:
 | Region | Extension | User (`layout.json`) |
 | --- | --- | --- |
 | banner | — | `banner: false` hides it |
-| transcript | `ui.show`, tool `display`, (renderers: a later decision) | — |
+| transcript | `ui.show`, tool `display`, the `render` hook | — |
 | pane (left or right) | `ui.pane {id, title, side, sections}` | `panes.<id>.side`, `.width`, `split_min`, `focus` |
 | widget strip above the composer | `ui.widget {key, lines}` | — |
 | composer | `ui.compose`, `ui.input` | `keybindings.json` |
@@ -76,7 +76,10 @@ separator.
   the binary once carried — as a package, on a surface any package can
   use.
 - `~/.e/layout.json` is a persisted contract under `docs/compatibility.md`.
-- What extensions still cannot do: draw cells, replace the composer, or
-  render a transcript entry themselves. Entry renderers — an extension
-  answering with the section grammar for a message kind — are the next
-  step on this surface and belong to their own decision.
+- The `render` hook is pi's message renderer under rule 1: an extension
+  that lists `renders: ["tool:bash", "assistant"]` is asked for a body and
+  a format when such an entry completes, and e paints the answer. It
+  runs off the paint path and fails open, so a slow renderer costs
+  nothing but its own effect. `ui.editor` is the multi-line answer field
+  the same rule allows.
+- What extensions still cannot do: draw cells, or replace the composer.

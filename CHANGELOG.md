@@ -100,7 +100,10 @@
   wide it is, the chord that moves focus (`ctrl+t`), whether the banner
   shows, and what the status row says, as templates of tokens (`{model}`,
   `{effort}`, `{context}`, `{cwd}`, `{session}`, `{status}`). `e docs
-  layout` carries the guide.
+  layout` carries the guide. A `render` hook lets an extension re-render
+  a tool's finished result or a completed reply from data (`renders:
+  ["tool:bash", "assistant"]`), and `ui.editor` asks for a multi-line
+  answer.
 - Packages: `e install <source>` clones a git repository (or references a
   local directory) shaped like `~/.e/` — `extensions/`, `skills/`,
   `prompts/`, `themes/` — under `~/.e/packages/<host>/<path>`, records it in

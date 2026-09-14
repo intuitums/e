@@ -40,7 +40,7 @@ and its limits are recorded in
 e → extension, requests (each carries an `id` to answer with):
 
 ```
-{"id":1,"method":"initialize","params":{"protocol":1,"capabilities":["tool.update","events","hooks","display","ui","session","shortcuts","pane","widget"],"ui":true,"e_version":"0.0.1","cwd":"/path","extensions_config":{…}}}
+{"id":1,"method":"initialize","params":{"protocol":1,"capabilities":["tool.update","events","hooks","display","ui","session","shortcuts","pane","widget","render"],"ui":true,"e_version":"0.0.1","cwd":"/path","extensions_config":{…}}}
 {"id":2,"method":"hook.startup","params":{"cwd":"/path","argv":["--project","../app"],"flags":{"project":"../app"}}}
 {"id":3,"method":"tool_call","params":{"name":"greet","arguments":{...}}}
 {"id":4,"method":"command","params":{"name":"ping","args":"rest of the line"}}
@@ -49,6 +49,7 @@ e → extension, requests (each carries an `id` to answer with):
 {"id":7,"method":"hook.before_turn","params":{"prompt":"the user's message"}}
 {"id":8,"method":"hook.tool_result","params":{"name":"bash","content":"…","is_error":false}}
 {"id":9,"method":"hook.compact_summary","params":{"summary":"…"}}
+{"id":11,"method":"hook.render","params":{"kind":"tool","name":"bash","content":"…"}}
 {"id":10,"method":"shortcut","params":{"key":"ctrl+alt+g"}}
 ```
 
@@ -98,7 +99,8 @@ top-level key:
  "commands":[{"name":"ping","description":"check the extension"}],
  "flags":[{"name":"project","type":"string","description":"relaunch in this directory"},
            {"name":"plan","type":"boolean","description":"plan mode"}],
- "hooks":["tool_call","input","before_turn","tool_result","compact_summary"],
+ "hooks":["tool_call","input","before_turn","tool_result","compact_summary","render"],
+ "renders":["tool:bash","assistant"],
  "events":["session_start","turn_start","tool_end"],
  "shortcuts":[{"key":"ctrl+alt+g","description":"greet"}]}
 ```
@@ -189,6 +191,16 @@ stored, or sent — redaction and trimming live here. Extensions see each
 other's rewrites in declaration order. A rewrite also drops the tool's
 richer `display` text, so the viewer shows exactly what you let through.
 
+**hook.render** → `{"body":"…","format":"text"|"markdown"|"diff"}` or `{}`
+to leave the entry as e paints it. Declare `renders` in the manifest to be
+asked: `"tool:bash"` (or `"tool:*"`) for a tool's finished result, which
+the body then replaces in the ctrl+o viewer, and `"assistant"` for a
+completed reply, whose markdown the body replaces in the transcript.
+Params are `{kind: "tool"|"assistant", name, content}`; extensions see
+each other's answers in declaration order, and a slow one changes
+nothing. This is pi's message renderer without the cells: you say what to
+show, e paints it.
+
 **hook.compact_summary** → `{"summary":"…"}` or `{}`. The generated summary
 is about to replace the older conversation; this is the last word on it.
 
@@ -267,6 +279,7 @@ ui.status   {text | null, key?}                  → {}            your slot on 
                                                                  `key` keeps several
 ui.compose  {text}                               → {}            put text in the composer
 ui.panel    {title, lines, interactive?} | null  → {}            a footer panel; null closes yours
+ui.editor   {title, text?, placeholder?}         → {text} | {cancelled:true}   a multi-line answer
 ui.widget   {lines | null, key?}                 → {}            rows above the composer; null removes
 ui.pane     {id?, title?, side?, hint?, sections} | null → {}    a side pane; null closes yours
 ```
@@ -274,7 +287,9 @@ ui.pane     {id?, title?, side?, hint?, sections} | null → {}    a side pane; 
 `select` options are strings or `{label, description?, value?}` objects;
 the picker is the same one `/` opens. `confirm` is a Yes/No picker.
 `input` takes over the composer until Enter or Esc; `secret` masks it and
-the text never reaches input hooks or the model.
+the text never reaches input hooks or the model. `editor` is the same
+field for several lines: shift+enter breaks a line, ctrl+g hands the
+draft to the user's external editor, Enter answers.
 
 `panel` lines are strings, or arrays of `{text, token}` spans painted with
 the theme's colour for `token` (`dim`, `accent`, `success`, `warning`,

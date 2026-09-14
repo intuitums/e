@@ -62,6 +62,7 @@ impl App {
                     error_summary: None,
                     sleep_stopped: false,
                     tool_blocks: std::collections::HashMap::new(),
+                    tool_names: std::collections::HashMap::new(),
                     pending_tools: 0,
                     // The first usage event supplies the request model's rates;
                     // the selected model may change while that request is live.
@@ -143,6 +144,7 @@ impl App {
                     self.transcript.blocks[idx].tool_label_rows = self.tool_label_rows;
                     for call in calls {
                         s.tool_blocks.insert(call.id, idx);
+                        s.tool_names.insert(call.id, call.name.clone());
                     }
                 }
             }
@@ -215,6 +217,19 @@ impl App {
                     let detail = self.remember_output(
                         title.unwrap_or_else(|| "tool output".into()),
                         crate::core::tools::sanitize_display(&content),
+                    );
+                    // An extension that renders this tool's results gets
+                    // the stored output to rewrite.
+                    let name = self
+                        .active
+                        .as_ref()
+                        .and_then(|s| s.tool_names.get(&id).cloned())
+                        .unwrap_or_default();
+                    self.request_render(
+                        &format!("tool:{name}"),
+                        &name,
+                        &content,
+                        RenderTarget::Tool(detail),
                     );
                     // Link the stored detail to its row for the review
                     // screen.
@@ -433,8 +448,22 @@ impl App {
         let Some(index) = self.active.as_mut().and_then(|turn| turn.block.take()) else {
             return;
         };
+        let mut finished = None;
         if let Some(block) = self.transcript.blocks.get_mut(index) {
             block.finish_streaming();
+            finished = Some(block.text.clone());
+        }
+        // A completed reply is an entry an extension may render.
+        if let Some(text) = finished {
+            self.request_render(
+                "assistant",
+                "",
+                &text,
+                RenderTarget::Assistant {
+                    index,
+                    len: text.len(),
+                },
+            );
         }
     }
 }

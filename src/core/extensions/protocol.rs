@@ -69,6 +69,7 @@ pub const CAPABILITIES: &[&str] = &[
     "shortcuts",
     "pane",
     "widget",
+    "render",
 ];
 
 /// Every lifecycle event a manifest may subscribe to. Unknown names in a
@@ -107,6 +108,21 @@ pub struct Manifest {
     pub events: Option<Vec<String>>,
     #[serde(default)]
     pub shortcuts: Vec<ShortcutDecl>,
+    /// What the `render` hook is asked about: `tool:<name>` (or `tool:*`)
+    /// for a tool's finished result, `assistant` for a completed reply.
+    /// Absent, the hook is never called.
+    #[serde(default)]
+    pub renders: Vec<String>,
+}
+
+/// A `render` hook result: the body to show instead, in a format, or `{}`
+/// to leave the entry as e paints it.
+#[derive(Debug, Default, Deserialize)]
+pub struct RenderResult {
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub format: Format,
 }
 
 #[derive(Debug, Deserialize)]

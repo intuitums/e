@@ -54,6 +54,8 @@ struct ActiveTurn {
     error_summary: Option<String>,
     /// tool id → stable group block, so lifecycle events update in place.
     tool_blocks: std::collections::HashMap<u64, usize>,
+    /// tool id → the tool's name, for the `render` hook's subject.
+    tool_names: std::collections::HashMap<u64, String>,
     /// Batch members not yet terminal, including pending calls.
     pending_tools: usize,
     /// Set when the turn was stopped because the device slept past the
@@ -111,6 +113,14 @@ enum AppJob {
     },
     /// A /reload finished: the restarted extension host.
     Reloaded(std::sync::Arc<crate::core::extensions::ExtensionHost>),
+    /// An extension's `render` hook answered for a finished entry. Tagged
+    /// with the session epoch; a late answer for a session that moved on
+    /// is dropped.
+    Rendered {
+        target: RenderTarget,
+        show: crate::core::extensions::Show,
+        epoch: u64,
+    },
     /// The background updater installed a new version.
     Updated(String),
     /// Clipboard content read asynchronously, tied to the draft that requested it.
@@ -123,6 +133,16 @@ enum AppJob {
     },
     /// A provider model-list refresh finished; rebuild an open picker.
     CatalogRefreshed,
+}
+
+/// Which finished entry a `render` hook answer belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderTarget {
+    /// A tool's stored output, by output id.
+    Tool(u64),
+    /// A completed reply, by transcript index and its length when asked,
+    /// so a rebuilt transcript never takes a stale body.
+    Assistant { index: usize, len: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -578,7 +598,15 @@ impl App {
             .as_ref()
             .map(|_| crate::tui::settingspanel::HINT)
             .or_else(|| self.menu.as_ref().map(|m| m.hint))
-            .or_else(|| self.ui_input_open().then_some(extui::HINT_INPUT))
+            .or_else(|| {
+                self.ui_input_open().then(|| {
+                    if self.ui_editor_open() {
+                        extui::HINT_EDITOR
+                    } else {
+                        extui::HINT_INPUT
+                    }
+                })
+            })
             .or(ext_panel_hint)
             .map(|h| crate::tui::menu::degrade_hint(h, width));
         // A framed surface's bottom divider sits directly above the hint
@@ -2131,6 +2159,70 @@ impl App {
         id
     }
 
+    /// Ask the extensions that render `subject` for a body to show instead
+    /// of `content`, off the loop; the answer comes back as a job.
+    fn request_render(&self, subject: &str, name: &str, content: &str, target: RenderTarget) {
+        if !self.host.renders(subject) {
+            return;
+        }
+        let host = self.host.clone();
+        let results = self.results.clone();
+        let epoch = self.session_epoch;
+        let (subject, name, content) = (subject.to_string(), name.to_string(), content.to_string());
+        crate::core::config::home::spawn(async move {
+            if let Some(show) = host.hook_render(&subject, &name, &content).await {
+                let _ = results
+                    .send(AppJob::Rendered {
+                        target,
+                        show,
+                        epoch,
+                    })
+                    .await;
+            }
+        });
+    }
+
+    /// A `render` answer lands: a tool's stored output takes the body (a
+    /// diff in e's row grammar), a reply takes it as its markdown.
+    fn apply_render(
+        &mut self,
+        target: RenderTarget,
+        show: crate::core::extensions::Show,
+        epoch: u64,
+    ) {
+        if epoch != self.session_epoch {
+            return;
+        }
+        let body = crate::core::tools::sanitize_display(&show.body);
+        match target {
+            RenderTarget::Tool(id) => {
+                let body = match show.format {
+                    crate::core::extensions::Format::Diff => {
+                        crate::core::tools::diffview::from_unified(&body)
+                    }
+                    _ => body,
+                };
+                if let Some(entry) = self.outputs.iter_mut().find(|(oid, _, _)| *oid == id) {
+                    entry.2 = body;
+                    self.viewer_cache = None;
+                }
+            }
+            RenderTarget::Assistant { index, len } => {
+                if let Some(block) = self.transcript.blocks.get_mut(index) {
+                    if block.kind == Kind::Assistant && block.text.len() == len {
+                        block.text = match show.format {
+                            crate::core::extensions::Format::Diff => {
+                                format!("```diff\n{body}\n```")
+                            }
+                            _ => body,
+                        };
+                        block.touch();
+                    }
+                }
+            }
+        }
+    }
+
     fn output_body(outputs: &[(u64, String, String)], id: u64) -> Option<&str> {
         outputs
             .iter()
@@ -3388,7 +3480,7 @@ async fn run_scoped(
                             && app.settings.is_none()
                             && app.auth.is_none()
                             && app.trust.is_none()
-                            && !app.ui_input_open()
+                            && (!app.ui_input_open() || app.ui_editor_open())
                             && app.pending_key.is_none()
                         {
                             // Deferred to the top of the loop: the terminal
@@ -3473,6 +3565,9 @@ async fn run_scoped(
                     }
                     Some(AppJob::Completions { command, prefix, items }) => {
                         app.show_completions(&command, &prefix, items);
+                    }
+                    Some(AppJob::Rendered { target, show, epoch }) => {
+                        app.apply_render(target, show, epoch);
                     }
                     Some(AppJob::InputVerdict { sequence, text, images, verdict }) => {
                         // A later hook may finish first; hold it until every
@@ -4910,6 +5005,79 @@ mod tests {
             plain[3]
         );
         assert!(plain.iter().any(|r| r.contains("2 - b")), "{plain:?}");
+    }
+
+    #[test]
+    fn a_render_answer_rewrites_its_entry_and_a_stale_one_is_dropped() {
+        let mut app = session_app();
+        let id = app.remember_output("bash".into(), "raw output".into());
+        let diff = crate::core::extensions::Show {
+            title: String::new(),
+            body: "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n".into(),
+            format: crate::core::extensions::Format::Diff,
+        };
+        app.apply_render(RenderTarget::Tool(id), diff.clone(), app.session_epoch);
+        let body = App::output_body(&app.outputs, id).unwrap();
+        assert!(
+            body.contains("1 - old") && body.contains("1 + new"),
+            "{body:?}"
+        );
+        // A reply, only when it is still the reply that was asked about.
+        app.transcript
+            .push(Block::new(Kind::Assistant, "plain reply"));
+        let index = app.transcript.blocks.len() - 1;
+        let markdown = crate::core::extensions::Show {
+            title: String::new(),
+            body: "**bold reply**".into(),
+            format: crate::core::extensions::Format::Markdown,
+        };
+        app.apply_render(
+            RenderTarget::Assistant { index, len: 3 },
+            markdown.clone(),
+            app.session_epoch,
+        );
+        assert_eq!(
+            app.transcript.blocks[index].text, "plain reply",
+            "length mismatch"
+        );
+        app.apply_render(
+            RenderTarget::Assistant {
+                index,
+                len: "plain reply".len(),
+            },
+            markdown.clone(),
+            app.session_epoch + 1,
+        );
+        assert_eq!(
+            app.transcript.blocks[index].text, "plain reply",
+            "epoch mismatch"
+        );
+        app.apply_render(
+            RenderTarget::Assistant {
+                index,
+                len: "plain reply".len(),
+            },
+            markdown,
+            app.session_epoch,
+        );
+        assert_eq!(app.transcript.blocks[index].text, "**bold reply**");
+    }
+
+    #[test]
+    fn an_editor_prompt_takes_a_multi_line_answer() {
+        let mut app = session_app();
+        let (request, reply) = fake_request(
+            "notes",
+            "ui.editor",
+            serde_json::json!({"title": "Commit message", "text": "first line"}),
+        );
+        app.on_host_request(request);
+        assert!(app.ui_editor_open() && app.ui_input_open());
+        assert_eq!(app.editor.text(), "first line");
+        assert!(app.answer_ui_input("first line\nsecond line"));
+        let answer = reply.blocking_recv().unwrap().unwrap();
+        assert_eq!(answer["text"], "first line\nsecond line");
+        assert!(!app.ui_input_open());
     }
 
     #[test]

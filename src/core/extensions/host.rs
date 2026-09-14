@@ -22,8 +22,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::protocol::{
     self, BeforeTurnResult, CommandResult, CompactSummaryResult, Completion, Completions,
-    HookVerdict, Incoming, InjectedMessage, InputVerdict, Manifest, Relaunch, StartupResult,
-    ToolLabel, ToolResult, ToolResultPatch,
+    HookVerdict, Incoming, InjectedMessage, InputVerdict, Manifest, Relaunch, RenderResult, Show,
+    StartupResult, ToolLabel, ToolResult, ToolResultPatch,
 };
 use crate::core::config::home;
 
@@ -1044,6 +1044,55 @@ impl ExtensionHost {
                 let patch: ToolResultPatch = serde_json::from_value(value).unwrap_or_default();
                 if let Some(replacement) = patch.content {
                     current = Some(replacement);
+                }
+            }
+        }
+        current
+    }
+
+    /// Whether any extension asked to render `subject` — `tool:<name>` or
+    /// `assistant` — through its `render` hook.
+    pub fn renders(&self, subject: &str) -> bool {
+        self.extensions
+            .iter()
+            .any(|e| Self::wants_render(&e.manifest, subject))
+    }
+
+    fn wants_render(manifest: &Manifest, subject: &str) -> bool {
+        manifest.hooks.iter().any(|h| h == "render")
+            && manifest.renders.iter().any(|r| {
+                r == subject || (r == "tool:*" && subject.starts_with("tool:")) || r == "*"
+            })
+    }
+
+    /// Ask every extension that renders `subject`, in order, for the body
+    /// to show instead of `content`; each sees the previous answer. None
+    /// when nobody changed anything. `kind` is `tool` or `assistant`,
+    /// `name` the tool (empty for a reply).
+    pub async fn hook_render(&self, subject: &str, name: &str, content: &str) -> Option<Show> {
+        let mut current: Option<Show> = None;
+        let kind = subject.split(':').next().unwrap_or(subject);
+        for ext in &self.extensions {
+            if !Self::wants_render(&ext.manifest, subject) {
+                continue;
+            }
+            let text = current.as_ref().map(|s| s.body.as_str()).unwrap_or(content);
+            if let Ok(value) = self
+                .request(
+                    ext,
+                    "hook.render",
+                    json!({"kind": kind, "name": name, "content": text}),
+                    HOOK_TIMEOUT,
+                )
+                .await
+            {
+                let result: RenderResult = serde_json::from_value(value).unwrap_or_default();
+                if let Some(body) = result.body {
+                    current = Some(Show {
+                        title: String::new(),
+                        body,
+                        format: result.format,
+                    });
                 }
             }
         }

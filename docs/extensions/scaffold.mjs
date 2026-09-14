@@ -38,6 +38,7 @@
  *   beforeTurn({prompt})   — {"system_suffix": …, "message": {content, internal}}
  *   toolResult({name, content, is_error}) — {"content": …} | {}
  *   compactSummary({summary}) — {"summary": …} | {}
+ *   render({kind, name, content}) — {"body": …, "format": …} | {}  (manifest `renders`)
  *   event({name, extra})   — a subscribed lifecycle event (manifest `events`)
  *   key({key})             — a key while your interactive panel is open
  *   panelClosed()          — the user (or another panel) closed yours
@@ -52,6 +53,7 @@
  *   ext.ui.notify(message, tone?)          ext.ui.show({title, body, format})
  *   ext.ui.select(title, options)          ext.ui.confirm(title, message?)
  *   ext.ui.input(title, {placeholder, prefill, secret}?)
+ *   ext.ui.editor(title, text?)            a multi-line answer
  *   ext.ui.status(text | null, key?)       ext.ui.compose(text)
  *   ext.ui.panel({title, lines, interactive}) / ext.ui.panel(null)
  *   ext.ui.widget(lines | null, key?)      ext.ui.pane({id, title, side, sections}) / ext.ui.pane(null)
@@ -145,6 +147,7 @@ export function connect({ manifest = {}, ...handlers } = {}) {
       select: (title, options) => ask("ui.select", { title, options }),
       confirm: (title, message) => ask("ui.confirm", message ? { title, message } : { title }),
       input: (title, options = {}) => ask("ui.input", { title, ...options }),
+      editor: (title, text) => ask("ui.editor", text === undefined ? { title } : { title, text }),
       status: (text, key) => ask("ui.status", key === undefined ? { text } : { text, key }),
       widget: (lines, key) => ask("ui.widget", key === undefined ? { lines } : { lines, key }),
       pane: (pane) => ask("ui.pane", pane === null || pane === undefined ? null : pane),
@@ -258,6 +261,7 @@ export function connect({ manifest = {}, ...handlers } = {}) {
       "hook.before_turn": handlers.beforeTurn,
       "hook.tool_result": handlers.toolResult,
       "hook.compact_summary": handlers.compactSummary,
+      "hook.render": handlers.render,
     }[method];
     if (typeof handler !== "function") return; // not ours; stay quiet
     try {

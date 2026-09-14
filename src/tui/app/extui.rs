@@ -36,6 +36,8 @@ const PANEL_MAX_LINES: usize = 200;
 const TITLE_COLUMNS: usize = 60;
 
 pub(super) const HINT_INPUT: &str = "Enter Answer     Esc Cancel";
+pub(super) const HINT_EDITOR: &str =
+    "Enter Answer     Shift+Enter Newline     Ctrl+G Editor     Esc Cancel";
 pub(super) const HINT_PANEL: &str = "Esc Close";
 pub(super) const HINT_PANEL_INTERACTIVE: &str = "Keys go to the extension     Esc Close";
 
@@ -75,11 +77,13 @@ pub(super) enum UiPrompt {
     Select(HostRequest),
     /// The picker holds Yes/No; Enter answers `confirmed`.
     Confirm(HostRequest),
-    /// The composer is the answer field.
+    /// The composer is the answer field. `multiline` is `ui.editor`:
+    /// shift+enter breaks a line, ctrl+g opens the external editor.
     Input {
         request: HostRequest,
         title: String,
         placeholder: String,
+        multiline: bool,
     },
 }
 
@@ -173,6 +177,18 @@ impl App {
     /// Whether the composer is currently an extension's answer field.
     pub(super) fn ui_input_open(&self) -> bool {
         matches!(self.ui_prompt, Some(UiPrompt::Input { .. }))
+    }
+
+    /// Whether the open answer field is a `ui.editor`, which may hand the
+    /// draft to the external editor.
+    pub(super) fn ui_editor_open(&self) -> bool {
+        matches!(
+            self.ui_prompt,
+            Some(UiPrompt::Input {
+                multiline: true,
+                ..
+            })
+        )
     }
 
     /// Whether some other surface owns the footer, so a modal must wait.
@@ -269,24 +285,33 @@ impl App {
                 );
                 self.ui_prompt = Some(UiPrompt::Confirm(request));
             }
-            "ui.input" => {
+            "ui.input" | "ui.editor" => {
+                let multiline = request.method == "ui.editor";
                 let placeholder = one_line(&text_of(&request.params, "placeholder"), TITLE_COLUMNS);
-                let prefill = text_of(&request.params, "prefill");
-                let secret = request
-                    .params
-                    .get("secret")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
+                // `ui.editor` seeds the draft from `text`; `ui.input` from
+                // `prefill`.
+                let prefill = if multiline {
+                    text_of(&request.params, "text")
+                } else {
+                    text_of(&request.params, "prefill")
+                };
+                let secret = !multiline
+                    && request
+                        .params
+                        .get("secret")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
                 self.editor.set_text(&prefill);
                 self.editor.mask = secret;
                 self.ui_prompt = Some(UiPrompt::Input {
                     request,
                     title: if title.is_empty() {
-                        "Input".to_string()
+                        if multiline { "Editor" } else { "Input" }.to_string()
                     } else {
                         title
                     },
                     placeholder,
+                    multiline,
                 });
             }
             _ => request.respond(Err("not a modal request".into())),
@@ -344,10 +369,12 @@ impl App {
         else {
             return Vec::new();
         };
-        let hint = if placeholder.is_empty() {
-            "type an answer, then Enter".to_string()
-        } else {
+        let hint = if !placeholder.is_empty() {
             placeholder.clone()
+        } else if self.ui_editor_open() {
+            "type or paste, shift+enter for a new line, then Enter".to_string()
+        } else {
+            "type an answer, then Enter".to_string()
         };
         crate::tui::panel::frame(
             &self.theme,
@@ -485,7 +512,7 @@ impl App {
                 self.transcript.push(Block::show(show));
                 request.ok();
             }
-            "ui.select" | "ui.confirm" | "ui.input" => {
+            "ui.select" | "ui.confirm" | "ui.input" | "ui.editor" => {
                 self.ui_queue.push_back(request);
                 self.pump_ui_queue();
             }
