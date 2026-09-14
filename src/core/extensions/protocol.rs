@@ -67,6 +67,8 @@ pub const CAPABILITIES: &[&str] = &[
     "ui",
     "session",
     "shortcuts",
+    "pane",
+    "widget",
 ];
 
 /// Every lifecycle event a manifest may subscribe to. Unknown names in a

@@ -33,6 +33,7 @@ mod clipboard;
 
 mod events;
 mod extui;
+pub(crate) use extui::chord_of;
 mod login;
 mod menus;
 mod viewer;
@@ -317,6 +318,13 @@ struct App {
     ext_status: std::collections::BTreeMap<String, String>,
     /// The extension panel below the composer, one slot.
     ext_panel: Option<extui::ExtPanel>,
+    /// The side pane an extension opened, one at a time.
+    pane: Option<crate::tui::pane::Pane>,
+    /// Extensions' widget rows above the composer, by `extension/key`.
+    widgets: std::collections::BTreeMap<String, Vec<Vec<extui::Span>>>,
+    /// Where the regions go and what the status row says
+    /// (`~/.e/layout.json`), reread with the theme and keymap.
+    layout: crate::core::config::layout::Layout,
     /// ctrl+g was pressed: the frame loop hands the terminal to the
     /// external editor before its next select.
     external_edit: bool,
@@ -331,9 +339,62 @@ impl App {
         crate::tui::transcript::diff_row_style(theme, line)
     }
 
-    /// Ordinary chat joins the transcript and composer into one frame.
+    /// Ordinary chat joins the transcript and composer into one frame. With
+    /// a pane open the conversation and the pane share the width at a fixed
+    /// height, so pane scrolling never moves the conversation; a terminal
+    /// too narrow to split shows whichever has focus.
     fn frame(&mut self, width: usize, height: usize) -> Vec<String> {
         self.pump_ui_queue();
+        let Some(pane) = self.pane.as_ref() else {
+            return self.conversation_frame(width, height);
+        };
+        let split = pane.split(width, &self.layout);
+        let focused = pane.focused;
+        let side = pane.side(&self.layout);
+        let theme = self.theme.clone();
+        let Some((conversation_width, pane_width)) = split else {
+            if focused {
+                if let Some(pane) = self.pane.as_mut() {
+                    return pane.render(&theme, width, height);
+                }
+            }
+            let mut rows = self.conversation_frame(width, height);
+            if rows.len() > height {
+                rows.drain(..rows.len() - height);
+            }
+            return rows;
+        };
+        let pane_rows = match self.pane.as_mut() {
+            Some(pane) => pane.render(&theme, pane_width, height),
+            None => return self.conversation_frame(width, height),
+        };
+        let mut conversation = self.conversation_frame(conversation_width, height);
+        if conversation.len() > height {
+            conversation.drain(..conversation.len() - height);
+        }
+        conversation.resize(height, String::new());
+        let divider = self.theme.fg("border", " │ ");
+        let pad = |row: &str, to: usize| {
+            let row = crate::tui::markdown::clip_styled(row, to);
+            let padding = to.saturating_sub(crate::tui::markdown::visible_width(&row));
+            format!("{row}{}", " ".repeat(padding))
+        };
+        conversation
+            .into_iter()
+            .zip(pane_rows)
+            .map(|(conversation, pane)| match side {
+                crate::core::config::layout::Side::Right => {
+                    format!("{}{divider}{pane}", pad(&conversation, conversation_width))
+                }
+                crate::core::config::layout::Side::Left => {
+                    format!("{}{divider}{conversation}", pad(&pane, pane_width))
+                }
+            })
+            .collect()
+    }
+
+    /// The transcript and composer as one column.
+    fn conversation_frame(&mut self, width: usize, height: usize) -> Vec<String> {
         let mut lines = self.transcript_frame(width);
         let dock_start = lines.len();
         lines.extend(self.composer_frame(width, height));
@@ -419,6 +480,9 @@ impl App {
             // row; a longer draft scrolls behind the ┃↑ marker.
             let cap = (height / 2 + 1).max(3);
             let mut composer = self.editor.render(&self.theme, width, cap);
+            // Extensions' widget rows sit above everything the composer
+            // owns: chrome, like the attachment labels.
+            lines.extend(self.widget_rows(width));
             if !self.composer_images.is_empty() {
                 // Attachment labels are chrome, not editable prompt text.
                 // The existing dim token is the palette's light gray.
@@ -497,7 +561,6 @@ impl App {
         } else if let Some(panel) = &self.ext_panel {
             lines.extend(panel.render(&self.theme, width));
         }
-        let data = self.status_data();
         let ext_panel_hint = self.ext_panel.as_ref().map(|p| {
             if p.interactive {
                 extui::HINT_PANEL_INTERACTIVE
@@ -521,24 +584,130 @@ impl App {
             || self.menu.is_some()
             || self.ui_input_open()
             || self.ext_panel.is_some();
-        // Extensions' status slots share the right-hand overlay spot; a
-        // transient app overlay (copied, clipboard) takes precedence while shown.
-        let ext_status = (!self.ext_status.is_empty()).then(|| {
-            self.ext_status
-                .values()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(" · ")
+        // The row's two sides come from the layout's templates; a transient
+        // app overlay (armed exit, clipboard) takes the right side while
+        // shown, and a hidden pane says how to reach it.
+        let (left, right) = self.status_segments();
+        let hidden_pane = self.pane.as_ref().and_then(|p| {
+            (p.split(width, &self.layout).is_none() && !p.focused)
+                .then(|| format!("{} pane · {}", p.title, self.layout.focus))
         });
         let overlay = self
             .overlay
-            .as_deref()
-            .or(self.clipboard_reading.then_some("reading clipboard…"))
-            .or(ext_status.as_deref());
-        let footer = statusline(&self.theme, &data, overlay, hint, panel_open, width);
+            .clone()
+            .or(self
+                .clipboard_reading
+                .then(|| "reading clipboard…".to_string()))
+            .or(hidden_pane)
+            .or(right);
+        let footer = statusline(
+            &self.theme,
+            &left,
+            overlay.as_deref(),
+            hint,
+            panel_open,
+            width,
+        );
         lines.extend(footer);
 
         lines
+    }
+
+    /// The status row's segments, left and right, from the layout's
+    /// templates and everything they can name.
+    fn status_segments(&self) -> (Vec<String>, Option<String>) {
+        let data = self.status_data();
+        let lookup = |token: &str| -> String {
+            match token {
+                "model" => data
+                    .model
+                    .as_deref()
+                    .map(crate::core::output::compact_model_label)
+                    .unwrap_or_default(),
+                "effort" => data.effort.clone().unwrap_or_default(),
+                "context" => match data.context_total.filter(|t| *t > 0) {
+                    Some(total) => {
+                        let percent = (data.context_used * 100) / total;
+                        if percent >= 1 {
+                            format!("{percent}%")
+                        } else {
+                            String::new()
+                        }
+                    }
+                    None => String::new(),
+                },
+                "cwd" => title_path_from(
+                    &self.agent.cwd(),
+                    &std::env::var("HOME").unwrap_or_default(),
+                ),
+                "session" => self.agent.session_name().unwrap_or_default(),
+                "status" => self
+                    .ext_status
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+                other => match other.strip_prefix("status:") {
+                    Some(name) => self
+                        .ext_status
+                        .iter()
+                        .filter(|(slot, _)| {
+                            slot.as_str() == name
+                                || slot
+                                    .strip_prefix(name)
+                                    .is_some_and(|rest| rest.starts_with('/'))
+                        })
+                        .map(|(_, text)| text.clone())
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                    None => String::new(),
+                },
+            }
+        };
+        let expand = |templates: &[String]| -> Vec<String> {
+            templates
+                .iter()
+                .filter_map(|t| crate::core::config::layout::expand(t, &lookup))
+                .collect()
+        };
+        let left = expand(&self.layout.status_left);
+        let right = expand(&self.layout.status_right);
+        let right = (!right.is_empty()).then(|| right.join(" · "));
+        (left, right)
+    }
+
+    /// A mouse event while a pane is open: inside the pane it navigates,
+    /// on the conversation it hands focus back.
+    fn pane_mouse(&mut self, mut event: crossterm::event::MouseEvent, width: usize) {
+        if self.trust.is_some() || self.auth.is_some() || self.settings.is_some() {
+            return;
+        }
+        let Some(pane) = self.pane.as_mut() else {
+            return;
+        };
+        let column = event.column as usize;
+        match pane.split(width, &self.layout) {
+            Some((conversation_width, pane_width)) => {
+                let (start, end) = match pane.side(&self.layout) {
+                    crate::core::config::layout::Side::Right => {
+                        (conversation_width + 3, conversation_width + 3 + pane_width)
+                    }
+                    crate::core::config::layout::Side::Left => (0, pane_width),
+                };
+                if column < start || column >= end {
+                    if matches!(event.kind, crossterm::event::MouseEventKind::Down(_)) {
+                        pane.focused = false;
+                    }
+                    return;
+                }
+                event.column = (column - start) as u16;
+            }
+            None if !pane.focused => return,
+            None => {}
+        }
+        let action = pane.mouse(event);
+        self.menu = None;
+        self.pane_action(action);
     }
 
     /// Shared model and context inputs for the composer and transcript footers.
@@ -1118,6 +1287,7 @@ impl App {
         // behind a surface that is gone.
         self.cancel_ui_prompt();
         self.close_ext_panel(true);
+        self.close_pane(true);
         self.auth = None;
         self.trust = None;
         self.queue_review = None;
@@ -1610,8 +1780,10 @@ impl App {
                 self.agent.adopt_session_name(None);
                 self.session_epoch += 1;
                 self.transcript.clear();
-                self.transcript
-                    .push(Block::new(Kind::Banner, crate::VERSION));
+                if self.layout.banner {
+                    self.transcript
+                        .push(Block::new(Kind::Banner, crate::VERSION));
+                }
                 set_tab_title(&tab_title(&title_path(), None));
                 extui::shutdown_then_start(self, "new");
             }
@@ -2039,6 +2211,8 @@ impl App {
             self.menu = None;
         }
         self.ext_panel = None;
+        self.pane = None;
+        self.widgets.clear();
         self.ext_status.clear();
         let old = self.host.clone();
         let jobs = self.jobs.clone();
@@ -2099,6 +2273,7 @@ impl App {
     /// open to no overrides — never an error that blocks typing.
     fn apply_keymap(&mut self) {
         self.keymap = crate::core::config::keybindings::load();
+        self.layout = crate::core::config::layout::load();
     }
 
     /// Refresh cached sign-in, effort, and layout preferences from disk.
@@ -2733,6 +2908,9 @@ async fn run_scoped(
         ui_prompt: None,
         ext_status: std::collections::BTreeMap::new(),
         ext_panel: None,
+        pane: None,
+        widgets: std::collections::BTreeMap::new(),
+        layout: crate::core::config::layout::load(),
         external_edit: false,
     };
     app.editor
@@ -2745,8 +2923,10 @@ async fn run_scoped(
             "path": app.agent.session_path().map(|p| p.display().to_string()),
         }),
     );
-    app.transcript
-        .push(Block::new(Kind::Banner, crate::VERSION));
+    if app.layout.banner {
+        app.transcript
+            .push(Block::new(Kind::Banner, crate::VERSION));
+    }
     for warning in model::config_warnings() {
         app.notice(format!("warning: {warning}"));
     }
@@ -2860,6 +3040,8 @@ async fn run_scoped(
                                 crossterm::event::MouseEventKind::ScrollDown => app.scroll_viewer(true, 3, cols as usize, rows as usize),
                                 _ => {}
                             }
+                        } else {
+                            app.pane_mouse(event, cols as usize);
                         }
                     },
                     TermEvent::Resize(c, r) => {
@@ -2884,6 +3066,36 @@ async fn run_scoped(
 
                         } else if ctrl && k.code == KeyCode::Char('o') {
                             app.viewer = Some(Viewer::new());
+                        } else if app.pane.is_some()
+                            && app.menu.is_none()
+                            && app.settings.is_none()
+                            && app.auth.is_none()
+                            && app.trust.is_none()
+                            && !app.ui_input_open()
+                            && app.pending_key.is_none()
+                            && extui::chord_of(&k).as_deref() == Some(app.layout.focus.as_str())
+                        {
+                            // The layout's focus chord moves between the
+                            // conversation and the pane.
+                            if let Some(pane) = app.pane.as_mut() {
+                                pane.focused = !pane.focused;
+                            }
+                        } else if app.pane.as_ref().is_some_and(|p| p.focused)
+                            && app.menu.is_none()
+                            && app.settings.is_none()
+                            && app.auth.is_none()
+                            && app.trust.is_none()
+                            && !app.ui_input_open()
+                            && !(ctrl && k.code == KeyCode::Char('c'))
+                        {
+                            // The pane owns the keyboard: e navigates it,
+                            // and chords it does not use go to the owner.
+                            // ctrl+c stays e's.
+                            let width = cols as usize;
+                            if let Some(pane) = app.pane.as_mut() {
+                                let action = pane.key(k, width);
+                                app.pane_action(action);
+                            }
                         } else if app.ext_panel.as_ref().is_some_and(|p| p.interactive)
                             && app.menu.is_none()
                             && app.settings.is_none()
@@ -3435,7 +3647,7 @@ async fn run_scoped(
                 }
             }
         }
-        let capture_mouse = app.viewer.is_some();
+        let capture_mouse = app.viewer.is_some() || app.pane.is_some();
         if capture_mouse != mouse_enabled {
             if capture_mouse {
                 let _ = execute!(std::io::stdout(), EnableMouseCapture);
@@ -4365,6 +4577,9 @@ mod tests {
             ui_prompt: None,
             ext_status: std::collections::BTreeMap::new(),
             ext_panel: None,
+            pane: None,
+            widgets: std::collections::BTreeMap::new(),
+            layout: crate::core::config::layout::Layout::default(),
             external_edit: false,
         }
     }
@@ -4559,6 +4774,145 @@ mod tests {
             app.menu.is_none(),
             "an empty host offers no further completions"
         );
+    }
+
+    #[test]
+    fn a_pane_splits_the_frame_where_the_layout_says_and_answers_its_owner() {
+        let mut app = session_app();
+        app.layout = crate::core::config::layout::parse(
+            r#"{"panes":{"diff":{"side":"left","width":40}},"split_min":100}"#,
+        )
+        .unwrap();
+        let (request, reply) = fake_request(
+            "diff",
+            "ui.pane",
+            serde_json::json!({"id": "diff", "title": "Changes", "side": "right", "sections": [
+                {"kind": "list", "id": "files", "items": [{"id": "a.rs", "label": "a.rs", "detail": "+1 -0"}]},
+                {"kind": "diff", "id": "patch", "body": "@@ -1 +1 @@\n-x\n+y\n"}
+            ]}),
+        );
+        app.on_host_request(request);
+        assert!(reply.blocking_recv().unwrap().is_ok());
+        let frame = app.frame(120, 20);
+        assert_eq!(frame.len(), 20, "a split is a fixed-height frame");
+        let plain: Vec<String> = frame
+            .iter()
+            .map(|r| crate::core::tools::strip_ansi(r))
+            .collect();
+        // The layout put the pane on the left at 40%: 48 columns, then the
+        // divider, then the conversation.
+        assert!(plain[1].starts_with("Changes"), "{:?}", plain[1]);
+        assert!(plain[1].contains(" │ "), "{:?}", plain[1]);
+        assert_eq!(
+            plain[1].split(" │ ").next().unwrap().chars().count(),
+            48,
+            "{:?}",
+            plain[1]
+        );
+        assert!(plain.iter().any(|r| r.contains("+ y")), "{plain:?}");
+        // Too narrow to split: the focused pane fills the frame.
+        let narrow = app.frame(80, 20);
+        assert!(crate::core::tools::strip_ansi(&narrow[1]).starts_with("Changes"));
+        app.pane.as_mut().unwrap().focused = false;
+        let narrow = app.frame(80, 20);
+        let plain: Vec<String> = narrow
+            .iter()
+            .map(|r| crate::core::tools::strip_ansi(r))
+            .collect();
+        assert!(
+            !plain[1].starts_with("Changes"),
+            "unfocused, the conversation shows"
+        );
+        assert!(
+            plain.iter().any(|r| r.contains("Changes pane · ctrl+t")),
+            "the status row says how to reach the hidden pane: {plain:?}"
+        );
+        // A refresh keeps the pane; another extension's pane replaces it;
+        // null from the owner closes.
+        let (request, _) = fake_request(
+            "diff",
+            "ui.pane",
+            serde_json::json!({"id": "diff", "sections": [{"kind": "text", "body": "clean"}]}),
+        );
+        app.on_host_request(request);
+        assert_eq!(app.pane.as_ref().unwrap().sections.len(), 1);
+        let (request, _) = fake_request(
+            "plan",
+            "ui.pane",
+            serde_json::json!({"sections": [{"kind": "text", "body": "steps"}]}),
+        );
+        app.on_host_request(request);
+        assert_eq!(app.pane.as_ref().unwrap().extension, "plan");
+        let (request, _) = fake_request("diff", "ui.pane", serde_json::Value::Null);
+        app.on_host_request(request);
+        assert!(app.pane.is_some(), "only the owner closes a pane");
+        let (request, _) = fake_request("plan", "ui.pane", serde_json::Value::Null);
+        app.on_host_request(request);
+        assert!(app.pane.is_none());
+        let (request, reply) = fake_request("plan", "ui.pane", serde_json::json!({"sections": []}));
+        app.on_host_request(request);
+        assert!(
+            reply.blocking_recv().unwrap().is_err(),
+            "a pane needs sections"
+        );
+    }
+
+    #[test]
+    fn widgets_sit_above_the_composer_and_keyed_status_fills_the_template() {
+        let mut app = session_app();
+        let (request, _) = fake_request(
+            "plan",
+            "ui.widget",
+            serde_json::json!({"key": "steps", "lines": [[{"text": "1/3 steps", "token": "accent"}], "next: tests"]}),
+        );
+        app.on_host_request(request);
+        let (request, _) = fake_request(
+            "plan",
+            "ui.widget",
+            serde_json::json!({"key": "clock", "lines": ["12:00"]}),
+        );
+        app.on_host_request(request);
+        let plain: Vec<String> = app
+            .frame(80, 20)
+            .iter()
+            .map(|r| crate::core::tools::strip_ansi(r))
+            .collect();
+        // Widgets stack in key order: plan/clock before plan/steps.
+        let clock = plain.iter().position(|r| r == "12:00").unwrap();
+        assert_eq!(plain[clock + 1], "1/3 steps");
+        assert_eq!(plain[clock + 2], "next: tests");
+        assert!(
+            plain[clock + 3..].iter().any(|r| r.starts_with('┃')),
+            "above the composer: {plain:?}"
+        );
+        let (request, _) = fake_request(
+            "plan",
+            "ui.widget",
+            serde_json::json!({"key": "clock", "lines": null}),
+        );
+        app.on_host_request(request);
+        assert_eq!(app.widgets.len(), 1);
+
+        // Two keyed slots on one extension, joined on the status row; the
+        // template can name one extension's alone.
+        for (key, text) in [("mode", "plan mode"), ("left", "2 steps left")] {
+            let (request, _) = fake_request(
+                "plan",
+                "ui.status",
+                serde_json::json!({"key": key, "text": text}),
+            );
+            app.on_host_request(request);
+        }
+        let (request, _) = fake_request("other", "ui.status", serde_json::json!({"text": "busy"}));
+        app.on_host_request(request);
+        let (_, right) = app.status_segments();
+        assert_eq!(right.as_deref(), Some("busy · 2 steps left · plan mode"));
+        app.layout.status_right = vec!["{status:plan}".into()];
+        let (_, right) = app.status_segments();
+        assert_eq!(right.as_deref(), Some("2 steps left · plan mode"));
+        app.layout.status_left = vec!["{cwd}".into(), "{model} / {effort}".into()];
+        let (left, _) = app.status_segments();
+        assert!(!left.is_empty() && !left[0].is_empty(), "{left:?}");
     }
 
     #[test]

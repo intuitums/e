@@ -36,6 +36,9 @@ falls back to e's built-in bindings untouched.
   after this keymap: a chord bound here, or by the composer's built-in
   bindings, never reaches the extension. Unbind it here (`null`) to hand it
   over. Extensions may only declare ctrl or alt chords.
+- The chord that moves focus between the conversation and a side pane
+  (`ctrl+t` by default) is set in `~/.e/layout.json`, not here — see
+  `docs/layout.md`.
 
 Apply instantly with `/reload` (or after closing `/settings`).
 

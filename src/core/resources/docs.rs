@@ -44,6 +44,10 @@ pub const TOPICS: &[(&str, &str)] = &[
         "keybindings",
         "keybindings.json: override the composer's editing keys",
     ),
+    (
+        "layout",
+        "layout.json: where panes go, what the status row says",
+    ),
     ("sandboxing", "e's trust model and how to isolate a session"),
     (
         "theme-dark",
@@ -64,6 +68,7 @@ pub fn body(topic: &str) -> Option<&'static str> {
         "skills" => include_str!("../../../docs/skills.md"),
         "instructions" => include_str!("../../../docs/instructions.md"),
         "keybindings" => include_str!("../../../docs/keybindings.md"),
+        "layout" => include_str!("../../../docs/layout.md"),
         "sandboxing" => include_str!("../../../docs/sandboxing.md"),
         "theme-dark" => crate::tui::theme::DARK_JSON,
         "theme-light" => crate::tui::theme::LIGHT_JSON,

@@ -173,10 +173,11 @@ impl App {
         let mut rows: Vec<String> = body.iter().skip(scroll).take(window).cloned().collect();
         rows.resize(window, String::new());
         rows.push(navigation_row(&self.theme, &hint, width));
+        let (left, right) = self.status_segments();
         rows.extend(statusline(
             &self.theme,
-            &self.status_data(),
-            self.overlay.as_deref(),
+            &left,
+            self.overlay.as_deref().or(right.as_deref()),
             None,
             false,
             width,

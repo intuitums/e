@@ -16,6 +16,10 @@ against so changes to them are deliberate rather than accidental.
   `format_version: 1`. Readers accept unversioned files, preserve unknown
   keys, and quarantine corrupt input before creating a replacement. An older
   e will not write over a file carrying a newer or invalid format version.
+- **Layout:** `~/.e/layout.json` (`panes`, `split_min`, `focus`, `banner`,
+  `status.left`, `status.right`) is documented in [layout.md](layout.md);
+  unknown keys are ignored and a malformed file falls back to the
+  defaults.
 - **Packages:** the `packages` list in `settings.json` holds source strings
   as typed (`npm:name[@version]`, `git:host/user/repo[@ref]`, a git URL, or
   a directory path), or objects carrying a `source` plus per-kind filter

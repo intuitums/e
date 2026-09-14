@@ -192,26 +192,10 @@ pub struct StatusData {
     pub context_total: Option<u64>,
 }
 
-/// The bottom row: the model and selected effort (accent-bright), then the
-/// context percent (muted). Everything else lives in the transcript or the
-/// activity row.
-/// With no panel open a blank spacer rides above; an open panel's own
-/// divider sits directly above the row instead. A transient overlay
-/// (armed-exit) rides right-aligned; a menu hint replaces the row in dim.
-pub fn statusline(
-    theme: &Theme,
-    data: &StatusData,
-    overlay: Option<&str>,
-    hint: Option<&str>,
-    panel_open: bool,
-    width: usize,
-) -> Vec<String> {
-    let lead: &[String] = if panel_open { &[] } else { &[String::new()] };
-    if let Some(hint) = hint {
-        let mut rows = lead.to_vec();
-        rows.push(theme.fg("dim", hint));
-        return rows;
-    }
+/// The built-in left-hand segments for `data`: the model and selected
+/// effort as one identity, then the context percent — what the default
+/// layout template `["{model} / {effort}", "{context}"]` expands to.
+pub fn default_segments(data: &StatusData) -> Vec<String> {
     let mut segments = Vec::new();
     if let Some(model) = &data.model {
         let mut identity = compact_model_label(model);
@@ -226,6 +210,29 @@ pub fn statusline(
         if percent >= 1 {
             segments.push(format!("{percent}%"));
         }
+    }
+    segments
+}
+
+/// The bottom row: the first segment accent-bright, the rest muted after
+/// ` · `. Everything else lives in the transcript or the activity row.
+/// With no panel open a blank spacer rides above; an open panel's own
+/// divider sits directly above the row instead. A transient overlay
+/// (armed-exit, an extension's slot) rides right-aligned; a menu hint
+/// replaces the row in dim.
+pub fn statusline(
+    theme: &Theme,
+    segments: &[String],
+    overlay: Option<&str>,
+    hint: Option<&str>,
+    panel_open: bool,
+    width: usize,
+) -> Vec<String> {
+    let lead: &[String] = if panel_open { &[] } else { &[String::new()] };
+    if let Some(hint) = hint {
+        let mut rows = lead.to_vec();
+        rows.push(theme.fg("dim", hint));
+        return rows;
     }
 
     let mut line = String::new();
@@ -253,7 +260,8 @@ pub fn statusline(
 #[cfg(test)]
 mod tests {
     use super::{
-        format_elapsed, statusline, RecoveredStatus, RetryStatus, StatusData, Turn, TurnPhase,
+        default_segments, format_elapsed, statusline, RecoveredStatus, RetryStatus, StatusData,
+        Turn, TurnPhase,
     };
 
     #[test]
@@ -265,7 +273,7 @@ mod tests {
             context_used: 6_000,
             context_total: Some(200_000),
         };
-        let rows = statusline(&theme, &data, None, None, false, 120);
+        let rows = statusline(&theme, &default_segments(&data), None, None, false, 120);
         let line = rows.last().unwrap();
         // Model and effort form one persistent identity; percent trails muted.
         assert!(line.contains("glm-5.3-flash / high"), "{line:?}");

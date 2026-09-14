@@ -89,6 +89,18 @@
   theme; requests are bounded and answered "no ui" under `e rpc`. Version-1
   extensions are unchanged. `docs/extensions/plan.mjs` shows the surface;
   the scaffold gains promise-returning `ui` and `session` helpers.
+- The frame is regions an extension or the user can set (decision 0007).
+  `ui.pane` opens a side pane beside the conversation — a selectable
+  list, a diff, text, markdown, or themed rows — and e owns focus,
+  scrolling, selection, the mouse, and the split; what the user does
+  comes back as `pane.select`, `pane.activate`, `pane.key`, and
+  `pane.closed`, and Enter attaches the selected rows to the composer.
+  `ui.widget` puts rows above the composer; `ui.status` takes a `key` for
+  several slots. `~/.e/layout.json` decides where every pane goes and how
+  wide it is, the chord that moves focus (`ctrl+t`), whether the banner
+  shows, and what the status row says, as templates of tokens (`{model}`,
+  `{effort}`, `{context}`, `{cwd}`, `{session}`, `{status}`). `e docs
+  layout` carries the guide.
 - Packages: `e install <source>` clones a git repository (or references a
   local directory) shaped like `~/.e/` — `extensions/`, `skills/`,
   `prompts/`, `themes/` — under `~/.e/packages/<host>/<path>`, records it in

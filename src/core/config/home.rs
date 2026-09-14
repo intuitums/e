@@ -83,6 +83,9 @@ pub fn packages_dir() -> PathBuf {
 pub fn keybindings_path() -> PathBuf {
     home().join("keybindings.json")
 }
+pub fn layout_path() -> PathBuf {
+    home().join("layout.json")
+}
 
 /// Create or tighten a directory owned by e, without changing its ancestors
 /// or restoring owner permissions deliberately removed by the user. Existing

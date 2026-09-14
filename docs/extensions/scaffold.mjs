@@ -41,6 +41,10 @@
  *   event({name, extra})   — a subscribed lifecycle event (manifest `events`)
  *   key({key})             — a key while your interactive panel is open
  *   panelClosed()          — the user (or another panel) closed yours
+ *   paneSelect({pane, section, id})   — the side pane's cursor moved to an item
+ *   paneActivate({pane, section, id}) — Enter on a pane item
+ *   paneKey({pane, key})   — a pane chord e did not use
+ *   paneClosed({pane})     — the user (or another pane) closed yours
  *
  * Asking e — every call returns a promise of the result, rejected with
  * e's error text (for instance "no ui" under `e rpc`):
@@ -48,8 +52,9 @@
  *   ext.ui.notify(message, tone?)          ext.ui.show({title, body, format})
  *   ext.ui.select(title, options)          ext.ui.confirm(title, message?)
  *   ext.ui.input(title, {placeholder, prefill, secret}?)
- *   ext.ui.status(text | null)             ext.ui.compose(text)
+ *   ext.ui.status(text | null, key?)       ext.ui.compose(text)
  *   ext.ui.panel({title, lines, interactive}) / ext.ui.panel(null)
+ *   ext.ui.widget(lines | null, key?)      ext.ui.pane({id, title, side, sections}) / ext.ui.pane(null)
  *   ext.session.send(content, {internal, run}?)   ext.session.info()
  *   ext.session.name(name)   .model(m)   .effort(l)   .tools(names | null)
  *   ext.session.interrupt()  .compact(focus?)
@@ -140,7 +145,9 @@ export function connect({ manifest = {}, ...handlers } = {}) {
       select: (title, options) => ask("ui.select", { title, options }),
       confirm: (title, message) => ask("ui.confirm", message ? { title, message } : { title }),
       input: (title, options = {}) => ask("ui.input", { title, ...options }),
-      status: (text) => ask("ui.status", { text }),
+      status: (text, key) => ask("ui.status", key === undefined ? { text } : { text, key }),
+      widget: (lines, key) => ask("ui.widget", key === undefined ? { lines } : { lines, key }),
+      pane: (pane) => ask("ui.pane", pane === null || pane === undefined ? null : pane),
       compose: (text) => ask("ui.compose", { text }),
       panel: (panel) => ask("ui.panel", panel === null || panel === undefined ? null : panel),
     },
@@ -221,6 +228,18 @@ export function connect({ manifest = {}, ...handlers } = {}) {
         return;
       case "ui.panel_closed":
         observe(handlers.panelClosed);
+        return;
+      case "pane.select":
+        observe(handlers.paneSelect, params || {});
+        return;
+      case "pane.activate":
+        observe(handlers.paneActivate, params || {});
+        return;
+      case "pane.key":
+        observe(handlers.paneKey, params || {});
+        return;
+      case "pane.closed":
+        observe(handlers.paneClosed, params || {});
         return;
       default:
         break;

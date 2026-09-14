@@ -16,4 +16,4 @@ pub mod surfaces;
 
 pub use content::{composer, history, markdown, statusline, transcript};
 pub use paint::{background, highlight, render, screen, theme};
-pub use surfaces::{authpanel, menu, panel, settingspanel, trustpanel};
+pub use surfaces::{authpanel, menu, pane, panel, settingspanel, trustpanel};
