@@ -10,7 +10,7 @@
 //! the harness inside its budget and extensions in whatever language their
 //! author likes.
 //!
-//! See docs/extensions.md for the protocol reference and a worked example.
+//! See docs/customize/extensions.md for the protocol reference and a worked example.
 
 mod host;
 mod protocol;

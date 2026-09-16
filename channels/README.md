@@ -1,10 +1,10 @@
 # Channels
 
 Reference programs that put e in a team's tools by spawning `e rpc` and
-speaking its JSONL protocol (`docs/automation.md`). Each is a consumer of
+speaking its JSONL protocol (`docs/usage/automation.md`). Each is a consumer of
 the binary, like `sdk/` is a consumer of the library: nothing here is
 compiled into e, and nothing here is required to run it. The pattern they
-share is described in `docs/channels.md`.
+share is described in `docs/usage/channels.md`.
 
 ```
 slack/     a Slack bot: one process and session per thread (TypeScript, Bolt)

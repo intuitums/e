@@ -1,3 +1,9 @@
+---
+title: Models & providers
+description: models.json: extra models, context windows, dialects
+order: 1
+---
+
 # Models
 
 `~/.e/models.json` adds models and corrects built-ins. An entry with a

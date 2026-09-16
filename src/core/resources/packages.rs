@@ -1210,12 +1210,12 @@ pub fn init(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(written)
 }
 
-const SCAFFOLD: &str = include_str!("../../../docs/extensions/scaffold.mjs");
+const SCAFFOLD: &str = include_str!("../../../docs/customize/examples/scaffold.mjs");
 
 const HELLO: &str = r#"#!/usr/bin/env node
 // hello — the smallest useful extension: one tool the model can call and
 // one command the user can run. Rename it, then grow it; the protocol is
-// docs/extensions.md, the helper beside this file is optional.
+// docs/customize/extensions.md, the helper beside this file is optional.
 import { connect } from "./scaffold.mjs";
 
 const ext = connect({

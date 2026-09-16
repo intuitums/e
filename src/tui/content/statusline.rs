@@ -171,7 +171,7 @@ impl Turn {
         }
     }
 
-    /// The activity row through a layout template (`docs/layout.md`):
+    /// The activity row through a layout template (`docs/customize/layout.md`):
     /// `{phase}`, `{elapsed}`, `{tokens}` from the turn, `{activity}` from
     /// extensions. None when there is no phase to show.
     pub fn label_with(&self, elapsed_secs: u64, template: &str, activity: &str) -> Option<String> {

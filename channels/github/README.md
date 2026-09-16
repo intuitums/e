@@ -21,4 +21,4 @@ provider key is available to the agent's tools inside that job. Authorized
 callers must trust the code they ask the agent to execute. The event stream
 is written to `events.jsonl`; retain it as an artifact if needed. A repository that wants the
 conversation to continue across comments can run `e rpc` in the job with
-`save: true` and cache `~/.e/sessions` between runs (`docs/automation.md`).
+`save: true` and cache `~/.e/sessions` between runs (`docs/usage/automation.md`).

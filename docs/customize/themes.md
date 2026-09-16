@@ -1,3 +1,9 @@
+---
+title: Themes
+description: theme JSON format; file wins over a built-in name
+order: 5
+---
+
 # Themes
 
 A theme is a JSON file: `~/.e/themes/<name>.json`, or `themes/<name>.json`

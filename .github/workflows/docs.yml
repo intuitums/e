@@ -1,0 +1,28 @@
+name: Docs
+
+# The guides live in this repository and are rendered by the website, which
+# builds from its own commits: without this, a docs change would wait for the
+# next change over there to appear. Ping the site's deploy hook instead.
+on:
+  push:
+    branches: [main]
+    paths: ["docs/**", "contributing/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rebuild:
+    name: Rebuild the docs site
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping the website's deploy hook
+        env:
+          HOOK: ${{ secrets.DOCS_DEPLOY_HOOK }}
+          REF: ${{ github.sha }}
+        run: |
+          test -n "$HOOK" || { echo 'Configure DOCS_DEPLOY_HOOK with the website deploy hook URL.'; exit 1; }
+          curl -fsS -X POST "$HOOK" -o /dev/null
+          echo "requested a rebuild for $REF"

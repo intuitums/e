@@ -233,9 +233,13 @@ fn working_directory_metadata_cannot_add_prompt_lines() {
 
 #[test]
 fn every_docs_topic_has_a_body() {
-    for (name, _) in e::core::resources::docs::TOPICS {
+    for (name, _) in e::core::resources::docs::topics() {
         let body = e::core::resources::docs::body(name).unwrap();
         assert!(!body.trim().is_empty(), "empty doc: {name}");
+        assert!(
+            !body.starts_with("---"),
+            "front matter reaches the terminal: {name}"
+        );
     }
     assert!(e::core::resources::docs::body("extensions")
         .unwrap()

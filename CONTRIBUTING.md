@@ -44,14 +44,14 @@ Use the bug or feature issue form. Bug reports need a reproducible case and
 the version (`e --version`, or the commit if you built from source). Feature
 requests should explain the need before the design; an implementation sketch
 is welcome but optional. A feature that could be an extension is usually
-better as one — the extension API in [docs/extensions.md](docs/extensions.md)
+better as one — the extension API in [docs/customize/extensions.md](docs/customize/extensions.md)
 exists precisely so most additions never have to touch the binary, and
-[docs/packages.md](docs/packages.md) is how an extension, skill, prompt, or
+[docs/customize/packages.md](docs/customize/packages.md) is how an extension, skill, prompt, or
 theme reaches other users without a release of e.
 
 ## Finding your way around
 
-[docs/architecture.md](docs/architecture.md) is the guided tour.
+[contributing/architecture.md](contributing/architecture.md) is the guided tour.
 [AGENTS.md](AGENTS.md) is the working guide: the code map, the fast test
 loops, how the look stays consistent, and the conventions every change
 follows. It is written for the agents that open most PRs here, and it is the
@@ -82,7 +82,7 @@ title becomes the squash commit on `main`. In the body, state the problem in
 a sentence or two, then how you fixed it; the template only carries the
 checklist CI and review expect. One concern per PR — if the description
 says "also", split it. When a change alters a persisted or wire contract
-(`docs/compatibility.md`), add the `breaking` label yourself: the triage
+(`docs/extend/compatibility.md`), add the `breaking` label yourself: the triage
 workflow can label paths, but no path tells it a contract changed.
 
 ## AI/LLM assistance
@@ -112,7 +112,7 @@ By contributing, you agree that your work is released under the repository's
 
 Run `./x dev /path/to/project` to use the current checkout with development state.
 Run `./x scenario streaming` for a repeatable local terminal session without a
-provider account. See [releases and testing](docs/releases.md) for beta channels,
+provider account. See [releases and testing](contributing/releases.md) for beta channels,
 PR builds, package installation, and release promotion.
 
 Provider regressions can use reviewed response fixtures under

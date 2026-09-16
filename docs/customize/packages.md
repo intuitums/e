@@ -1,3 +1,9 @@
+---
+title: Packages
+description: install shared extensions, skills, prompts, and themes
+order: 4
+---
+
 # Packages
 
 A package bundles extensions, skills, prompt templates, and themes so they

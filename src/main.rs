@@ -603,7 +603,7 @@ async fn main() -> std::io::Result<()> {
             },
             None => {
                 println!("built-in guides — `e docs <topic>`:\n");
-                for (name, blurb) in docs::TOPICS {
+                for (name, blurb) in docs::topics() {
                     println!("  {name:<18} {blurb}");
                 }
             }

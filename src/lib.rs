@@ -8,7 +8,7 @@
 //! implementation, with the `sdk/` package (e-sdk) as a third in-repo
 //! consumer. Its Rust items are not a stable third-party API by themselves;
 //! the supported Rust surface is the `e-sdk` package behind the boundary
-//! described in `docs/compatibility.md`, and e's other supported external
+//! described in `docs/extend/compatibility.md`, and e's other supported external
 //! surfaces are the CLI, file formats, and extension wire protocol documented
 //! there.
 //

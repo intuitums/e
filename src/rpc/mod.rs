@@ -17,7 +17,7 @@
 //! A line without a `method` is the version-1 one-shot: `{"id", "prompt",
 //! …}` runs a fresh memory-only turn and answers with the flat result
 //! object, no events — older callers keep working unchanged. The contract is
-//! docs/automation.md; `tests/fixtures/rpc/` pins it.
+//! docs/usage/automation.md; `tests/fixtures/rpc/` pins it.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

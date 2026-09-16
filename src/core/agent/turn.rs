@@ -1054,7 +1054,7 @@ async fn read_instructions(file: PathBuf, root: PathBuf) -> Option<String> {
 /// reads as the most specific. Only in a trusted workspace, only for paths
 /// inside it — lexically, and again after resolving links, so a symlink
 /// under the checkout cannot reach instructions outside it
-/// (docs/instructions.md).
+/// (docs/customize/instructions.md).
 async fn load_nested_instructions(
     calls: &[ToolCall],
     cwd: &std::path::Path,

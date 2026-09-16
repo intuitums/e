@@ -9,7 +9,7 @@
 //! Resize invalidates physical positions. Redraw only the new visible tail,
 //! without clearing scrollback or replaying the document into it. Historical
 //! snapshots retain the terminal's own wrapping; the detail viewer can render
-//! current source at the new width. See docs/rendering.md for the tradeoffs.
+//! current source at the new width. See contributing/rendering.md for the tradeoffs.
 //!
 //! Absolute writes start with a carriage return, avoiding dependence on the
 //! terminal's pending-wrap state. Pre-launch rows remain untouched until a

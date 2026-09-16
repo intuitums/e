@@ -1,3 +1,9 @@
+---
+title: SDK
+description: embed the agent core in Rust programs
+order: 1
+---
+
 # SDK
 
 The SDK package (`sdk/`, published as `intuitums-e-sdk`) is e's coding agent as a Rust library: create a
@@ -131,7 +137,7 @@ it. That is the whole checkpoint story: a readable file, not opaque bytes.
 ## What the SDK is not
 
 - **Not an extension.** Extensions are child processes speaking a JSONL
-  protocol to a running e ([extensions.md](extensions.md)). The SDK links
+  protocol to a running e ([extensions.md](../customize/extensions.md)). The SDK links
   the core into your program, and with `extensions(true)` starts the home's
   extensions for their tools and hooks. They run in the session's `cwd` and
   are told so at `initialize`. Startup hooks do not run, and no flags are
@@ -143,5 +149,5 @@ it. That is the whole checkpoint story: a readable file, not opaque bytes.
   the surface; use an extension.
 
 If you are integrating from another language, the JSON output and RPC modes
-in [automation.md](automation.md) remain the language-agnostic surface; the
+in [automation.md](../usage/automation.md) remain the language-agnostic surface; the
 SDK is the in-process Rust alternative.

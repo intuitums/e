@@ -1,3 +1,9 @@
+---
+title: Compatibility
+description: versioned contracts: sessions, configuration, protocols
+order: 2
+---
+
 # Compatibility
 
 e is still pre-1.0. This page names the surfaces users can persist or build
@@ -17,7 +23,7 @@ against so changes to them are deliberate rather than accidental.
   keys, and quarantine corrupt input before creating a replacement. An older
   e will not write over a file carrying a newer or invalid format version.
 - **Layout:** `~/.e/layout.json` (`panes`, `split_min`, `focus`, `banner`,
-  `status.left`, `status.right`) is documented in [layout.md](layout.md);
+  `status.left`, `status.right`) is documented in [layout.md](../customize/layout.md);
   unknown keys are ignored and a malformed file falls back to the
   defaults.
 - **Packages:** the `packages` list in `settings.json` holds source strings
@@ -26,20 +32,20 @@ against so changes to them are deliberate rather than accidental.
   lists (`extensions`, `skills`, `prompts`, `themes`); npm packages live
   under `~/.e/packages/npm/node_modules/<name>`, git packages under
   `~/.e/packages/<host>/<path>`. All are documented in
-  [packages.md](packages.md) and pinned by
+  [packages.md](../customize/packages.md) and pinned by
   `tests/fixtures/config/settings-v1-packages.json`; a reader that meets an
   entry it cannot parse reports it and loads the rest.
 - **`e rpc`:** the headless session protocol reports `protocol: 2` in
   `hello`. A line without `method` is the version-1 one-shot request and
   keeps its flat response. Methods, parameters, result fields, and the
   `session`/`request` tags on event lines are a supported contract once
-  documented in [automation.md](automation.md); new methods and fields are
+  documented in [automation.md](../usage/automation.md); new methods and fields are
   additive and do not change the number, a change to an existing shape
   does. `tests/fixtures/rpc/v2-requests.jsonl` pins the request shapes.
 - **Extensions:** the JSONL protocol is versioned independently. e sends its
   protocol number during `initialize`; additive fields do not change the
   number, while incompatible wire changes require a new protocol version.
-  Version 1 is documented in [extensions.md](extensions.md). The families
+  Version 1 is documented in [extensions.md](../customize/extensions.md). The families
   beyond it (`events`, `hooks`, `display`, `ui`, `session`, `shortcuts`)
   are additive: each is advertised in `capabilities`, declared in the
   manifest, or initiated by the extension, so a version-1 extension is never

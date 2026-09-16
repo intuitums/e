@@ -1,3 +1,9 @@
+---
+title: Layout
+description: layout.json: where panes go, what the status row says
+order: 7
+---
+
 # Layout
 
 `~/.e/layout.json` says where the regions of e's frame go and what the
@@ -26,7 +32,7 @@ Every key is optional; what is shown above is the default, except the
 
 ## Panes
 
-An extension opens a side pane with `ui.pane` (`docs/extensions.md`) and
+An extension opens a side pane with `ui.pane` (`docs/customize/extensions.md`) and
 may propose a side. `panes` outranks it: an entry named after the pane's
 id sets its `side` (`left` or `right`) and `width` (its share of the
 terminal, 30–70 percent); `*` is the default for every pane not named.
@@ -36,7 +42,7 @@ reach the other.
 
 `focus` is the chord that moves focus between the conversation and the
 pane. Any ctrl or alt chord e does not already use works; the grammar is
-the keybindings one (`docs/keybindings.md`).
+the keybindings one (`docs/customize/keybindings.md`).
 
 ## The status row
 

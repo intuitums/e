@@ -1,3 +1,9 @@
+---
+title: Keybindings
+description: keybindings.json: override the composer's editing keys
+order: 6
+---
+
 # Keybindings
 
 `~/.e/keybindings.json` overrides the composer's line-editing keys — the
@@ -32,13 +38,13 @@ falls back to e's built-in bindings untouched.
   (ctrl+c, ctrl+o, ctrl+p, tab, shift+tab, menu navigation) reach this
   keymap — binding one of those here has no effect, since the app-level
   handler runs first.
-- An extension's declared shortcut (`docs/extensions.md`, Shortcuts) runs
+- An extension's declared shortcut (`docs/customize/extensions.md`, Shortcuts) runs
   after this keymap: a chord bound here, or by the composer's built-in
   bindings, never reaches the extension. Unbind it here (`null`) to hand it
   over. Extensions may only declare ctrl or alt chords.
 - The chord that moves focus between the conversation and a side pane
   (`ctrl+t` by default) is set in `~/.e/layout.json`, not here — see
-  `docs/layout.md`.
+  `docs/customize/layout.md`.
 
 Apply instantly with `/reload` (or after closing `/settings`).
 

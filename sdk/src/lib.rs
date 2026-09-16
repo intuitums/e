@@ -43,7 +43,7 @@
 //! tool I/O on the blocking pool.
 //!
 //! Status: this surface is unstable until the first release declares its
-//! semantic-versioning policy (`docs/compatibility.md`).
+//! semantic-versioning policy (`docs/extend/compatibility.md`).
 // Same contract as the library it wraps: no panic sites outside test builds.
 #![cfg_attr(
     not(test),

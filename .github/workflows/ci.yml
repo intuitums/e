@@ -26,6 +26,7 @@ jobs:
       build: ${{ steps.filter.outputs.build }}
       packages: ${{ steps.filter.outputs.packages }}
       channels: ${{ steps.filter.outputs.channels }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,6 +52,7 @@ jobs:
               echo "build=true" >> "$GITHUB_OUTPUT"
               echo "packages=true" >> "$GITHUB_OUTPUT"
               echo "channels=true" >> "$GITHUB_OUTPUT"
+              echo "docs=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
           else
@@ -62,6 +64,7 @@ jobs:
           build=false
           packages=false
           channels=false
+          docs=false
           while IFS= read -r file; do
             # The reference channels have their own checks.
             case "$file" in
@@ -73,6 +76,13 @@ jobs:
               src/core/update.rs | tests/update.rs | scripts/release-check.sh | \
               .github/workflows/ci.yml | .github/workflows/release.yml | .github/workflows/preview.yml)
                 packages=true ;;
+            esac
+            # The guides are published to the website and embedded in the
+            # binary, so a docs-only change still runs their contract in the
+            # Build job below instead of skipping everything.
+            case "$file" in
+              docs/* | contributing/* | README.md | CONTRIBUTING.md | AGENTS.md | \
+              CLAUDE.md | SECURITY.md) docs=true ;;
             esac
             case "$file" in
               *.md | docs/* | LICENSE | CHANGELOG.md | \
@@ -87,6 +97,7 @@ jobs:
           echo "build=$build" >> "$GITHUB_OUTPUT"
           echo "packages=$packages" >> "$GITHUB_OUTPUT"
           echo "channels=$channels" >> "$GITHUB_OUTPUT"
+          echo "docs=$docs" >> "$GITHUB_OUTPUT"
 
   guard:
     # Enforce fast contributor checks on every PR, including docs-only changes.
@@ -129,6 +140,14 @@ jobs:
       - name: Check
         if: needs.changes.outputs.build == 'true'
         run: ./x check
+
+      - name: Docs contract
+        # `./x check` runs this whenever the binary changes. A docs-only change
+        # skips that, and the guides are still published and embedded, so the
+        # contract is checked here — front matter, one group README per folder,
+        # unique topics, and every relative link resolving.
+        if: needs.changes.outputs.docs == 'true' && needs.changes.outputs.build != 'true' && runner.os == 'Linux'
+        run: cargo test --locked --test docs
 
       - name: Frames
         if: needs.changes.outputs.build == 'true'

@@ -1,3 +1,9 @@
+---
+title: Extensions
+description: the extension protocol, with a worked shell example
+order: 8
+---
+
 # Extensions
 
 An extension is an executable in `~/.e/extensions/`, or in the
@@ -81,7 +87,7 @@ value — and is answered with it: `{"id":"q1","result":{…}}` or
 them apart. `capabilities` lists the families this e speaks; `ui` says
 whether someone can answer `ui.*` requests: false under `e -p`, where every
 one is answered `{"error":"no ui"}` at once, and true under `e rpc`, whose
-client may relay questions to a person (docs/automation.md) — there the
+client may relay questions to a person (docs/usage/automation.md) — there the
 display-only requests are still refused, so handle the error either way.
 
 ## Results by method
@@ -304,13 +310,13 @@ again. The extension handles state and key events; e renders the frame.
 
 `activity` is the row that reads `Thinking (3s) (↑1k ↓20)` during a turn:
 your text joins it through the `{activity}` token of the user's template
-(`docs/layout.md`) and stands alone there between turns — a test count,
+(`docs/customize/layout.md`) and stands alone there between turns — a test count,
 a build step, a clock.
 
 `widget` rows use the same span grammar and sit above the composer, every
 extension's together in key order, eight rows at most; `{"lines": null}`
 removes one. `status` with a `key` keeps several slots per extension; the
-status row's template (`docs/layout.md`) joins them with `{status}` or
+status row's template (`docs/customize/layout.md`) joins them with `{status}` or
 picks one extension's with `{status:<name>}`.
 
 ### The side pane
@@ -393,7 +399,7 @@ chords are how text gets typed and are refused at the manifest. e keeps
 `ctrl+c`, `ctrl+d`, `ctrl+g`, `ctrl+i`, `ctrl+j`, `ctrl+l`, `ctrl+m`,
 `ctrl+o`, `ctrl+p`, `ctrl+shift+p`, `ctrl+s`, `ctrl+v`, `ctrl+shift+v`,
 `ctrl+x`, and `ctrl+z`. A chord the composer binds (`ctrl+k`, say — see
-`docs/keybindings.md`) stays the composer's: a shortcut fires only when the
+`docs/customize/keybindings.md`) stays the composer's: a shortcut fires only when the
 key would otherwise do nothing, so a user frees a chord for your extension
 by unbinding it in `keybindings.json`. First declaration wins between
 extensions, with a notice.
@@ -419,7 +425,7 @@ extensions, with a notice.
 ## Examples
 
 ```
-docs/extensions/
+docs/customize/examples/
   subagent.mjs   bounded delegated e turns as a tool, over e rpc (self-contained)
   hello.mjs      every surface at once, on the optional scaffold helper
   gate.mjs       the tool_call hook as a fail-open guard
@@ -463,7 +469,7 @@ never installed for you, and it is not a thing you have to think about.
   the tool's `path` argument or a bash command mentioning one. Unlike
   `gate.mjs`'s destructive-command denylist, this one is about what gets
   read into context or written to disk, not just what bash runs. See
-  [`docs/sandboxing.md`](sandboxing.md) for e's trust model and where a
+  [`docs/usage/sandboxing.md`](../usage/sandboxing.md) for e's trust model and where a
   hook like this fits.
 - **`project.mjs`.** This startup-hook launcher uses the scaffold.
   `e --project <path>` relaunches e in an existing project directory.

@@ -28,7 +28,7 @@ example and its protocol helper:
 
 ```sh
 mkdir -p ~/.e/extensions/hello
-cp docs/extensions/hello.mjs docs/extensions/scaffold.mjs ~/.e/extensions/hello/
+cp docs/customize/examples/hello.mjs docs/customize/examples/scaffold.mjs ~/.e/extensions/hello/
 chmod +x ~/.e/extensions/hello/hello.mjs
 ```
 

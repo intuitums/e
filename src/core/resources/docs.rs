@@ -2,57 +2,21 @@
 //! `e docs [topic]` — a single binary has no package directory to point at,
 //! so the binary itself is the docs carrier. The system prompt tells the
 //! agent to run it when asked about e's own surfaces.
+//!
+//! The topics are not listed here: `build.rs` generates them from `docs/`,
+//! where the folder is the nav group, the file stem is the topic, and front
+//! matter carries the blurb. The website renders the same files, so a guide is
+//! written once and read by the terminal, GitHub, and the site.
 
-pub const TOPICS: &[(&str, &str)] = &[
-    (
-        "extensions",
-        "the extension protocol, with a worked shell example",
-    ),
-    (
-        "themes",
-        "theme JSON format; file wins over a built-in name",
-    ),
-    (
-        "models",
-        "models.json: extra models, context windows, dialects",
-    ),
-    (
-        "automation",
-        "e -p JSON output and the e rpc session server protocol",
-    ),
-    (
-        "channels",
-        "put e in Slack, GitHub, or Linear as a client of e rpc",
-    ),
-    (
-        "packages",
-        "install shared extensions, skills, prompts, and themes",
-    ),
-    (
-        "sdk",
-        "the e-sdk crate: embed the agent core in Rust programs",
-    ),
-    (
-        "prompt-templates",
-        "/name templates with bash-style arguments",
-    ),
-    (
-        "skills",
-        "SKILL.md directories and how the model pages them in",
-    ),
-    (
-        "instructions",
-        "AGENTS.md: global, project, and nested per directory",
-    ),
-    (
-        "keybindings",
-        "keybindings.json: override the composer's editing keys",
-    ),
-    (
-        "layout",
-        "layout.json: where panes go, what the status row says",
-    ),
-    ("sandboxing", "e's trust model and how to isolate a session"),
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/docs.rs"));
+}
+
+pub use generated::TOPICS;
+
+/// The bundled themes are assets rather than guides, so they are listed beside
+/// the guides the folders provide.
+const THEME_TOPICS: &[(&str, &str)] = &[
     (
         "theme-dark",
         "the built-in dark theme, verbatim (a starting point)",
@@ -60,23 +24,28 @@ pub const TOPICS: &[(&str, &str)] = &[
     ("theme-light", "the built-in light theme, verbatim"),
 ];
 
+/// Every topic `e docs` serves, in the order the folders and front matter give.
+pub fn topics() -> impl Iterator<Item = (&'static str, &'static str)> {
+    TOPICS.iter().copied().chain(THEME_TOPICS.iter().copied())
+}
+
+/// One topic's text, without the front matter that labels it on the website.
 pub fn body(topic: &str) -> Option<&'static str> {
-    Some(match topic {
-        "extensions" => include_str!("../../../docs/extensions.md"),
-        "themes" => include_str!("../../../docs/themes.md"),
-        "models" => include_str!("../../../docs/models.md"),
-        "automation" => include_str!("../../../docs/automation.md"),
-        "channels" => include_str!("../../../docs/channels.md"),
-        "packages" => include_str!("../../../docs/packages.md"),
-        "sdk" => include_str!("../../../docs/sdk.md"),
-        "prompt-templates" => include_str!("../../../docs/prompt-templates.md"),
-        "skills" => include_str!("../../../docs/skills.md"),
-        "instructions" => include_str!("../../../docs/instructions.md"),
-        "keybindings" => include_str!("../../../docs/keybindings.md"),
-        "layout" => include_str!("../../../docs/layout.md"),
-        "sandboxing" => include_str!("../../../docs/sandboxing.md"),
+    let raw = match topic {
         "theme-dark" => include_str!("../../../assets/themes/dark.json"),
         "theme-light" => include_str!("../../../assets/themes/light.json"),
-        _ => return None,
-    })
+        _ => generated::body(topic)?,
+    };
+    Some(strip_front_matter(raw))
+}
+
+/// Front matter is the website's metadata; a terminal prints the prose.
+fn strip_front_matter(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return text;
+    };
+    match rest.find("\n---\n") {
+        Some(end) => rest[end + 5..].trim_start_matches('\n'),
+        None => text,
+    }
 }

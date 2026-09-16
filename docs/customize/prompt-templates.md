@@ -1,3 +1,9 @@
+---
+title: Prompt templates
+description: /name templates with bash-style arguments
+order: 2
+---
+
 # Prompt templates
 
 A markdown file at `~/.e/prompts/<name>.md` becomes the `/name` command.

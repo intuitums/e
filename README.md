@@ -74,12 +74,12 @@ environment variable (`ANTHROPIC_API_KEY` and friends) for scripts and CI.
 | Surface | What it is | Guide |
 |---|---|---|
 | Terminal | The interactive app: transcript, composer, side panes, `/` commands | `e help` |
-| `e -p` | One headless turn; `--json` streams every event | [Automation](docs/automation.md) |
-| `e rpc` | A JSONL session server: concurrent sessions, streaming events, extension questions relayed to your client | [Automation](docs/automation.md) |
-| Channels | Reference Slack bot and GitHub Actions workflow built on `e rpc` | [Channels](docs/channels.md) · [`channels/`](channels/) |
-| e-sdk | The agent as a Rust library: sessions, turns, one event stream (`cargo add intuitums-e-sdk`) | [SDK](docs/sdk.md) |
-| Extensions | Tools, commands, hooks, and UI from a subprocess in any language | [Extensions](docs/extensions.md) |
-| Packages | Share extensions, skills, prompts, and themes from git or npm | [Packages](docs/packages.md) |
+| `e -p` | One headless turn; `--json` streams every event | [Automation](docs/usage/automation.md) |
+| `e rpc` | A JSONL session server: concurrent sessions, streaming events, extension questions relayed to your client | [Automation](docs/usage/automation.md) |
+| Channels | Reference Slack bot and GitHub Actions workflow built on `e rpc` | [Channels](docs/usage/channels.md) · [`channels/`](channels/) |
+| e-sdk | The agent as a Rust library: sessions, turns, one event stream (`cargo add intuitums-e-sdk`) | [SDK](docs/extend/sdk.md) |
+| Extensions | Tools, commands, hooks, and UI from a subprocess in any language | [Extensions](docs/customize/extensions.md) |
+| Packages | Share extensions, skills, prompts, and themes from git or npm | [Packages](docs/customize/packages.md) |
 
 ## Safety
 
@@ -87,20 +87,20 @@ environment variable (`ANTHROPIC_API_KEY` and friends) for scripts and CI.
   default.
 - Directory trust controls context loading; it does not sandbox execution.
 - Use a container, VM, or OS sandbox when work needs containment. See
-  [sandboxing](docs/sandboxing.md) and [SECURITY.md](SECURITY.md).
+  [sandboxing](docs/usage/sandboxing.md) and [SECURITY.md](SECURITY.md).
 
 ## Documentation
 
 Every guide is in [`docs/`](docs/) and built into the binary: `e docs` lists
 the topics and `e docs <topic>` prints one.
 
-[Extensions](docs/extensions.md) · [Automation](docs/automation.md) ·
-[Channels](docs/channels.md) · [SDK](docs/sdk.md) · [Packages](docs/packages.md) ·
-[Skills](docs/skills.md) · [Instructions](docs/instructions.md) ·
-[Prompt templates](docs/prompt-templates.md) · [Models](docs/models.md) ·
-[Themes](docs/themes.md) · [Layout](docs/layout.md) ·
-[Keybindings](docs/keybindings.md) · [Sandboxing](docs/sandboxing.md) ·
-[Architecture](docs/architecture.md) · [Compatibility](docs/compatibility.md)
+[Extensions](docs/customize/extensions.md) · [Automation](docs/usage/automation.md) ·
+[Channels](docs/usage/channels.md) · [SDK](docs/extend/sdk.md) · [Packages](docs/customize/packages.md) ·
+[Skills](docs/customize/skills.md) · [Instructions](docs/customize/instructions.md) ·
+[Prompt templates](docs/customize/prompt-templates.md) · [Models](docs/start/models.md) ·
+[Themes](docs/customize/themes.md) · [Layout](docs/customize/layout.md) ·
+[Keybindings](docs/customize/keybindings.md) · [Sandboxing](docs/usage/sandboxing.md) ·
+[Architecture](contributing/architecture.md) · [Compatibility](docs/extend/compatibility.md)
 
 ## Development and preview builds
 
@@ -108,7 +108,7 @@ Run `./x dev /path/to/project` from a checkout, or install a published preview
 with `npm install -g @intuitums/e@dev` and run `e-dev`. Beta uses `@beta` and
 `e-beta`. Curl and brew support separate beta installations; dev uses npm or
 bun. Preview channels have separate state and stay on their channel when
-updating. See [releases and testing](docs/releases.md) for all installers and
+updating. See [releases and testing](contributing/releases.md) for all installers and
 PR builds.
 
 ## Contributing

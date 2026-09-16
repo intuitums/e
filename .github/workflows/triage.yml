@@ -20,6 +20,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          # A name, not `@me`: the token belongs to the Actions bot, and this
+          # is the maintainer every path in CODEOWNERS resolves to.
+          MAINTAINER: fschrhunt
         run: |
           set -eu
           files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename')
@@ -50,6 +53,16 @@ jobs:
             add_label dependencies 0366d6 'Dependency or toolchain changes' || true
           # `breaking` is never path-derived — no grep can know a wire or
           # persisted contract changed. The author declares it; see
-          # docs/compatibility.md.
+          # docs/extend/compatibility.md.
           echo "$files" | grep -Eq '^(src/core/(api|auth|config|providers|tools|update)/|src/core/session.rs|src/core/resources/packages.rs|install.sh|SECURITY.md)' && \
             add_label security-surface b60205 'Touches a reviewed trust boundary' || true
+          # The guides are published to the website and embedded in the binary,
+          # and every path in CODEOWNERS resolves to the maintainer, so an
+          # outside contribution waits on their review. Hand them the PR as
+          # well: an assignment lands in their queue, a review request can sit
+          # unread. See docs/README.md for the contract those files must keep.
+          association=$(gh api "repos/$REPO/pulls/$PR" --jq '.author_association')
+          case "$association" in
+            CONTRIBUTOR | FIRST_TIME_CONTRIBUTOR | FIRST_TIMER | NONE)
+              gh pr edit "$PR" --repo "$REPO" --add-assignee "$MAINTAINER" ;;
+          esac

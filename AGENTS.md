@@ -43,7 +43,7 @@ src/core/    the harness, terminal-free
                   loader reads after ~/.e's own dirs) · docs.rs (the
                   embedded guides behind `e docs`)
   extensions/     the extension host: subprocesses over a JSONL line
-                  protocol (docs/extensions.md) — tools, commands, hooks,
+                  protocol (docs/customize/extensions.md) — tools, commands, hooks,
                   events, and the extensions' own ui.*/session.* requests
                   (HostRequest, answered by the frontend)
   tools/          read · write · edit · grep (optional `glob` filter) · bash
@@ -67,15 +67,19 @@ src/tui/     the frontend (short paths re-export from the groups)
                   login.rs (sign-in flows) · extui.rs (answering
                   extensions: modals, panels, status slots, session control)
 src/rpc/     the headless frontend: `e rpc`, a JSONL session server over
-             stdin/stdout (docs/automation.md) — mod.rs (sessions, methods,
+             stdin/stdout (docs/usage/automation.md) — mod.rs (sessions, methods,
              the serve loop, extension questions relayed as `ask`) ·
              result.rs (the turn result `-p --json` and rpc both report)
+docs/        the guides, one folder per nav group, with front matter as their
+             only metadata (docs/README.md is the writing guide); `e docs`
+             and the website both read them. contributing/ is the
+             repository's own documentation, never published.
 src/main.rs  CLI entry — flags, rpc/docs/auth/update, then tui::app::run
-sdk/         e-sdk, the in-process Rust surface (docs/sdk.md): session.rs
+sdk/         e-sdk, the in-process Rust surface (docs/extend/sdk.md): session.rs
              (builder, Session) · turn.rs (Turn, Event, Reply) · error.rs;
              a consumer of the library target with its own release boundary
-             (docs/sdk.md), never a fourth layer
-channels/    reference clients of `e rpc` (docs/channels.md): slack/ (a Bolt
+             (docs/extend/sdk.md), never a fourth layer
+channels/    reference clients of `e rpc` (docs/usage/channels.md): slack/ (a Bolt
              bot, TypeScript) · github/ (an Actions workflow). Not compiled
              into e; a channel is a program that spawns it, never a module
 ```
@@ -128,7 +132,7 @@ surface? Route it through `panel.rs` so it can't diverge.
   tools needs a decision per frontend, and a provider-shaped change a decision
   per dialect, even when the decision is "no change here". Persisted and
   user-facing contracts (CLI, sessions, configuration, the extension protocol)
-  follow `docs/compatibility.md`: fixtures under `tests/fixtures/` are release
+  follow `docs/extend/compatibility.md`: fixtures under `tests/fixtures/` are release
   artifacts, so a contract change adds or updates one in the same PR, and
   labels it `breaking` — the one label no path can apply for you.
 - Keep the harness small. Prefer a spawned process over a daemon and a gate
@@ -144,7 +148,7 @@ surface? Route it through `panel.rs` so it can't diverge.
   themes from `~/.e/themes/`, and skills, prompts, instructions, the system
   prompt the same way. When you add something user-facing, make it a file-backed
   override, not a constant. When data isn't enough there is the extension API
-  (`core/extensions/`, docs/extensions.md) — grow its protocol by need, never by
+  (`core/extensions/`, docs/customize/extensions.md) — grow its protocol by need, never by
   symmetry, and keep hooks fail-open. What crosses the line is data, never code
   or terminal bytes: an extension describes (`show`, `panel`, a `label`), e
   paints through the theme. A new rendering need is a new `format` or token, not

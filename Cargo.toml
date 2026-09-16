@@ -59,7 +59,7 @@ codegen-units = 1
 strip = "symbols"
 
 # The SDK package is an in-repo consumer of the library target with its own
-# release boundary — see docs/sdk.md. fuzz/ stays
+# release boundary — see docs/extend/sdk.md. fuzz/ stays
 # its own workspace because cargo-fuzz requires it.
 [workspace]
 members = ["sdk"]

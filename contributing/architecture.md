@@ -17,7 +17,7 @@ The single-crate shape is intentional. A new crate needs an independent
 consumer, release/API boundary, platform boundary, or measured build-time
 benefit. The `sdk/` package is that case made explicit: an independent
 consumer of the library target with its own release boundary (see
-[sdk.md](sdk.md)).
+[sdk.md](../docs/extend/sdk.md)).
 It is a consumer, not a fourth layer. File length alone is a reason to
 extract a module, not a crate.
 
@@ -37,7 +37,7 @@ extract a module, not a crate.
   tool calls; tool records require a call id. Existing JSONL formats still load.
 - `core/` is terminal-free. Terminal behavior stays in `tui/`; the headless
   server stays in `rpc/`. Both are frontends of the same core, and a
-  channel (a Slack bot, a CI job; docs/channels.md) is a client of `e rpc`,
+  channel (a Slack bot, a CI job; docs/usage/channels.md) is a client of `e rpc`,
   never a module of e.
 - Provider differences terminate at the dialect seam; the agent loop consumes
   one request and event vocabulary.

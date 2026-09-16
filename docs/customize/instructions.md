@@ -1,3 +1,9 @@
+---
+title: Instructions
+description: AGENTS.md: global, project, and nested per directory
+order: 1
+---
+
 # Instructions
 
 e reads instructions from `AGENTS.md` files and puts them in the system

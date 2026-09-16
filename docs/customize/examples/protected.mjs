@@ -14,7 +14,7 @@
  * tool_call hook could see) stops it from returning a denied file's
  * contents if the pattern happens to match one. The `glob` check below
  * closes the case where the denied file is named explicitly; it doesn't
- * close that one. See docs/sandboxing.md for why a hook is a speed bump,
+ * close that one. See docs/usage/sandboxing.md for why a hook is a speed bump,
  * not an isolation boundary.
  *
  * Copy scaffold.mjs + protected.mjs into ~/.e/extensions/ (chmod +x) and

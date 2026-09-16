@@ -1,3 +1,9 @@
+---
+title: Skills
+description: SKILL.md directories and how the model pages them in
+order: 3
+---
+
 # Skills
 
 A skill is a directory: `~/.e/skills/<name>/SKILL.md` (the open SKILL.md

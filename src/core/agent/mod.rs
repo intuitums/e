@@ -624,7 +624,7 @@ pub enum SessionEvent {
     /// An extension tool named the session.
     Named(String),
     /// A nested `AGENTS.md` under a path a tool touched was added to the
-    /// conversation (docs/instructions.md).
+    /// conversation (docs/customize/instructions.md).
     Instructions {
         path: String,
     },
