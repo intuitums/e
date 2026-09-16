@@ -43,11 +43,17 @@ struct Rpc {
 
 impl Rpc {
     fn spawn(home: &Home, extra: &[&str]) -> Rpc {
+        // The process cwd is the workspace a version-1 one-shot runs in, so it
+        // has to be trusted; keep it out of the temp root, whose other
+        // children are workspaces tests refuse.
+        let cwd = std::env::temp_dir().join(format!("e-rpc-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        e::core::config::trust::set(&cwd, true).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
             .args(extra)
             .arg("rpc")
             .env("E_HOME", &home.dir)
-            .current_dir(std::env::temp_dir())
+            .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -130,7 +136,32 @@ fn workspace(label: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("e-rpc-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    // A session refuses a workspace nobody has trusted; these tests are about
+    // what a session does once it is open, and the refusal has its own test
+    // below.
+    e::core::config::trust::set(&dir, true).unwrap();
     dir
+}
+
+/// Trust is a precondition for a session, not a filter on what one loads.
+#[test]
+fn a_session_cannot_open_an_untrusted_workspace() {
+    let _lock = env_lock();
+    let home = mock_home("rpc-untrusted", 1);
+    let mut rpc = Rpc::spawn(&home, &["--no-extensions"]);
+    let dir = std::env::temp_dir().join(format!("e-rpc-refused-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let created = rpc.call(
+        "c",
+        "session.create",
+        json!({"cwd": dir, "model": "mock/test"}),
+    );
+    let error = created["error"].as_str().expect("refused");
+    assert!(error.contains("must be trusted to run e"), "{error}");
+    assert!(error.contains("e trust"), "{error}");
+    assert!(rpc.finish().success());
 }
 
 #[test]

@@ -27,6 +27,11 @@ fn mock_home(label: &str, port: u16) -> Home {
 }
 
 fn run(home: &Home, args: &[&str], stdin: Option<&str>) -> std::process::Output {
+    // Trust is a precondition for a run, and this test home starts empty: the
+    // launch directory is trusted here the way a developer's checkout is in
+    // their own home. `cli::print_mode_refuses_an_untrusted_workspace` covers
+    // the refusal.
+    e::core::config::trust::set(&std::env::current_dir().unwrap(), true).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
         .args(["--no-extensions", "--no-save"])
         .args(args)
@@ -134,6 +139,9 @@ fn print_mode_tells_extensions_there_is_no_ui() {
     let _lock = env_lock();
     let (port, _server) = serve_sse(&[OK_STREAM]);
     let home = mock_home("print-headless", port);
+    // This test spawns e itself rather than through `run`, and trust is a
+    // precondition for the turn it is about.
+    e::core::config::trust::set(&std::env::current_dir().unwrap(), true).unwrap();
     let ext = home.dir.join("extensions");
     std::fs::create_dir_all(&ext).unwrap();
     let path = ext.join("asker.sh");

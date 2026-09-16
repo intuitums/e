@@ -48,5 +48,6 @@ extract a module, not a crate.
 - Packages are data: git repositories shaped like `~/.e/`, cloned by the
   user's own `git` on `e install` and read by the same loaders as the home.
   Startup reads disk only; nothing a package carries runs at install time.
-- Trust gates repository-provided context. It is not an execution sandbox.
+- Trust gates whether e runs in a workspace at all, and with it the
+  repository-provided context. It is not an execution sandbox.
   The complete threat model is in [../SECURITY.md](../SECURITY.md).

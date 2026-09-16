@@ -1,13 +1,23 @@
 # SDK
 
-The `e-sdk` package (`sdk/`) is e's coding agent as a Rust library: create a
+The SDK package (`sdk/`, published as `intuitums-e-sdk`) is e's coding agent as a Rust library: create a
 session against a working directory, prompt it, read the core's ordered
 event stream (extension notices fill its gaps), get a reply. It links the same core the terminal frontend drives —
 the built-in tools, skills and AGENTS.md context, automatic compaction,
 on-disk session logs, extensions — without a terminal.
 
-Until the first release declares its semantic-versioning policy, the
-surface is unstable (see [compatibility.md](compatibility.md)).
+```sh
+cargo add intuitums-e-sdk
+```
+
+The SDK versions itself. Its crate is `intuitums-e-sdk`, mirroring the npm
+naming (`@intuitums/e` → `intuitums-e`), since bare `e` is taken on crates.io;
+and it follows semantic versioning from its first published release: before 1.0,
+a release that changes the documented API without a compatible path moves the
+minor version and names the change in the changelog. It accepts any 0.x of the
+application crate it links, so an SDK release never waits for a binary release,
+and the application's library target is not itself a stable API
+([compatibility.md](compatibility.md)).
 
 ## Why a separate package
 
@@ -19,9 +29,9 @@ visibility.
 ## Building
 
 ```sh
-cargo build -p e-sdk
-cargo test -p e-sdk
-cargo run -p e-sdk --example ask -- "what does this repository do"
+cargo build -p intuitums-e-sdk
+cargo test -p intuitums-e-sdk
+cargo run -p intuitums-e-sdk --example ask -- "what does this repository do"
 ```
 
 The package is a member of the root workspace, so `./x check` and `./x test`

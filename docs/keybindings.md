@@ -106,7 +106,8 @@ Apply instantly with `/reload` (or after closing `/settings`).
 Ctrl+C works in every panel. The first press cancels active work and sign-in,
 clears the draft and any held launch prompt, closes trust and queue navigation,
 and arms exit. Press it again within 1.5 seconds to quit.
-Quitting at the trust question does not record a trust decision.
+Quitting at the trust question does not record a trust decision, and neither
+does its last row: declining exits, and the next launch asks again.
 
 Long trust questions and choices wrap. If they exceed the terminal height,
 PgUp/PgDn scroll the text without changing the choice; Up/Down change the choice

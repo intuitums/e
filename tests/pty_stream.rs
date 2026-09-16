@@ -204,6 +204,63 @@ fn tool_completion_after_resize_keeps_the_final_reply() {
     );
 }
 
+/// The trust panel's last row exits: e runs only in a trusted workspace, and a
+/// decline records nothing, so the next launch asks again.
+#[test]
+fn declining_the_trust_panel_exits_without_recording_a_decision() {
+    let _lock = env_lock();
+    common::clear_env_keys();
+    let home = Home::new("pty-trust-decline");
+    home.write(
+        "models.json",
+        r#"{"providers":{"mock":{"base_url":"http://127.0.0.1:1","catalog":"none","models":["audit"]}}}"#,
+    );
+    home.auth(r#"{"mock":{"key":"synthetic"}}"#);
+    home.write("settings.json", r#"{"auto_update":"off"}"#);
+    let workspace = home.dir.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    let capture = home.dir.join("decline.raw");
+    let output = Command::new("python3")
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/ptycap.py"))
+        .arg(&capture)
+        .args(["100", "30", "0.2", "0.7"])
+        .arg(env!("CARGO_BIN_EXE_e"))
+        .args([
+            "--no-save",
+            "--no-extensions",
+            "--no-tools",
+            "--model",
+            "mock/audit",
+        ])
+        .current_dir(&workspace)
+        .env("E_HOME", &home.dir)
+        // Down, Down: the last row, which the panel labels "No, exit".
+        .env("CAP_PROMPT", "\u{1b}[B\u{1b}[B")
+        .env("CAP_EXIT_WAIT", "2")
+        .env_remove("CAP_EXIT")
+        .env_remove("CAP_WAIT_FOR")
+        .env_remove("CAP_RESIZE_AFTER")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&std::fs::read(&capture).unwrap()).into_owned();
+    assert!(text.contains("No, exit"), "the panel never offered exit");
+    assert!(
+        text.contains("must be trusted"),
+        "the refusal was not shown: {text}"
+    );
+    let store = std::fs::read_to_string(home.dir.join("trust.json")).unwrap_or_default();
+    assert!(
+        !store.contains(workspace.to_str().unwrap()),
+        "declining recorded {store}"
+    );
+}
+
 /// The global exit chord must reach the app even while a panel owns input.
 #[test]
 fn ctrl_c_exits_modal_panels_without_recording_trust() {

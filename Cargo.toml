@@ -1,12 +1,23 @@
 [package]
-name = "e"
-# The user-facing version, kept in sync with `VERSION` in src/lib.rs —
-# scripts/release-check.sh requires both to match the release tag.
+# The crates.io package name: `e` is taken there, so the application carries the
+# org prefix the npm packages already use (`@intuitums/e` → `intuitums-e`).
+# The library and the binary are still `e` (see [lib] below), so `use e::…` and
+# `e --version` are unchanged.
+name = "intuitums-e"
+# The application's version is the release version: the tag, `e --version`, the
+# npm packages, the Homebrew formula, and the install channel all come from it.
+# The SDK and the Slack channel version themselves independently.
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.98"
 license = "MIT"
-description = "A TUI for coding agents"
+description = "A small, fast coding agent: terminal app, headless session server, and the library behind the SDK"
+documentation = "https://e.intuitum.sh/docs"
+homepage = "https://e.intuitum.sh"
+repository = "https://github.com/intuitums/e"
+readme = "README.md"
+keywords = ["agent", "coding-agent", "cli", "llm", "tui"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lib]
 name = "e"

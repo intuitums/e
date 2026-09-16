@@ -61,6 +61,21 @@ case "$os" in
   *) echo "unsupported platform: $os" >&2; exit 1 ;;
 esac
 
+# The Linux binaries are linked against the glibc of their build image, so a
+# system below it cannot run them at all. Refuse here, where the reason is
+# nameable, instead of letting the linker fail after the download. The floor is
+# overridable so the refusal itself is testable on a compliant host.
+if [ "$os" = Linux ]; then
+  required=${E_INSTALL_GLIBC:-2.39}
+  present=$(ldd --version 2>/dev/null | head -1 | sed -n 's/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')
+  if [ -n "$present" ] && [ "$(printf '%s\n%s\n' "$required" "$present" | sort -V | head -1)" != "$required" ]; then
+    echo "e's Linux binaries need glibc $required or newer; this system has $present." >&2
+    echo 'Ubuntu 24.04+, Debian 13+, Fedora 40+, and RHEL 10+ have it. Otherwise run the published image,' >&2
+    echo 'which carries its own runtime: docker run --rm --entrypoint e ghcr.io/intuitums/e-slack:latest --version' >&2
+    exit 1
+  fi
+fi
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 # E_RELEASE_BASE is an internal release-smoke seam: production installs leave

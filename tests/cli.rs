@@ -3,6 +3,8 @@ use std::io::Write as _;
 use std::io::{BufRead as _, Read as _};
 use std::process::{Command, Stdio};
 
+mod common;
+
 #[cfg(unix)]
 fn wait_for_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -84,14 +86,13 @@ fn rpc_stops_cleanly_on_an_oversized_request_line() {
 #[cfg(unix)]
 #[test]
 fn rpc_sigterm_exits_while_waiting_for_input() {
-    let home = std::env::temp_dir().join(format!(
-        "e-cli-rpc-sigterm-{}-{}",
-        std::process::id(),
-        uuid::Uuid::now_v7()
-    ));
+    let _guard = common::env_lock();
+    let home = common::Home::new("cli-rpc-sigterm");
+    // A version-1 line runs in the process cwd, which has to be trusted.
+    e::core::config::trust::set(&std::env::current_dir().unwrap(), true).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
         .args(["--no-extensions", "rpc"])
-        .env("E_HOME", &home)
+        .env("E_HOME", &home.dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -121,19 +122,17 @@ fn rpc_sigterm_exits_while_waiting_for_input() {
         .read_to_string(&mut stderr)
         .unwrap();
     assert!(stderr.is_empty(), "stderr: {stderr}");
-    let _ = std::fs::remove_dir_all(home);
 }
 
 #[test]
 fn rpc_keeps_one_response_per_input_line_after_a_bad_request() {
-    let home = std::env::temp_dir().join(format!(
-        "e-cli-rpc-{}-{}",
-        std::process::id(),
-        uuid::Uuid::now_v7()
-    ));
+    let _guard = common::env_lock();
+    let home = common::Home::new("cli-rpc-lines");
+    // A version-1 line runs in the process cwd, which has to be trusted.
+    e::core::config::trust::set(&std::env::current_dir().unwrap(), true).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
         .args(["--no-extensions", "rpc"])
-        .env("E_HOME", &home)
+        .env("E_HOME", &home.dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -167,8 +166,6 @@ fn rpc_keeps_one_response_per_input_line_after_a_bad_request() {
         .contains("missing field `prompt`"));
     assert_eq!(values[2]["id"], 2);
     assert_eq!(values[2]["error"], "prompt is empty");
-
-    let _ = std::fs::remove_dir_all(home);
 }
 
 #[test]
@@ -331,4 +328,43 @@ done
         "stderr: {stderr}"
     );
     let _ = std::fs::remove_dir_all(home);
+}
+
+/// An unattended session cannot answer the trust panel, so the decision has to
+/// be recordable from the command line — and the loader has to honour it.
+#[test]
+fn trust_records_a_decision_the_workspace_loader_honours() {
+    let _guard = common::env_lock();
+    let home = common::Home::new("cli-trust");
+    let workspace = std::env::temp_dir().join(format!(
+        "e-cli-trust-ws-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_e"))
+            .args(args)
+            .env("E_HOME", &home.dir)
+            .current_dir(&workspace)
+            .output()
+            .unwrap()
+    };
+    assert!(!e::core::config::trust::trusted(&workspace));
+
+    // No argument names the current directory, the way `e packages` does.
+    let trusted = run(&["trust"]);
+    assert!(trusted.status.success());
+    assert!(String::from_utf8_lossy(&trusted.stdout).contains("trusted"));
+    assert!(e::core::config::trust::trusted(&workspace));
+
+    let declined = run(&["untrust", workspace.to_str().unwrap()]);
+    assert!(declined.status.success());
+    assert!(!e::core::config::trust::trusted(&workspace));
+
+    let bad_flag = run(&["trust", "--nowhere"]);
+    assert_eq!(bad_flag.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&bad_flag.stderr).contains("usage: e trust [dir]"));
+
+    let _ = std::fs::remove_dir_all(&workspace);
 }

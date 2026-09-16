@@ -110,10 +110,10 @@ confirmed deletion but fail closed on other metadata errors.
 
 The Cargo library target lets the binary, the integration tests, and the
 `sdk/` package share code. Its public Rust items are not a stable third-party
-API in themselves. The supported Rust SDK is the separate `e-sdk` package in
-`sdk/` (see [sdk.md](sdk.md)): the
-API it consumes becomes its documented contract, and its first release
-declares the semantic-versioning policy. Until then its surface is unstable.
+API in themselves. The supported Rust SDK is the separate `intuitums-e-sdk` crate in
+`sdk/` (see [sdk.md](sdk.md)): the API it consumes is its documented contract,
+and it follows semantic versioning from its first published release — before
+1.0, a breaking change moves the minor version and is named in the changelog.
 
 ## Change process
 

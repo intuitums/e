@@ -26,6 +26,39 @@ function fixture(t) {
     return { root, integrity, calls, npm };
 }
 
+test("a narrowed run only publishes the packages it names", async (t) => {
+    const f = fixture(t);
+    mkdirSync(join(f.root, "slack"));
+    writeFileSync(
+        join(f.root, "slack/package.json"),
+        JSON.stringify({ name: "@intuitums/e-slack", version: "1.2.3" }),
+    );
+    writeFileSync(join(f.root, "slack.tgz"), "slack tarball");
+    const integrity = {};
+    for (const [name, bytes] of [
+        ["@intuitums/e", "tarball"],
+        ["@intuitums/e-slack", "slack tarball"],
+    ])
+        integrity[name] =
+            "sha512-" + createHash("sha512").update(bytes).digest("base64");
+    const publish = async (options) => {
+        const packed = [];
+        await publishPackages(f.root, {
+            ...options,
+            npm: (command, path) => {
+                if (command === "pack") packed.push(path.split("/").pop());
+                return JSON.stringify([
+                    { filename: path.endsWith("slack") ? "slack.tgz" : "e.tgz" },
+                ]);
+            },
+            lookup: async (name) => ({ dist: { integrity: integrity[name] } }),
+        });
+        return packed;
+    };
+    assert.deepEqual(await publish({ exclude: ["slack"] }), ["e"]);
+    assert.deepEqual(await publish({ only: ["slack"] }), ["slack"]);
+});
+
 test("retry accepts the already-published tarball without publishing twice", async (t) => {
     const f = fixture(t);
     await publishPackages(f.root, {

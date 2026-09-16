@@ -106,7 +106,9 @@ shutdown           {}                            → {}               then the p
 - `cwd` is the working directory, absolute or relative to the process's;
   it must exist. Each session may use a different one — a Slack channel per
   repository. Trust for that directory's `AGENTS.md` follows
-  [instructions.md](instructions.md) as it does in the terminal.
+  [instructions.md](instructions.md) as it does in the terminal, so a session
+  refuses an untrusted directory: a caller with no terminal records the
+  decision first with `e trust <dir>`.
 - `model` and `effort` override process defaults from `-m` / `--ef`.
 - `tools` is a positive built-in allowlist; `tool_mode` is `all` or `none`.
   Both may narrow what the process allows (`--no-tools`), never widen it.

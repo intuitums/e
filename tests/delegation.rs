@@ -25,6 +25,9 @@ mod common;
 use common::{env_lock, request_json, serve_sse, Home};
 
 fn run_rpc(home: &Home, request_line: &str) -> Vec<u8> {
+    // A version-1 line runs in the process cwd, which has to be trusted; this
+    // test home starts empty, so the launch directory is trusted here.
+    e::core::config::trust::set(&std::env::current_dir().unwrap(), true).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
         .args(["--no-extensions", "rpc"])
         .env("E_HOME", &home.dir)
@@ -190,6 +193,9 @@ fn rpc_sigterm_kills_delegated_bash_descendants() {
         uuid::Uuid::now_v7()
     ));
     std::fs::create_dir_all(&workspace).unwrap();
+    // A session refuses an untrusted workspace, and this one is only a place for
+    // the delegated bash command to write its marker.
+    e::core::config::trust::set(&workspace, true).unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_e"))
         .args(["--no-extensions", "rpc"])

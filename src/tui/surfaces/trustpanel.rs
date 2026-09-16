@@ -1,7 +1,8 @@
 //! The first-visit trust panel — three-space prose and a `› ` caret on the
 //! selected choice, asking whether e may load this directory's own
-//! instructions. Shown once per directory; the answer persists in
-//! the active home's trust.json. When a broader ancestor makes sense (the top-most
+//! instructions. Shown once per directory, because it is the answer e needs
+//! before it will run there; accepting persists in the active home's trust.json.
+//! When a broader ancestor makes sense (the top-most
 //! directory under home that contains the workspace — `~/code` for
 //! `~/code/clones/e-1`), a middle choice trusts it wholesale, covering
 //! every workspace inside. Unlike the auth panel's wide value column, the
@@ -32,7 +33,8 @@ impl TrustStage {
     }
 
     /// The selector rows, top to bottom: this directory, the broader
-    /// ancestor (when offered), decline.
+    /// ancestor (when offered), decline. Declining leaves the workspace
+    /// untrusted, and e does not run there.
     pub fn choices(&self) -> Vec<(String, String)> {
         let mut rows = vec![(
             "Trust this directory".to_string(),
@@ -50,8 +52,8 @@ impl TrustStage {
             ));
         }
         rows.push((
-            "Not now".to_string(),
-            "work here without its instructions".to_string(),
+            "No, exit".to_string(),
+            "e runs only in a trusted workspace".to_string(),
         ));
         rows
     }
@@ -81,7 +83,8 @@ impl TrustStage {
     }
 
     /// What Enter on the current row means: the directory to record and
-    /// whether it is trusted (None = the workspace itself declined).
+    /// whether it is trusted (None = the workspace itself declined). A decline
+    /// records nothing — the caller refuses the run instead.
     pub fn choice(&self) -> (Option<PathBuf>, bool) {
         match (&self.parent, self.selected) {
             (Some(parent), 1) => (Some(parent.clone()), true),

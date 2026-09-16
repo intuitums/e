@@ -788,7 +788,7 @@ fn trust_panel_offers_the_broader_ancestor_between_its_rows() {
     );
     assert!(rows[5].contains("Trust /home/u/code"), "{:?}", rows[5]);
     assert!(rows[5].contains("everything inside it"), "{:?}", rows[5]);
-    assert!(rows[6].contains("Not now"), "{:?}", rows[6]);
+    assert!(rows[6].contains("No, exit"), "{:?}", rows[6]);
     // Selection cycles through all three and wraps.
     stage.step(-1);
     assert_eq!(stage.selected, 2);

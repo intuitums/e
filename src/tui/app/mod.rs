@@ -3256,22 +3256,28 @@ async fn run_scoped(
                                     // so the workspace is covered too.
                                     let (parent, trusted) = stage.choice();
                                     let target = parent.unwrap_or_else(|| app.agent.cwd().to_path_buf());
-                                    match crate::core::config::trust::set(&target, trusted) {
-                                        Err(e) => app.notice(format!("trust: {e}")),
-                                        Ok(()) => {
-                                            app.trust = None;
-                                            if trusted {
+                                    if !trusted {
+                                        // A decline is remembered nowhere: e
+                                        // runs only trusted, so the next
+                                        // launch asks again.
+                                        if let Some(refusal) = crate::core::config::trust::refusal(&target) {
+                                            app.notice(refusal);
+                                        }
+                                        app.should_quit = true;
+                                    } else {
+                                        match crate::core::config::trust::set(&target, true) {
+                                            Err(e) => app.notice(format!("trust: {e}")),
+                                            Ok(()) => {
+                                                app.trust = None;
                                                 app.install_project_packages();
-                                            } else {
-                                                app.notice("working untrusted — project AGENTS.md and .e skills/prompts ignored (/trust to allow)".into());
-                                            }
-                                            // An open -r picker still owns
-                                            // the launch prompt; submitting
-                                            // it now would start a turn the
-                                            // session pick then refuses.
-                                            if app.menu.is_none() {
-                                                if let Some(initial) = app.pending_initial.take() {
-                                                    app.submit_initial(initial);
+                                                // An open -r picker still owns
+                                                // the launch prompt; submitting
+                                                // it now would start a turn the
+                                                // session pick then refuses.
+                                                if app.menu.is_none() {
+                                                    if let Some(initial) = app.pending_initial.take() {
+                                                        app.submit_initial(initial);
+                                                    }
                                                 }
                                             }
                                         }

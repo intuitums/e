@@ -216,3 +216,16 @@ jobs:
           npm test
       - name: Check the GitHub channel
         run: python3 -m unittest discover -s channels/github -p 'test_*.py'
+
+  container:
+    needs: changes
+    if: needs.changes.outputs.channels == 'true'
+    name: Container
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The image installs the released e and this commit's bot, which is what
+      # an operator gets; nothing else builds it before a server runs it.
+      - name: Build the Slack image
+        run: docker build --tag e-slack channels/slack

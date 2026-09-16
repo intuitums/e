@@ -36,6 +36,8 @@ e install [source]    install a package, or make every listed one current\n  \
 e remove <source>     forget a package and delete its clone\n  \
 e packages            list installed packages\n  \
 e packages init <dir> start a package to publish\n  \
+e trust [dir]         trust a workspace's AGENTS.md, skills, and prompts\n  \
+e untrust [dir]       stop loading them for that workspace\n  \
 e auth                show sign-in status\n  \
 e doctor [--no-network]\n                      print paste-safe, local-only runtime diagnostics\n  \
 e providers           list provider support and sign-in state\n  \
@@ -252,6 +254,56 @@ async fn package_command(sub: &str, rest: &[String]) -> i32 {
     }
 }
 
+/// `e trust [dir]` / `e untrust [dir]`: record a workspace's trust decision
+/// without a terminal. An unattended session — a channel bot, a CI job — cannot
+/// answer the trust panel, so without this the directory silently keeps loading
+/// none of its own AGENTS.md, skills, prompts, or packages. Returns the exit
+/// status.
+fn trust_command(sub: &str, rest: &[String]) -> i32 {
+    let trusted = sub == "trust";
+    let requested = match rest {
+        [] => match std::env::current_dir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                eprintln!("cannot read the current directory: {error}");
+                return 1;
+            }
+        },
+        [dir] => std::path::PathBuf::from(dir),
+        _ => {
+            eprintln!("usage: e {sub} [dir]");
+            return 2;
+        }
+    };
+    let dir = match requested.canonicalize() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("cannot use {}: {error}", requested.display());
+            return 1;
+        }
+    };
+    match e::core::config::trust::set(&dir, trusted) {
+        Ok(()) if trusted => {
+            println!(
+                "trusted {} — its AGENTS.md, skills, and prompts load from now on",
+                dir.display()
+            );
+            0
+        }
+        Ok(()) => {
+            println!(
+                "not trusted {} — its AGENTS.md, skills, and prompts stop loading",
+                dir.display()
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("cannot record the trust decision: {error}");
+            1
+        }
+    }
+}
+
 /// Append the subcommand's usage line when the failing argv names one, so
 /// `e doctor --unknown` points at `e doctor` instead of generic help.
 fn with_subcommand_usage(message: String, args: &[String]) -> String {
@@ -286,7 +338,7 @@ async fn main() -> std::io::Result<()> {
     let (jobs_tx, jobs_rx) = tokio::sync::mpsc::channel::<String>(256);
     let diagnostic_requested = matches!(
         cli::leading_subcommand(&args),
-        Some("doctor" | "providers" | "install" | "remove" | "packages")
+        Some("doctor" | "providers" | "install" | "remove" | "packages" | "trust" | "untrust")
     );
     // Extensions' own requests (`ui.*`, `session.*`) travel this channel
     // to whoever answers them: the terminal frontend, or `e rpc`, which
@@ -328,14 +380,19 @@ async fn main() -> std::io::Result<()> {
     if let Ok(diagnostic_options) = cli::parse(args.clone(), &[]) {
         let diagnostic_args = &diagnostic_options.positional;
         let sub = leading_positional_subcommand(&diagnostic_options);
-        // Package commands are one-shots on the same extension-free footing:
-        // they change what the next session loads, never the current one.
-        if let Some(sub @ ("install" | "remove" | "packages")) = sub {
+        // Package and trust commands are one-shots on the same extension-free
+        // footing: they change what the next session loads, never the current
+        // one.
+        if let Some(sub @ ("install" | "remove" | "packages" | "trust" | "untrust")) = sub {
             if diagnostic_options.json {
                 eprintln!("--json is supported by `e doctor` and `e providers`");
                 std::process::exit(2);
             }
-            let status = package_command(sub, &diagnostic_args[1..]).await;
+            let rest = &diagnostic_args[1..];
+            let status = match sub {
+                "trust" | "untrust" => trust_command(sub, rest),
+                _ => package_command(sub, rest).await,
+            };
             if status != 0 {
                 std::process::exit(status);
             }
@@ -476,6 +533,15 @@ async fn main() -> std::io::Result<()> {
         return e::rpc::serve(host, &options, requests_rx, jobs_rx).await;
     }
     if options.print {
+        // An unattended run has no dialog to answer, so an untrusted workspace
+        // stops it here instead of quietly working without its instructions.
+        if let Some(refusal) =
+            e::core::config::trust::refusal(&std::env::current_dir().unwrap_or_default())
+        {
+            eprintln!("error: {refusal}");
+            host.shutdown().await;
+            std::process::exit(1);
+        }
         let status = print_turn(host.clone(), &options, args).await;
         e::core::tools::kill_tracked_processes();
         host.shutdown().await;
@@ -571,6 +637,16 @@ async fn main() -> std::io::Result<()> {
         eprintln!("--image requires an initial prompt");
         host.shutdown().await;
         std::process::exit(2);
+    }
+    // The trust panel answers a workspace nobody has decided about yet; a
+    // recorded `false` is already an answer, and e only runs trusted.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if e::core::config::trust::status(&cwd) == Some(false) {
+        if let Some(refusal) = e::core::config::trust::refusal(&cwd) {
+            eprintln!("error: {refusal}");
+        }
+        host.shutdown().await;
+        std::process::exit(1);
     }
     let images = match cli::load_images(&options, &selected) {
         Ok(images) => images,

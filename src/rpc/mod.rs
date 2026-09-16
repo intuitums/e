@@ -472,6 +472,11 @@ impl Server {
     fn one_shot(&mut self, id: Value, value: Value) -> Result<(), String> {
         let request: OneShot =
             serde_json::from_value(value).map_err(|error| format!("invalid request: {error}"))?;
+        if let Some(refusal) =
+            crate::core::config::trust::refusal(&std::env::current_dir().unwrap_or_default())
+        {
+            return Err(refusal);
+        }
         check_allowlist(request.tools.as_ref())?;
         let options = one_shot_options(&self.defaults, &request)?;
         if request.prompt.trim().is_empty() {
@@ -514,6 +519,9 @@ impl Server {
         };
         if !cwd.is_dir() {
             return Err(format!("cwd `{}` is not a directory", cwd.display()));
+        }
+        if let Some(refusal) = crate::core::config::trust::refusal(&cwd) {
+            return Err(refusal);
         }
         let mut options = self.defaults.clone();
         if let Some(model) = params.get("model").and_then(Value::as_str) {

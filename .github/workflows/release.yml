@@ -304,7 +304,7 @@ jobs:
     needs: [resolve, publish]
     if: ${{ !cancelled() && (needs.publish.result == 'success' || needs.resolve.outputs.mode == 'retry') }}
     runs-on: ubuntu-latest
-    # Five packages may each need up to twenty minutes for npm processing.
+    # Six packages may each need up to twenty minutes for npm processing.
     timeout-minutes: 110
     outputs:
       failure: ${{ steps.packages.outputs.failure }}
@@ -343,7 +343,18 @@ jobs:
         env:
           # Remove this secret after all five packages trust this workflow.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
-        run: node scripts/packaging/publish-npm.mjs dist
+        run: node scripts/packaging/publish-npm.mjs dist --exclude=slack
+      - name: Publish the Slack channel
+        # `@intuitums/e-slack` ships with the release but is not part of it: it is
+        # the reference bot, so a registry hiccup here must not fail the release,
+        # stop the install channel advancing, or block another package's retry.
+        continue-on-error: true
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          node scripts/packaging/publish-npm.mjs dist --only=slack
+          npm view "@intuitums/e-slack@$VERSION" version | grep -Fx "$VERSION"
       - name: Keep preview packages off latest
         id: cleanup
         if: needs.resolve.outputs.channel != 'stable'
@@ -368,6 +379,98 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/npm-smoke" "@intuitums/e@$VERSION"
           "$RUNNER_TEMP/npm-smoke/node_modules/.bin/$COMMAND" --version | grep -Fx "e $VERSION"
+
+  container:
+    name: Container image
+    # The image installs the release it belongs to, so it waits for one. Dev
+    # builds are npm-only and the installer has no dev channel.
+    needs: [resolve, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.resolve.outputs.channel != 'dev' }}
+    # A registry hiccup must not fail the release, the way the channel package's
+    # publishing step does not. The deployment report still records the outcome.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: channels/slack
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            E_CHANNEL=${{ needs.resolve.outputs.channel }}
+            E_VERSION=${{ needs.resolve.outputs.version }}
+          tags: |
+            ghcr.io/intuitums/e-slack:${{ needs.resolve.outputs.channel == 'stable' && 'latest' || needs.resolve.outputs.channel }}
+            ghcr.io/intuitums/e-slack:${{ needs.resolve.outputs.version }}
+
+  crates:
+    name: crates.io
+    # The application's version is the release version, so previews stay on npm.
+    # It publishes first: the SDK's manifest depends on it by version.
+    needs: [resolve, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.resolve.outputs.channel == 'stable' }}
+    # Like the npm and image publications, a registry hiccup must not fail the
+    # release; the deployment report still records the outcome.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - name: Publish the crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          test -n "$CARGO_REGISTRY_TOKEN" || { echo 'Configure CARGO_REGISTRY_TOKEN to publish the crates.'; exit 1; }
+
+          # The SDK versions itself; only the application follows the release.
+          SDK_VERSION=$(python3 -c "import tomllib;print(tomllib.load(open('sdk/Cargo.toml','rb'))['package']['version'])")
+
+          published() {
+            curl -fsS -o /dev/null "https://crates.io/api/v1/crates/$1/$2"
+          }
+          # crates.io serves a new version to the index asynchronously, and the
+          # SDK cannot resolve its dependency until the application is visible.
+          await_index() {
+            for _ in $(seq 1 60); do
+              published "$1" "$2" && return 0
+              sleep 10
+            done
+            return 1
+          }
+
+          # A retry after a partial publish finds the version already there.
+          if published intuitums-e "$VERSION"; then
+            echo "intuitums-e $VERSION is already published"
+          else
+            cargo publish --locked -p intuitums-e
+            await_index intuitums-e "$VERSION" || { echo 'intuitums-e never reached the index'; exit 1; }
+          fi
+
+          if published intuitums-e-sdk "$SDK_VERSION"; then
+            echo "intuitums-e-sdk $SDK_VERSION is already published"
+          else
+            # Not --locked: packaging the SDK resolves its dependency from the
+            # registry rather than from this workspace.
+            cargo publish -p intuitums-e-sdk
+          fi
 
   homebrew:
     name: Homebrew tap
@@ -437,7 +540,7 @@ jobs:
 
   deployment:
     name: Report release deployment
-    needs: [resolve, qualify, create, build, publish, npm, homebrew, channel, comment-building, comment-publishing]
+    needs: [resolve, qualify, create, build, publish, npm, homebrew, container, crates, channel, comment-building, comment-publishing]
     if: ${{ always() && needs.resolve.result == 'success' && needs.resolve.outputs.mode != 'skip' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -25,7 +25,24 @@ once. Nothing here is compiled into e.
    and socket mode need no request URL.
 2. Install e on the machine, sign in to a provider (`e auth` or a key in
    `~/.e/auth.json`), and clone the repository the bot should work in.
-3. Copy `.env.example` to `.env` and fill it in.
+3. Trust the checkout (`e trust`) so the repository's own `AGENTS.md`, skills,
+   and prompts load: the bot has no terminal to answer the trust panel with.
+4. Copy `.env.example` to `.env` and fill it in.
+
+## Run it
+
+`@intuitums/e-slack` ships with e's releases and versions itself; the release
+supplies the npm tag (`latest`, `beta`, or `dev`). It only needs a checkout to work in (`E_CWD`):
+
+```sh
+npm install -g @intuitums/e-slack
+set -a; . ./.env; set +a
+e-slack
+```
+
+`npx @intuitums/e-slack` does the same without a global install.
+
+## Develop
 
 ```sh
 npm install
@@ -34,6 +51,37 @@ npm test
 set -a; . ./.env; set +a
 npm start
 ```
+
+## Run it on a server
+
+Every release publishes the bot as `ghcr.io/intuitums/e-slack` (`:latest` on
+the stable channel, `:beta` on the beta one), so the host needs neither Node
+nor a checkout of e:
+
+```sh
+docker volume create e-slack-home
+
+# Once: trust the checkout and sign in. e's home is the volume, so both stick.
+docker run --rm -it --user "$(id -u):$(id -g)" \
+  -v e-slack-home:/home/e -v "$PWD:/work" --entrypoint e \
+  ghcr.io/intuitums/e-slack:latest trust
+docker run --rm -it --user "$(id -u):$(id -g)" \
+  -v e-slack-home:/home/e --entrypoint e ghcr.io/intuitums/e-slack:latest   # then /login
+
+docker run -d --restart unless-stopped --name e-slack \
+  --user "$(id -u):$(id -g)" --env-file .env -e E_CWD=/work \
+  -v e-slack-home:/home/e -v "$PWD:/work" ghcr.io/intuitums/e-slack:latest
+```
+
+`Dockerfile` builds that same image from a checkout — for a patch of your own,
+or an architecture the release does not carry. It takes `--build-arg
+E_VERSION=0.1.0 --build-arg E_CHANNEL=stable` to pin the release it carries; the
+base is Debian 13 because the released Linux binaries link against glibc 2.39.
+
+`--user` is what keeps the files the agent writes in the checkout owned by you
+rather than root. `-v "$PWD:/work"` must be the repository the bot should work
+in. Instead of signing in, a provider key in the environment works
+(`ANTHROPIC_API_KEY`, and the other names in the registry's `key_env` fields).
 
 ## What it does
 

@@ -22,6 +22,16 @@ async function lookupRegistry(name, version) {
         throw new Error(`npm lookup failed: HTTP ${response.status}`);
     return response.json();
 }
+/** Which packages a run covers: `--only=a,b` and `--exclude=c` narrow the scan. */
+function selection(argv) {
+    const values = (name) =>
+        argv
+            .filter((arg) => arg.startsWith(`${name}=`))
+            .flatMap((arg) => arg.slice(name.length + 1).split(","))
+            .filter(Boolean);
+    return { only: values("--only"), exclude: values("--exclude") };
+}
+
 /** Publish exact packages once; injectable registry/CLI calls keep retry tests offline. */
 export async function publishPackages(
     root,
@@ -30,11 +40,18 @@ export async function publishPackages(
         lookup = lookupRegistry,
         sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         availabilityAttempts = 80, // Twenty minutes per package at fifteen-second intervals.
+        only = [],
+        exclude = [],
     } = {},
 ) {
     const folders = readdirSync(root, { withFileTypes: true })
         .filter((entry) => entry.isDirectory())
         .map((entry) => entry.name)
+        .filter(
+            (name) =>
+                (only.length === 0 || only.includes(name)) &&
+                !exclude.includes(name),
+        )
         .sort((a, b) => (a === "e" ? 1 : b === "e" ? -1 : a.localeCompare(b)));
     for (const folder of folders) {
         const path = resolve(root, folder);
@@ -93,7 +110,10 @@ if (
     resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
     try {
-        await publishPackages(resolve(process.argv[2]));
+        await publishPackages(
+            resolve(process.argv[2]),
+            selection(process.argv.slice(2)),
+        );
     } catch (error) {
         const message = String(error.stderr ?? error.message);
         const reason = message.includes("npm processing timed out") ? "processing"
