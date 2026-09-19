@@ -1,0 +1,27 @@
+{
+  "version": "0.0.2",
+  "license": "MIT",
+  "homepage": "https://e.intuitum.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arocomputer/e.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "latest"
+  },
+  "name": "@arocomputer/e",
+  "description": "A small, extensible coding agent for your terminal",
+  "bin": {
+    "e": "bin/e"
+  },
+  "files": [
+    "bin"
+  ],
+  "optionalDependencies": {
+    "@arocomputer/e-darwin-arm64": "0.0.2",
+    "@arocomputer/e-darwin-x64": "0.0.2",
+    "@arocomputer/e-linux-arm64": "0.0.2",
+    "@arocomputer/e-linux-x64": "0.0.2"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "name": "@arocomputer/e-slack",
+  "version": "0.0.2",
+  "description": "A Slack bot that runs e: one thread, one session, over `e rpc`",
+  "type": "module",
+  "license": "MIT",
+  "homepage": "https://e.intuitum.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arocomputer/e.git",
+    "directory": "channels/slack"
+  },
+  "bugs": "https://github.com/arocomputer/e/issues",
+  "keywords": [
+    "slack",
+    "slack-bot",
+    "coding-agent",
+    "agent"
+  ],
+  "bin": {
+    "e-slack": "bin/e-slack.js"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "files": [
+    "bin",
+    "src",
+    "!src/*.test.ts",
+    ".env.example",
+    "manifest.json"
+  ],
+  "dependencies": {
+    "@slack/bolt": "^4.2.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -168,16 +168,16 @@ builds require an explicit request.
 Homebrew uses `HOMEBREW_TAP_TOKEN`, a fine-grained token limited to Contents
 read/write on `arocomputer/homebrew-tap`. Deploy keys are disabled by repository
 policy. Renew the token before its expiry.
-npm uses trusted publishing. Configure each package for GitHub organization
-`arocomputer`, repository `e`, workflow `release.yml`, with direct publishing
-allowed. Use Node 24 with npm 11.5.1 or newer. The first publication needs an npm
-account authorized for the scope. For that first release, store a publishing token
-with permission to create packages under `@arocomputer` as `NPM_BOOTSTRAP_TOKEN`
-in `arocomputer/e`. Unattended publishing requires a token that can bypass 2FA.
-The npm job uses it as a fallback until trusted publishing is configured.
+npm uses trusted publishing (OIDC); no npm token is stored. Each of the six
+packages (`e` and its four platform packages, plus `e-slack`) trusts the GitHub
+organization `arocomputer`, repository `e`, workflow `release.yml`, with direct
+publishing allowed. Use Node 24 with npm 11.5.1 or newer.
 
-After the first publication, use an interactive npm login with 2FA enabled and
-npm 11.15.0 or newer to configure the application packages and the Slack bot:
+Trusted publishing can only be attached to a package that already exists, so the
+first publication under a new scope needs another auth method — an interactive
+`npm login` with 2FA, or a temporary publishing token. After that first publish,
+configure the trust relationships with an interactive npm login (2FA enabled,
+npm 11.15.0 or newer):
 
 ```sh
 for package in e e-darwin-arm64 e-darwin-x64 e-linux-arm64 e-linux-x64 e-slack; do
@@ -189,9 +189,8 @@ done
 
 Complete npm's browser authentication when prompted. An API token that bypasses
 2FA cannot configure trust relationships. Verify each package with `npm trust
-list @arocomputer/<package>`, then delete `NPM_BOOTSTRAP_TOKEN` from GitHub.
-Subsequent releases need no npm token. The token in 1Password can remain available
-for separately authorized manual publishing.
+list @arocomputer/<package>`. From then on the release workflow authenticates
+with OIDC and no token is needed.
 
 The website renders this repository's `docs/guides/`, so
 `.github/workflows/docs.yml` starts arocomputer/web's Deploy workflow whenever a

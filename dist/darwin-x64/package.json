@@ -1,0 +1,24 @@
+{
+  "version": "0.0.2",
+  "license": "MIT",
+  "homepage": "https://e.intuitum.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arocomputer/e.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "latest"
+  },
+  "name": "@arocomputer/e-darwin-x64",
+  "description": "e binary for darwin-x64",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin"
+  ]
+}

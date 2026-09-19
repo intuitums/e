@@ -350,16 +350,11 @@ jobs:
           python3 scripts/packaging/prepare.py "$TAG" "$RUNNER_TEMP/npm-assets" dist
       - name: Publish and verify npm packages
         id: packages
-        env:
-          # Remove this secret after all application packages and the Slack bot trust this workflow.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
         run: node scripts/packaging/publish-npm.mjs dist --exclude=slack
       - name: Publish the Slack channel
         # The bot versions itself and publishes with production only. A bot publication
         # failure does not block the application's installers or their retries.
         continue-on-error: true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
         run: node scripts/packaging/publish-npm.mjs dist --only=slack
 
       - name: Verify registry installation
